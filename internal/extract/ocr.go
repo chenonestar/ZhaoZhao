@@ -179,6 +179,14 @@ func startOCR(c OCRConfig) (*ocrProc, error) {
 	return p, nil
 }
 
+// ShutdownOCR 结束常驻的 OCR 子进程。解析子进程退出前调用，避免留下孤儿进程。
+func ShutdownOCR() {
+	ocrMu.Lock()
+	defer ocrMu.Unlock()
+	killOCR(ocrCur)
+	ocrCur = nil
+}
+
 func killOCR(p *ocrProc) {
 	if p == nil {
 		return

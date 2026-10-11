@@ -83,8 +83,8 @@ try {
 }
 catch { $fail.Add("异常: $_") }
 finally {
-    if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
-    Start-Sleep -Seconds 1
+    if ($proc -and -not $proc.HasExited) { taskkill /T /F /PID $proc.Id | Out-Null }   # 连同解析子进程和 OCR 子进程
+    Start-Sleep -Seconds 2
     $log = Join-Path $data "zhaozhao.log"
     if (Test-Path $log) { Write-Host "== 日志（末尾 40 行）"; Get-Content $log -Tail 40 }
 }
