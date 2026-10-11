@@ -9,8 +9,12 @@ Windows 单机全文检索工具：对本机硬盘、移动硬盘和网络映射
 - 所有数据只存本机，不联网。
 
 > **当前状态**：核心引擎、界面、后台任务、OCR、容器、卷管理已实现并测试（见下方「需求覆盖」）。
-> 开发环境是 Linux，**Windows 专有代码（托盘、全局快捷键、`ReadDirectoryChangesW` 监听、卷序列号/GUID 识别、
-> 电池/用户活动检测）已通过 `GOOS=windows` 交叉编译，但没有在真实 Windows 上运行过**，请在 Windows 上做一轮验收。
+> GitHub Actions 会在 Linux 和 **真实 Windows**（`windows-latest`）上跑完整测试，并在 Windows 上对打包好的完整版做冒烟测试
+> （含中文路径与中文 `TEMP`：老格式转换、图片 OCR、压缩包）。
+> **已在 Windows 上验证**：Windows 目录监听（`ReadDirectoryChangesW`）、卷序列号/GUID 识别、全部单元与集成测试、
+> 完整版运行、安装包编译。
+> **仍未在 Windows 上验证**（CI 没有桌面会话）：托盘图标、全局快捷键、磁盘接入/拔出通知、电池与用户活动检测、
+> 云盘占位文件识别，以及真实移动硬盘/网络盘场景。请在真实桌面上做一轮验收。
 
 ## 架构
 
@@ -85,10 +89,11 @@ iscc packaging\zhaozhao.iss
 
 | 工作流 | 触发 | 内容 |
 |---|---|---|
-| `.github/workflows/ci.yml` | push、PR | 界面类型检查与构建；Linux：`gofmt`、`go vet`、Windows 交叉编译检查、`go test -race`；Linux 集成测试（装 LibreOffice，真实样本 + OCR + 7z）；**Windows：`go vet` 与 `go test`**；通过后打包便携版 zip，可在 Actions 页面的 Artifacts 里下载 |
-| `.github/workflows/release.yml` | 推送 `v*` 标签 | 便携版 zip + Inno Setup 离线安装包，自动创建 GitHub Release |
+| `.github/workflows/ci.yml` | push、PR | 界面类型检查与构建；Linux：`gofmt`、`go vet`、Windows 交叉编译检查、`go test -race`；Linux 集成测试（装 LibreOffice，真实样本 + OCR + 7z）；**Windows：`go vet` 与 `go test`**；通过后打包精简版便携 zip，可在 Actions 页面的 Artifacts 里下载 |
+| `.github/workflows/bundle.yml` | 手动、改动打包文件、被 release 调用 | **完整版**：choco 安装 LibreOffice，下载 RapidOCR-json（简体中文 V4 模型），在真实 Windows 上冒烟测试通过后，产出完整版 zip（约 340 MB）和离线安装包 |
+| `.github/workflows/release.yml` | 推送 `v*` 标签 | 调用完整版构建，并发布完整版 zip、安装包、精简版 zip 到 GitHub Release |
 
-发布版本：`git tag v0.1.0 && git push origin v0.1.0`。安装包和便携版里不含 LibreOffice / OCR 组件（体积大），需要的话按 `components\README.txt` 放入。
+发布版本：`git tag v0.1.0 && git push origin v0.1.0`。**完整版自带 LibreOffice 和 OCR 组件**；精简版（只有主程序）需要按 `components\README.txt` 自行放入。
 
 ### 组件
 
@@ -242,7 +247,7 @@ ZHAOZHAO_SCALE=100000 go test ./internal/search -run TestScale -v -timeout 40m
 - ✅ 解析/转换/OCR 在子进程中运行，超时、崩溃只记失败；SQLite WAL 事务；日志滚动；不联网（也没有检查更新功能）。
 - ✅ 删除索引根/卷时同时删除提取文本；数据目录可通过 `-data` 修改。
 - 🟡 长路径依赖 Go 标准库对 `\\?\` 的自动处理；LibreOffice 子进程用 ASCII 临时副本规避路径问题。
-- ⚠ 安装包：`packaging/zhaozhao.iss`（含卸载时询问是否保留索引）和便携版打包脚本已写好，未在 Windows 上编译验证。
+- ✅ 安装包：`packaging/zhaozhao.iss`（含卸载时询问是否保留索引）在 CI 的 Windows 上编译通过；安装/卸载流程本身未实测。
 
 ## 与需求建议的差异
 
