@@ -9,7 +9,14 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # 手动触发：在 Actions 页面点 Run workflow，填写版本标签（如 v0.1.0）。
+  # 发布时由 GitHub 在所选提交上创建这个标签，不需要本地推送标签。
   workflow_dispatch:
+    inputs:
+      version:
+        description: 发布的版本标签，如 v0.1.0
+        required: true
+        default: v0.1.0
 
 permissions:
   contents: write
@@ -18,7 +25,7 @@ jobs:
   full:
     uses: ./.github/workflows/bundle.yml
     with:
-      version: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+      version: ${{ inputs.version || github.ref_name }}
 
   lite:
     runs-on: ubuntu-latest
@@ -43,17 +50,23 @@ jobs:
           retention-days: 7
 
   publish:
-    if: github.ref_type == 'tag'
+    # 下载 CHANGELOG.md 需要代码
+    if: github.ref_type == 'tag' || inputs.version != ''
     needs: [full, lite]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
       - run: find artifacts -type f -printf '%p  %s\n'
       - uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          tag_name: ${{ inputs.version || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          name: 找找 ${{ inputs.version || github.ref_name }}
+          body_path: CHANGELOG.md
+          generate_release_notes: false
           files: |
             artifacts/full/ZhaoZhao-full-*.zip
             artifacts/full/ZhaoZhao-setup-*.exe
