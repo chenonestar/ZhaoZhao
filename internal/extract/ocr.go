@@ -51,19 +51,66 @@ func FindOCR() OCRConfig {
 		return c
 	}
 	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		for _, n := range []string{"RapidOCR-json.exe", "RapidOCR-json"} {
-			p := filepath.Join(dir, "components", "ocr", n)
+		dir := filepath.Join(filepath.Dir(exe), "components", "ocr")
+		for _, n := range []string{"RapidOCR_json.exe", "RapidOCR-json.exe", "RapidOCR_json", "RapidOCR-json"} {
+			p := filepath.Join(dir, n)
 			if st, err := os.Stat(p); err == nil && !st.IsDir() {
 				c.Command = p
+				c.Args = readArgsFile(filepath.Join(dir, "args.txt"))
 				return c
 			}
 		}
 	}
-	if p, err := exec.LookPath("RapidOCR-json"); err == nil {
-		c.Command = p
+	for _, n := range []string{"RapidOCR_json", "RapidOCR-json"} {
+		if p, err := exec.LookPath(n); err == nil {
+			c.Command = p
+			return c
+		}
 	}
 	return c
+}
+
+// readArgsFile 读取组件目录里的 args.txt：每行一个启动参数（如 --models=models），# 开头为注释。
+// 发行包用它指定识别语言所用的模型文件。
+func readArgsFile(p string) []string {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// ocrRequest 生成一行 OCR 请求。非 ASCII 字符一律写成 \uXXXX，反斜杠换成斜杠：
+// 组件按系统代码页读取命令行和管道，中文路径（如 C:\Users\张三\…）会因此出错。
+func ocrRequest(imgPath string) []byte {
+	var b strings.Builder
+	b.WriteString(`{"image_path":"`)
+	for _, r := range filepath.ToSlash(imgPath) {
+		switch {
+		case r == '"' || r == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r < 0x20:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		case r < 0x80:
+			b.WriteRune(r)
+		case r > 0xFFFF:
+			r -= 0x10000
+			fmt.Fprintf(&b, `\u%04x\u%04x`, 0xD800+(r>>10), 0xDC00+(r&0x3FF))
+		default:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		}
+	}
+	b.WriteString(`"}`)
+	b.WriteByte('\n')
+	return []byte(b.String())
 }
 
 // ---- 常驻 OCR 进程（每个解析子进程各自持有一个） ----
@@ -162,8 +209,7 @@ func ocrImage(c OCRConfig, imgPath string) (string, error) {
 		ocrCur = p
 	}
 	p := ocrCur
-	req, _ := json.Marshal(map[string]string{"image_path": imgPath})
-	if _, err := p.in.Write(append(req, '\n')); err != nil {
+	if _, err := p.in.Write(ocrRequest(imgPath)); err != nil {
 		killOCR(p)
 		ocrCur = nil
 		return "", fmt.Errorf("OCR 组件已退出: %v", err)

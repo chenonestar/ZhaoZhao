@@ -1,0 +1,72 @@
+name: Bundle
+
+# 构建「完整版」：主程序 + LibreOffice（老格式转换）+ RapidOCR-json（OCR），全部离线可用。
+# 在真实 Windows 上做冒烟测试：老格式转换和 OCR 真正跑一遍，通过后才产出压缩包。
+# 触发：手动、修改打包相关文件、被 release.yml 调用。
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: dev
+  push:
+    branches: ["claude/**"]
+    paths:
+      - ".github/workflows/bundle.yml"
+      - "packaging/**"
+
+jobs:
+  full:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ inputs.version || 'dev' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 构建界面与主程序
+        shell: pwsh
+        run: |
+          Push-Location web; npm ci --no-audit --no-fund; npm run build; Pop-Location
+          New-Item -ItemType Directory -Force stage/components/libreoffice, stage/components/ocr | Out-Null
+          go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$env:VERSION" -o stage/zhaozhao.exe ./cmd/zhaozhao
+          Copy-Item packaging/components-README.txt stage/components/README.txt
+          Copy-Item packaging/portable-README.txt stage/README.txt
+          New-Item stage/portable.flag -ItemType File | Out-Null
+
+      - name: 安装 LibreOffice 并放入 components
+        shell: pwsh
+        run: |
+          choco install libreoffice-still -y --no-progress
+          $lo = "${env:ProgramFiles}\LibreOffice"
+          if (-not (Test-Path "$lo\program\soffice.exe")) { throw "没有找到 $lo\program\soffice.exe" }
+          robocopy $lo stage\components\libreoffice /E /NFL /NDL /NJH /NJS /NP | Out-Null
+          if ($LASTEXITCODE -ge 8) { throw "robocopy 失败: $LASTEXITCODE" }
+          $global:LASTEXITCODE = 0
+          & "$lo\program\soffice.exe" --version
+          "{0:N0} MB" -f ((Get-ChildItem stage\components\libreoffice -Recurse | Measure-Object Length -Sum).Sum / 1MB)
+
+      - name: 获取 RapidOCR-json（列出发布包内容）
+        shell: pwsh
+        run: |
+          gh release view --repo hiroi-sora/RapidOCR-json --json tagName,assets --jq '.tagName, (.assets[] | "\(.name)  \(.size)")'
+          New-Item -ItemType Directory -Force ocr-dl, ocr-ex | Out-Null
+          gh release download --repo hiroi-sora/RapidOCR-json --dir ocr-dl --pattern '*'
+          Get-ChildItem ocr-dl | Format-Table Name, Length
+          foreach ($f in Get-ChildItem ocr-dl) {
+            if ($f.Extension -in '.7z', '.zip') { 7z x -y "-oocr-ex" $f.FullName | Select-Object -Last 3 }
+          }
+          Get-ChildItem ocr-ex -Recurse -Depth 3 | Select-Object -First 120 | ForEach-Object { $_.FullName.Substring((Get-Location).Path.Length) }
+          Get-ChildItem ocr-ex -Recurse -Filter cmd.txt | ForEach-Object { "=== $($_.FullName)"; Get-Content $_.FullName -TotalCount 80 }
+          Get-ChildItem ocr-ex -Recurse -Filter '*.md' | Select-Object -First 5 | ForEach-Object { "=== $($_.FullName)" }

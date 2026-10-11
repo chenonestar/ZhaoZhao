@@ -1,6 +1,7 @@
 package extract
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,5 +136,35 @@ func TestOCR(t *testing.T) {
 	r2 := Extract(filepath.Join(dir, "scanned.pdf"), "pdf", off)
 	if r2.Status != doc.StatusNoContent || !r2.NeedOCR {
 		t.Errorf("无 OCR 的扫描 pdf: %+v", r2)
+	}
+}
+
+func TestOCRRequestEscapesNonASCII(t *testing.T) {
+	in := `C:\Users\张三\AppData\Local\Temp\a b\"x".png`
+	got := string(ocrRequest(in))
+	var m map[string]string
+	if err := json.Unmarshal([]byte(got), &m); err != nil {
+		t.Fatalf("不是合法 JSON: %v\n%s", err, got)
+	}
+	if m["image_path"] != filepath.ToSlash(in) { // Windows 上反斜杠会换成斜杠
+		t.Fatalf("解码后路径不对: %q", m["image_path"])
+	}
+	for _, r := range got {
+		if r > 0x7f {
+			t.Fatalf("请求里不应出现非 ASCII 字符: %s", got)
+		}
+	}
+	// 代理对（emoji 等）
+	if got := string(ocrRequest("/tmp/😀.png")); !strings.Contains(got, `\ud83d\ude00`) {
+		t.Fatalf("%s", got)
+	}
+}
+
+func TestReadArgsFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "args.txt")
+	os.WriteFile(p, []byte("# 注释\n--models=models\n\n  --det=ch_PP-OCRv4_det_infer.onnx \r\n"), 0o644)
+	got := readArgsFile(p)
+	if len(got) != 2 || got[0] != "--models=models" || got[1] != "--det=ch_PP-OCRv4_det_infer.onnx" {
+		t.Fatalf("%q", got)
 	}
 }
