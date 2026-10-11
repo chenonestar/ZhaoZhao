@@ -1,0 +1,994 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>找找 软件需求说明</title>
+<style>
+:root {
+  --paper: #ffffff; --page: #f2f4f7; --ink: #1d2533; --muted: #5a6474;
+  --rule: #dde1e7; --rule-strong: #a7aebb; --zebra: #f7f8fa;
+  --blue: #2152a3; --blue-soft: #e8eef8; --mark: #ffe066;
+  --sans: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Source Han Sans SC", system-ui, sans-serif;
+  --code: Consolas, "Cascadia Mono", "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #1a1f28; --page: #12161d; --ink: #e6e9ee; --muted: #9aa3b2;
+    --rule: #2e3542; --rule-strong: #5d6676; --zebra: #1f2530;
+    --blue: #7ea6ec; --blue-soft: #233350; --mark: #c9a400;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-padding-top: 24px; }
+body { margin: 0; background: var(--page); color: var(--ink); font-family: var(--sans);
+  font-size: 15px; line-height: 1.75; -webkit-text-size-adjust: 100%; }
+.shell { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 40px;
+  max-width: 1160px; margin: 0 auto; padding: 40px 24px 80px; }
+nav.toc { position: sticky; top: 24px; align-self: start; font-size: 13.5px; }
+nav.toc p { margin: 0 0 8px; color: var(--muted); }
+nav.toc ol { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--rule); }
+nav.toc a { display: block; padding: 4px 0 4px 14px; color: var(--ink); text-decoration: none;
+  border-left: 2px solid transparent; margin-left: -1px; }
+nav.toc a:hover { border-left-color: var(--blue); color: var(--blue); }
+nav.toc a:focus-visible, a:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+main { background: var(--paper); border: 1px solid var(--rule); border-radius: 6px;
+  padding: 56px 64px 64px; min-width: 0; }
+header.cover { padding-bottom: 32px; margin-bottom: 8px; border-bottom: 1px solid var(--rule); }
+.brand { font-size: 64px; font-weight: 700; line-height: 1.1; letter-spacing: 0.06em; margin: 0;
+  display: inline-block; padding: 0 0.1em;
+  background: linear-gradient(transparent 58%, var(--mark) 58%, var(--mark) 90%, transparent 90%); }
+.subtitle { font-size: 22px; font-weight: 600; margin: 18px 0 6px; }
+.meta { color: var(--muted); font-size: 14px; margin: 0; }
+h2 { font-size: 22px; line-height: 1.4; margin: 56px 0 16px; padding-top: 8px; }
+h3 { font-size: 17px; margin: 32px 0 12px; }
+p, ul, ol { margin: 0 0 14px; max-width: 46em; }
+ul, ol { padding-left: 1.4em; }
+li { margin: 4px 0; }
+strong { font-weight: 600; }
+code { font-family: var(--code); font-size: 0.88em; background: var(--zebra);
+  border: 1px solid var(--rule); border-radius: 3px; padding: 0.05em 0.35em; white-space: nowrap; }
+.table-wrap { overflow-x: auto; margin: 8px 0 24px; border: 1px solid var(--rule); border-radius: 4px; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; line-height: 1.6; }
+th, td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--rule); }
+th { background: var(--zebra); font-weight: 600; white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td.rid { white-space: nowrap; font-weight: 600; font-variant-numeric: tabular-nums; }
+.pri-cell { text-align: center; width: 4.5em; }
+.pri { display: inline-block; min-width: 2.4em; padding: 0 0.4em; border-radius: 3px;
+  font-size: 12.5px; font-weight: 600; line-height: 1.7; text-align: center; }
+.pri.p0 { background: var(--blue); color: var(--paper); }
+.pri.p1 { background: var(--blue-soft); color: var(--blue); }
+.pri.p2 { border: 1px solid var(--rule-strong); color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 20px 0 0; font-size: 13.5px; color: var(--muted); }
+.legend span.pri { margin-right: 6px; }
+figure.diagram { margin: 24px 0 8px; }
+figure.diagram svg { width: 100%; height: auto; display: block; font-family: var(--sans); }
+figure.diagram figcaption { font-size: 13px; color: var(--muted); margin-top: 6px; }
+.d-box rect { fill: var(--paper); stroke: var(--rule-strong); stroke-width: 1.25; }
+.d-group { fill: none; stroke: var(--rule-strong); stroke-width: 1.25; }
+.d-group.accent { stroke: var(--blue); stroke-width: 2; fill: var(--blue-soft); fill-opacity: 0.5; }
+.d-name { font-size: 13px; font-weight: 600; fill: var(--ink); text-anchor: middle; }
+.d-line { font-size: 11.5px; fill: var(--muted); text-anchor: middle; }
+.d-gname { font-size: 13px; font-weight: 600; fill: var(--ink); }
+.d-edge path { fill: none; stroke: var(--rule-strong); stroke-width: 1.25; }
+.d-head { fill: var(--rule-strong); }
+.d-label { font-size: 11.5px; fill: var(--muted); }
+.d-label.end { text-anchor: end; }
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 16px 12px 48px; gap: 16px; }
+  nav.toc { position: static; }
+  main { padding: 32px 20px 40px; }
+  .brand { font-size: 48px; }
+}
+@media print {
+  @page { size: A4; margin: 16mm 14mm; }
+  body { background: #fff; font-size: 11pt; }
+  .shell { display: block; padding: 0; max-width: none; }
+  nav.toc { display: none; }
+  main { border: 0; padding: 0; }
+  h2, h3 { break-after: avoid; }
+  tr, figure { break-inside: avoid; }
+  .table-wrap { overflow: visible; }
+}
+</style>
+</head>
+<body>
+<div class="shell">
+<nav class="toc" aria-label="目录"><p>目录</p><ol><li><a href="#s1">1. 概述</a></li><li><a href="#s2">2. 典型使用场景</a></li><li><a href="#s3">3. 索引范围与目录管理</a></li><li><a href="#s4">4. 文件格式支持</a></li><li><a href="#s5">5. 搜索功能</a></li><li><a href="#s6">6. 结果展示、预览与打开</a></li><li><a href="#s7">7. 移动硬盘与网络映射盘</a></li><li><a href="#s8">8. 索引维护与后台任务</a></li><li><a href="#s9">9. 非功能需求</a></li><li><a href="#s10">10. 技术方案建议</a></li><li><a href="#s11">11. 版本规划</a></li><li><a href="#s12">12. 不在本期范围与已确定事项</a></li></ol></nav>
+<main>
+<header class="cover">
+<h1 class="brand">找找</h1>
+<p class="subtitle">文件内容搜索工具 软件需求说明</p>
+<p class="meta">2026-10-11 　ZhaoZhao / zhaozhao.exe 　Windows 单机桌面工具</p>
+<div class="legend"><span><span class="pri p0">P0</span>首个完整版本必须实现</span><span><span class="pri p1">P1</span>应当实现</span><span><span class="pri p2">P2</span>后续按需</span></div>
+</header>
+<h2 id="s1">1. 概述</h2>
+<p>本软件是一个 Windows 单机桌面工具，对本机硬盘、移动硬盘和网络映射盘上 1 万至 10 万个文件建立全文索引，支持按文件内容快速查找文字。</p>
+<p><strong>背景。</strong> 需要查找的文字分散在大量文件中，文件分布在多个磁盘和目录下，格式包括文本、代码、Office、WPS、PDF 和扫描件。系统自带搜索和 Everything 等工具主要按文件名查找，按内容查找要么很慢，要么不支持老格式和扫描件。</p>
+<p><strong>目标。</strong></p>
+<ul>
+<li>输入关键词后 1 秒内看到结果，并能直接看到命中位置的上下文。</li>
+<li>覆盖日常工作中的主要文件格式，包括大量存在的 .doc/.xls/.wps 等老格式，以及需要 OCR 的扫描件和图片。</li>
+<li>支持关键词、短语、布尔组合、正则和模糊匹配。</li>
+<li>移动硬盘拔掉后仍可搜索其中内容，并提示需接入哪块盘才能打开文件。</li>
+<li>建索引在后台进行，不影响正常使用电脑。</li>
+</ul>
+<p><strong>使用形态。</strong> 单用户、单机运行，所有数据只存在本机，不联网，不提供多人共享。</p>
+<p><strong>名称。</strong> 找找，英文名 ZhaoZhao，程序文件名 <code>zhaozhao.exe</code>。取意「找东西」的口语说法，两个字、同字重复，好念好记，也和全局快捷键里的 F（Find）对应。</p>
+<p><strong>术语。</strong> 本文中「索引根」指用户添加进来、需要建索引的目录；「卷」指一个磁盘分区或一块移动硬盘；「提取」指从文件中取出纯文本的过程。</p>
+<h2 id="s2">2. 典型使用场景</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>编号</th>
+<th>场景</th>
+<th>期望结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="rid">UC-1</td>
+<td>记得某份合同里写过一个条款，不记得文件名和位置</td>
+<td>输入条款中的几个词，结果列出命中的文件和上下文，点击直接打开</td>
+</tr>
+<tr>
+<td class="rid">UC-2</td>
+<td>找所有同时提到「张三」和「报销」、但不含「草稿」的文件</td>
+<td>用布尔表达式一次查出</td>
+</tr>
+<tr>
+<td class="rid">UC-3</td>
+<td>找出所有身份证号、手机号或某种编号格式</td>
+<td>用正则表达式查找，结果高亮每处命中</td>
+</tr>
+<tr>
+<td class="rid">UC-4</td>
+<td>查找一份扫描盖章件里的文字</td>
+<td>OCR 后的文字可以被搜到，预览时显示所在页码</td>
+</tr>
+<tr>
+<td class="rid">UC-5</td>
+<td>查找存放在已拔下的移动硬盘里的旧文件</td>
+<td>照常搜到，结果标明所在硬盘的卷标和「离线」状态</td>
+</tr>
+<tr>
+<td class="rid">UC-6</td>
+<td>记得大概的说法，但用词或写法可能不完全一致</td>
+<td>模糊匹配能找到近似写法，例如全角半角、繁简、中间夹字</td>
+</tr>
+<tr>
+<td class="rid">UC-7</td>
+<td>只在某个项目目录、最近一年修改的 Excel 里查找</td>
+<td>通过目录、类型、时间筛选缩小范围</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="s3">3. 索引范围与目录管理</h2>
+<p>用户自己指定要建索引的目录，软件不默认扫描整台电脑；隐藏文件默认纳入，系统目录和开发依赖目录默认排除。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>编号</th>
+<th>需求</th>
+<th class="pri-cell">优先级</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="rid">F-IDX-01</td>
+<td>用户可添加、移除、暂停多个索引根，索引根可以是目录或整个盘符</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-IDX-02</td>
+<td>每个索引根可单独设置要包含的文件类型和排除规则，未设置时使用全局规则</td>
+<td class="pri-cell"><span class="pri p1">P1</span></td>
+</tr>
+<tr>
+<td class="rid">F-IDX-03</td>
+<td>隐藏文件和隐藏目录默认纳入索引</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-IDX-04</td>
+<td>内置默认排除清单（见下），用户可增删，可一键恢复默认</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-IDX-05</td>
+<td>排除规则支持：任意层级的目录名、路径前缀、通配符（glob）、扩展名</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-IDX-06</td>
+<td>按文件大小设上限，超出的文件只索引文件名，不提取内容；文本类默认 100 MB，其他类型默认 200 MB，可调整</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-IDX-07</td>
+<td>默认不跟随符号链接和目录联接（junction），避免重复索引和死循环；可按索引根开启</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-IDX-08</td>
+<td>OneDrive 等云盘中「仅在线可用」的占位文件默认跳过，避免触发下载</td>
+<td class="pri-cell"><span class="pri p1">P1</span></td>
+</tr>
+<tr>
+<td class="rid">F-IDX-09</td>
+<td>无权限访问的目录和文件记录到日志并跳过，不弹窗</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-IDX-10</td>
+<td>未知扩展名的文件抽样判断是否为文本，是则按文本索引（可关闭），便于覆盖各种代码和配置文件</td>
+<td class="pri-cell"><span class="pri p1">P1</span></td>
+</tr>
+<tr>
+<td class="rid">F-IDX-11</td>
+<td>所有被扫描到的文件，无论内容能否提取，文件名和路径都进入索引，可按文件名搜索</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>默认排除清单：</strong></p>
+<ul>
+<li>系统目录：<code>C:\Windows</code>、<code>C:\Program Files</code>、<code>C:\Program Files (x86)</code>、<code>C:\ProgramData</code>、各盘的 <code>$Recycle.Bin</code> 和 <code>System Volume Information</code>。</li>
+<li>系统文件：<code>pagefile.sys</code>、<code>hiberfil.sys</code>、<code>swapfile.sys</code>。</li>
+<li>临时目录：<code>%LOCALAPPDATA%\Temp</code>。</li>
+<li>开发依赖和版本库目录（任意层级）：<code>node_modules</code>、<code>.git</code>、<code>.svn</code>、<code>.hg</code>、<code>__pycache__</code>、<code>.venv</code>。</li>
+<li>软件自身的数据目录。</li>
+</ul>
+<h2 id="s4">4. 文件格式支持</h2>
+<p>文本、Office、WPS、PDF、扫描件、压缩包和邮件在第一个完整版本中全部支持；老格式数量多，转换组件是必备项而不是可选插件。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>类别</th>
+<th>扩展名</th>
+<th>提取方式</th>
+<th>定位信息</th>
+<th class="pri-cell">优先级</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>纯文本、代码、配置</td>
+<td>txt、md、log、csv、json、xml、yaml、ini、各类源代码</td>
+<td>直接读取，自动识别编码</td>
+<td>行号</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td>网页</td>
+<td>html、htm</td>
+<td>去除标签后取正文</td>
+<td>行号</td>
+<td class="pri-cell"><span class="pri p1">P1</span></td>
+</tr>
+<tr>
+<td>Office 新格式</td>
+<td>docx、xlsx、pptx 及 docm、xlsm、pptm、dotx、xltx</td>
+<td>直接解析内部 XML</td>
+<td>Word：段落；Excel：工作表 + 单元格；PPT：幻灯片号</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td>Office 老格式</td>
+<td>doc、xls、ppt、rtf</td>
+<td>格式转换组件</td>
+<td>同上（尽力而为）</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td>WPS 格式</td>
+<td>wps、et、dps</td>
+<td>格式转换组件</td>
+<td>同上（尽力而为）</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td>PDF（有文字层）</td>
+<td>pdf</td>
+<td>直接提取文字</td>
+<td>页码</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td>PDF（扫描版）</td>
+<td>pdf</td>
+<td>逐页判断，无文字层的页送 OCR</td>
+<td>页码</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td>图片</td>
+<td>jpg、jpeg、png、bmp、tif、tiff（含多页）、webp</td>
+<td>OCR</td>
+<td>多页 tiff 记页码</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td>OpenDocument</td>
+<td>odt、ods、odp</td>
+<td>直接解析内部 XML</td>
+<td>同 Office</td>
+<td class="pri-cell"><span class="pri p2">P2</span></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>提取要求：</strong></p>
+<ul>
+<li>文本编码自动识别 UTF-8（含 BOM）、UTF-16、GBK、GB18030、Big5，无法确定时按 GB18030 处理。</li>
+<li>Word 提取范围包含正文、表格、页眉页脚、脚注、批注和文本框；Excel 包含所有工作表的单元格值和批注，公式取计算结果；PPT 包含幻灯片正文和备注。</li>
+<li>PDF 按页判断是否有文字层，同一个文件中有文字层的页和扫描页可以混合处理。</li>
+<li>受密码保护的文件跳过，状态标记为「已加密」，文件名仍可搜索。</li>
+<li>每个文件的提取设超时（文本和文档默认 60 秒，OCR 按页另计）；超时或解析失败标记为「失败」并记录原因，不阻塞队列。</li>
+</ul>
+<p><strong>OCR 要求：</strong></p>
+<ul>
+<li>离线识别简体中文和英文，不依赖网络和 Python 环境。</li>
+<li>可按索引根开关图片 OCR；默认跳过短边小于 200 像素的图片，避免为图标和缩略图浪费时间。</li>
+<li>识别结果按文件内容哈希缓存，文件移动、改名或复制后不重复识别。</li>
+<li>Office 文档中内嵌图片的 OCR、繁体中文识别为 P2。</li>
+</ul>
+<p><strong>压缩包与邮件：</strong></p>
+<p>压缩包和邮件都是「容器」：软件把里面的每个文件、每封邮件和每个附件当作独立的搜索结果，按上面的规则提取内容。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>类别</th>
+<th>扩展名</th>
+<th>处理方式</th>
+<th class="pri-cell">优先级</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>压缩包</td>
+<td>zip、7z、rar、tar、gz、tgz</td>
+<td>不解压到磁盘，逐个读取内部文件并提取</td>
+<td class="pri-cell"><span class="pri p1">P1</span></td>
+</tr>
+<tr>
+<td>单封邮件</td>
+<td>eml、msg</td>
+<td>解析主题、发件人、收件人、日期、正文；附件按其类型提取</td>
+<td class="pri-cell"><span class="pri p1">P1</span></td>
+</tr>
+<tr>
+<td>邮箱存档</td>
+<td>mbox</td>
+<td>逐封拆分后同单封邮件处理</td>
+<td class="pri-cell"><span class="pri p1">P1</span></td>
+</tr>
+<tr>
+<td>Outlook 数据文件</td>
+<td>pst、ost</td>
+<td>逐封拆分后同单封邮件处理</td>
+<td class="pri-cell"><span class="pri p2">P2</span></td>
+</tr>
+</tbody>
+</table></div>
+<ul>
+<li>结果路径显示为「容器路径 › 内部路径」，例如 <code>D:\归档\2024.zip › 合同\采购合同.docx</code>，或 <code>收件箱.mbox › 关于报销的通知 › 附件.xlsx</code>。</li>
+<li>压缩包内的中文文件名自动识别 GBK 和 UTF-8 编码，避免乱码。</li>
+<li>嵌套层数默认最多 3 层（如邮件附件中的压缩包里的文档）。</li>
+<li>防压缩炸弹：单个压缩包解压总量默认上限 2 GB，单个内部文件压缩比超过 100 倍时跳过并记为失败。</li>
+<li>加密的压缩包跳过，标记「已加密」，内部文件名能读到时仍可按文件名搜索。</li>
+<li>打开容器内的文件时，先解出到软件的临时目录再用默认程序打开，并提示这是只读副本；临时文件在软件退出时清理。</li>
+<li>预览邮件时，在正文上方显示主题、发件人、收件人和日期。</li>
+<li>pst 和 ost 体积大、解析库不够成熟，列为 P2，技术验证时一并评估。</li>
+</ul>
+<h2 id="s5">5. 搜索功能</h2>
+<p>一个搜索框同时支持关键词、短语、布尔、正则、模糊和筛选条件；不熟悉语法时，可以用高级搜索面板以表单方式组合同样的条件。</p>
+<p><strong>查询语法：</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>写法</th>
+<th>含义</th>
+<th>示例</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>空格分隔</td>
+<td>同时包含（AND）</td>
+<td><code>合同 违约金</code></td>
+</tr>
+<tr>
+<td><code>"..."</code></td>
+<td>完整短语，按原顺序连续出现</td>
+<td><code>"不可抗力条款"</code></td>
+</tr>
+<tr>
+<td><code>OR</code></td>
+<td>任一包含</td>
+<td><code>报销 OR 差旅</code></td>
+</tr>
+<tr>
+<td><code>-</code> 或 <code>NOT</code></td>
+<td>不包含</td>
+<td><code>张三 报销 -草稿</code></td>
+</tr>
+<tr>
+<td><code>( )</code></td>
+<td>分组</td>
+<td><code>(合同 OR 协议) 2025</code></td>
+</tr>
+<tr>
+<td><code>NEAR/n</code></td>
+<td>两个词相距不超过 n 个字，不限先后</td>
+<td><code>甲方 NEAR/10 违约</code></td>
+</tr>
+<tr>
+<td><code>~</code> 后缀</td>
+<td>对该词做模糊匹配</td>
+<td><code>合同审批~</code></td>
+</tr>
+<tr>
+<td><code>/.../</code></td>
+<td>正则表达式</td>
+<td><code>/1[3-9]\d{9}/</code></td>
+</tr>
+<tr>
+<td><code>path:</code></td>
+<td>路径包含（含压缩包和邮件的内部路径）</td>
+<td><code>path:D:\项目\2025</code></td>
+</tr>
+<tr>
+<td><code>ext:</code> / <code>type:</code></td>
+<td>扩展名 / 类别（文档、表格、演示、PDF、图片、文本、代码、压缩包、邮件）</td>
+<td><code>ext:xlsx</code>、<code>type:邮件</code></td>
+</tr>
+<tr>
+<td><code>name:</code></td>
+<td>只匹配文件名</td>
+<td><code>name:周报</code></td>
+</tr>
+<tr>
+<td><code>from:</code> / <code>to:</code></td>
+<td>邮件发件人 / 收件人（名称或地址）</td>
+<td><code>from:张三</code></td>
+</tr>
+<tr>
+<td><code>subject:</code></td>
+<td>邮件主题</td>
+<td><code>subject:报销</code></td>
+</tr>
+<tr>
+<td><code>modified:</code></td>
+<td>修改时间；邮件按发送日期</td>
+<td><code>modified:2025-01..2025-06</code>、<code>modified:&gt;30d</code></td>
+</tr>
+<tr>
+<td><code>size:</code></td>
+<td>文件大小</td>
+<td><code>size:&gt;10MB</code></td>
+</tr>
+<tr>
+<td><code>vol:</code></td>
+<td>所在卷（按卷标）</td>
+<td><code>vol:备份盘A</code></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>匹配规则：</strong></p>
+<ul>
+<li>单个汉字、两个字的中文词都必须能精确搜到，不允许因分词方式而漏检。</li>
+<li>以下归一化始终生效：英文大小写、全角与半角、中文标点的全半角形式。繁简体归一默认开启，可在设置中关闭。</li>
+<li>搜索范围可选「内容和文件名」（默认）、「仅内容」、「仅文件名」。</li>
+</ul>
+<p><strong>模糊匹配（<code>~</code> 或开关开启）：</strong></p>
+<ul>
+<li>英文和数字按编辑距离容错：词长 5 至 8 允许 1 处差异，9 以上允许 2 处。</li>
+<li>中文按邻近匹配：查询词中的字按原顺序出现，相邻字之间最多夹 2 个字。例如 <code>合同审批~</code> 可以命中「合同的审批」「合同签订审批」。</li>
+<li>模糊结果的相关度低于精确结果，排在其后。</li>
+<li>同义词扩展、拼音搜索为 P2。</li>
+</ul>
+<p><strong>正则表达式：</strong></p>
+<ul>
+<li>语法采用 RE2 标准，不支持反向引用和环视；在帮助中写明这一点。</li>
+<li>默认不区分大小写，可切换；支持 <code>(?s)</code> 让 <code>.</code> 跨行匹配。</li>
+<li>执行方式：先从表达式中提取必然出现的字面文字，用索引筛出候选文件，再在候选文件的已提取文本上逐个匹配。</li>
+<li>提取不出字面文字时（如 <code>/\d{18}/</code>）对全部已提取文本扫描，显示进度，可随时取消，并可边扫边出结果。</li>
+</ul>
+<p><strong>其他：</strong></p>
+<ul>
+<li>结果排序：相关度（默认）、修改时间、文件名、路径。</li>
+<li>普通关键词边输入边搜索（防抖 200 毫秒）；正则和全量扫描需按回车执行。（P1）</li>
+<li>搜索历史，以及可命名保存的常用搜索。（P1）</li>
+<li>高级搜索面板：用表单组合关键词、排除词、目录、类型、时间、大小，并实时显示等价的查询语句。（P1）</li>
+</ul>
+<h2 id="s6">6. 结果展示、预览与打开</h2>
+<p>界面分为左侧结果列表和右侧预览区：列表用来快速判断哪个文件是要找的，预览区用来确认命中的具体位置。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>编号</th>
+<th>需求</th>
+<th class="pri-cell">优先级</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="rid">F-RES-01</td>
+<td>结果列表显示文件名、路径、类型、修改时间、大小、命中次数</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-RES-02</td>
+<td>每个结果下显示前 3 处命中的上下文片段，前后各约 40 字，命中词高亮</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-RES-03</td>
+<td>文字来自 OCR 的结果加「OCR」标记，提醒可能有识别误差</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-RES-04</td>
+<td>离线卷上的结果加「离线」标记并显示卷标（见第 7 节）</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-RES-05</td>
+<td>列表采用虚拟滚动，显示结果总数，上万条结果也不卡顿</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-RES-06</td>
+<td>预览区显示提取出的纯文本（不还原原始排版），高亮全部命中，可跳到上一处、下一处</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-RES-07</td>
+<td>预览区显示每处命中的位置：页码、工作表和单元格、幻灯片号或行号</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-RES-08</td>
+<td>操作：用默认程序打开、打开所在文件夹并选中文件、复制路径、复制片段</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-RES-09</td>
+<td>打开到命中位置：可为文件类型配置打开命令模板（如编辑器跳行、PDF 阅读器跳页），未配置时用默认程序打开</td>
+<td class="pri-cell"><span class="pri p1">P1</span></td>
+</tr>
+<tr>
+<td class="rid">F-RES-10</td>
+<td>内容完全相同的多个文件合并为一条，展开后列出各个副本的路径</td>
+<td class="pri-cell"><span class="pri p1">P1</span></td>
+</tr>
+<tr>
+<td class="rid">F-RES-11</td>
+<td>结果列表导出为 CSV</td>
+<td class="pri-cell"><span class="pri p2">P2</span></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>交互要求：</strong></p>
+<ul>
+<li>常驻系统托盘，全局快捷键呼出搜索窗口（默认 <code>Ctrl+Alt+F</code>，可修改），按 <code>Esc</code> 隐藏。</li>
+<li>键盘可完成全部常用操作：上下键选择结果，<code>Enter</code> 打开文件，<code>Ctrl+Enter</code> 打开所在文件夹，<code>Ctrl+C</code> 复制路径。</li>
+<li>界面跟随系统浅色和深色主题。</li>
+</ul>
+<h2 id="s7">7. 移动硬盘与网络映射盘</h2>
+<p>结论：移动硬盘拔掉后索引保留，照常可以搜索和预览提取出的文字，只是不能打开原文件；索引默认永久保留，由用户手动清理。移动硬盘上常放归档资料，拔掉后仍能知道「要找的东西在哪块盘上」，正是这类工具最有用的地方。</p>
+<h3>7.1 移动硬盘</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>编号</th>
+<th>需求</th>
+<th class="pri-cell">优先级</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="rid">F-VOL-01</td>
+<td>按卷 ID（卷序列号 + 卷 GUID，辅以卷标和容量）识别磁盘，不依赖盘符；文件路径存为「卷 ID + 卷内相对路径」，显示时换成当前盘符</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-VOL-02</td>
+<td>盘符变化（如这次是 E:，下次是 F:）不影响索引，无需重建</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-VOL-03</td>
+<td>卷拔出后，索引保留，结果照常显示并标记「离线」，可预览提取文本</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-VOL-04</td>
+<td>打开离线文件时提示需接入哪块盘：卷标、上次的盘符、最后在线时间</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-VOL-05</td>
+<td>卷重新接入后自动识别，后台增量对账：比对路径、大小、修改时间，只处理新增、修改、删除的文件；对账期间可正常搜索，该卷结果标记「同步中」</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-VOL-06</td>
+<td>卷在线期间与本地盘一样实时监听文件变化</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-VOL-07</td>
+<td>不长期占用卷上的文件句柄，避免妨碍「安全弹出」；收到卷即将移除的系统通知时，立即释放句柄并暂停该卷的任务</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-VOL-08</td>
+<td>索引管理页列出每个卷的卷标、最后在线时间、文件数、索引占用空间，可手动删除某个卷的全部索引</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-VOL-09</td>
+<td>可选「超过 N 天未接入则自动删除该卷索引」，默认关闭</td>
+<td class="pri-cell"><span class="pri p2">P2</span></td>
+</tr>
+<tr>
+<td class="rid">F-VOL-10</td>
+<td>接入一块从未索引过的移动硬盘时，发通知询问是否加入索引，默认不自动加入</td>
+<td class="pri-cell"><span class="pri p1">P1</span></td>
+</tr>
+<tr>
+<td class="rid">F-VOL-11</td>
+<td>卷被重新格式化后视为新卷；遇到两块盘 ID 相同（如克隆盘）时，提示用户确认，不自动合并</td>
+<td class="pri-cell"><span class="pri p1">P1</span></td>
+</tr>
+</tbody>
+</table></div>
+<h3>7.2 网络映射盘</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>编号</th>
+<th>需求</th>
+<th class="pri-cell">优先级</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="rid">F-NET-01</td>
+<td>内部按 UNC 路径（<code>\\服务器\共享名\...</code>）存储，映射盘符改变不影响索引；显示时优先用用户的映射盘符</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-NET-02</td>
+<td>网络盘的变更通知不可靠，改用定时增量扫描，默认每 60 分钟一次，可调整，可手动立即扫描</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-NET-03</td>
+<td>增量扫描只比对目录列表和文件元数据，只读取有变化的文件内容</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-NET-04</td>
+<td>网络盘不可达时按离线卷处理（同 F-VOL-03、F-VOL-04），恢复后自动对账</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-NET-05</td>
+<td>读取网络文件的并发数单独限制（默认 2），避免占满网络</td>
+<td class="pri-cell"><span class="pri p1">P1</span></td>
+</tr>
+<tr>
+<td class="rid">F-NET-06</td>
+<td>使用当前 Windows 登录会话的权限访问共享，软件不保存网络凭据</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="s8">8. 索引维护与后台任务</h2>
+<p>后台任务按「先文件名、再内容、最后 OCR」的顺序推进，保证刚加入的目录很快就能按文件名搜到，耗时的 OCR 不拖慢其他工作。</p>
+<p><strong>处理顺序（优先级从高到低）：</strong></p>
+<ol>
+<li>文件变更（新增、修改、删除）</li>
+<li>文件名和元数据入库</li>
+<li>文本类和 Office 新格式、PDF 文字层的内容提取</li>
+<li>老格式和 WPS 格式的转换提取</li>
+<li>OCR</li>
+</ol>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>编号</th>
+<th>需求</th>
+<th class="pri-cell">优先级</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="rid">F-BG-01</td>
+<td>本地 NTFS 盘实时监听文件变化，增量更新索引</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-BG-02</td>
+<td>软件启动时对账，处理未运行期间发生的变化</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-BG-03</td>
+<td>文件移动或改名时，按内容哈希复用已有的提取结果和 OCR 结果，不重新处理</td>
+<td class="pri-cell"><span class="pri p1">P1</span></td>
+</tr>
+<tr>
+<td class="rid">F-BG-04</td>
+<td>后台进程以低优先级运行；检测到用户正在操作电脑时降低处理速度</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-BG-05</td>
+<td>后台最多使用一半的 CPU 核心，可在设置中调整</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-BG-06</td>
+<td>笔记本使用电池时，默认暂停 OCR 和格式转换，接上电源后继续</td>
+<td class="pri-cell"><span class="pri p1">P1</span></td>
+</tr>
+<tr>
+<td class="rid">F-BG-07</td>
+<td>可手动暂停、恢复全部任务或单个索引根的任务</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-BG-08</td>
+<td>程序退出、重启或崩溃后，从中断处继续，不从头开始</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-BG-09</td>
+<td>状态面板按索引根和卷显示：文件总数、已完成、待处理、OCR 队列长度、失败数、当前处理的文件</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-BG-10</td>
+<td>OCR 队列显示预计剩余时间，可暂停</td>
+<td class="pri-cell"><span class="pri p1">P1</span></td>
+</tr>
+<tr>
+<td class="rid">F-BG-11</td>
+<td>失败列表显示文件和原因（已加密、已损坏、超时、无权限、不支持），可单个或批量重试，可直接加入排除规则</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-BG-12</td>
+<td>可重建单个索引根或全部索引；检测到索引数据损坏时提示重建</td>
+<td class="pri-cell"><span class="pri p0">P0</span></td>
+</tr>
+<tr>
+<td class="rid">F-BG-13</td>
+<td>软件升级导致索引格式变化时，后台迁移，迁移期间旧索引继续可用</td>
+<td class="pri-cell"><span class="pri p1">P1</span></td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="s9">9. 非功能需求</h2>
+<p>性能目标以 10 万个文件、固态硬盘、4 核 16 GB 内存的普通办公电脑为基准；标注「待校准」的数值在技术验证阶段用实测修正。</p>
+<p><strong>性能：</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>指标</th>
+<th>目标</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>关键词、短语、布尔搜索，首屏结果</td>
+<td>P95 ≤ 300 毫秒</td>
+</tr>
+<tr>
+<td>模糊搜索，首屏结果</td>
+<td>P95 ≤ 1 秒</td>
+</tr>
+<tr>
+<td>正则搜索（能提取出字面文字时）</td>
+<td>P95 ≤ 2 秒</td>
+</tr>
+<tr>
+<td>正则全量扫描 10 万个文件的提取文本</td>
+<td>≤ 60 秒（待校准）</td>
+</tr>
+<tr>
+<td>加入索引根后可按文件名搜索</td>
+<td>10 万个文件 ≤ 2 分钟</td>
+</tr>
+<tr>
+<td>首次内容索引（不含老格式转换和 OCR）</td>
+<td>10 万个文件 ≤ 1 小时（待校准）</td>
+</tr>
+<tr>
+<td>本地文件修改后可被搜到</td>
+<td>≤ 10 秒</td>
+</tr>
+<tr>
+<td>软件启动到可以搜索</td>
+<td>≤ 2 秒</td>
+</tr>
+<tr>
+<td>快捷键呼出窗口</td>
+<td>≤ 200 毫秒</td>
+</tr>
+<tr>
+<td>主程序空闲内存（不含转换和 OCR 子进程）</td>
+<td>≤ 200 MB</td>
+</tr>
+<tr>
+<td>索引占用磁盘</td>
+<td>≤ 提取文本总量的 2 倍（待校准）</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>可靠性：</strong></p>
+<ul>
+<li>文件解析、格式转换、OCR 在独立子进程中运行；单个文件导致子进程崩溃或卡死时，自动重启子进程，跳过该文件并记为失败，主程序不受影响。</li>
+<li>索引写入采用事务，意外断电或强制结束进程后索引不损坏。</li>
+<li>本地日志按大小滚动保存，便于排查问题。</li>
+</ul>
+<p><strong>隐私与安全：</strong></p>
+<ul>
+<li>索引中包含所有文件的文字内容，存放在 <code>%LOCALAPPDATA%</code> 下的软件数据目录，仅当前 Windows 用户可访问；数据目录位置可修改。</li>
+<li>软件不联网，不收集任何使用数据；检查更新功能默认关闭。</li>
+<li>删除某个索引根或卷的索引时，同时删除对应的提取文本和 OCR 缓存。</li>
+<li>索引数据库加密为 P2。</li>
+</ul>
+<p><strong>兼容性：</strong></p>
+<ul>
+<li>支持 Windows 10 22H2 和 Windows 11，x64。</li>
+<li>支持超过 260 个字符的长路径，以及包含各种 Unicode 字符的文件名。</li>
+</ul>
+<p><strong>安装与部署：</strong></p>
+<ul>
+<li>由三部分组成：主程序、格式转换组件（体积较大）、OCR 组件。</li>
+<li>提供包含全部组件的离线完整安装包，安装和使用全程不需要联网；同时提供便携版。</li>
+<li>卸载时询问是否保留索引数据。</li>
+</ul>
+<h2 id="s10">10. 技术方案建议</h2>
+<p>建议以 Go 做主程序、TypeScript 做界面，耗时且不稳定的解析工作全部放进独立子进程；全文索引引擎、老格式转换和 OCR 三项在正式开发前先做技术验证再定。</p>
+<figure class="diagram">
+<svg viewBox="0 0 760 520" role="img" aria-label="耗时的解析都在子进程中完成，主进程只做调度、索引和查询">
+<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="d-head"/></marker></defs>
+<g class="d-box"><rect x="512" y="32" width="200" height="56" rx="8"/></g>
+<text class="d-name" x="612" y="56">界面</text><text class="d-line" x="612" y="72">Wails + React + TypeScript</text>
+<rect class="d-group" x="24" y="112" width="712" height="124" rx="8"/>
+<text class="d-gname" x="40" y="134">主进程（Go）</text>
+<g class="d-box"><rect x="48" y="148" width="200" height="72" rx="8"/><rect x="280" y="148" width="200" height="72" rx="8"/><rect x="512" y="148" width="200" height="72" rx="8"/></g>
+<text class="d-name" x="148" y="172">变更来源</text><text class="d-line" x="148" y="188">文件监听、启动对账</text><text class="d-line" x="148" y="204">卷管理、网络盘定时扫描</text>
+<text class="d-name" x="380" y="172">任务调度</text><text class="d-line" x="380" y="188">优先级队列</text><text class="d-line" x="380" y="204">资源控制、断点续跑</text>
+<text class="d-name" x="612" y="172">搜索服务</text><text class="d-line" x="612" y="188">查询解析、正则预筛</text><text class="d-line" x="612" y="204">排序、生成片段</text>
+<g class="d-box"><rect x="380" y="268" width="232" height="72" rx="8"/></g>
+<text class="d-name" x="496" y="292">索引库（SQLite）</text><text class="d-line" x="496" y="308">元数据、提取文本</text><text class="d-line" x="496" y="324">全文索引</text>
+<rect class="d-group accent" x="24" y="372" width="712" height="124" rx="8"/>
+<text class="d-gname" x="40" y="394">子进程（崩溃自动重启，不影响主进程）</text>
+<g class="d-box"><rect x="48" y="408" width="200" height="72" rx="8"/><rect x="280" y="408" width="200" height="72" rx="8"/><rect x="512" y="408" width="200" height="72" rx="8"/></g>
+<text class="d-name" x="148" y="432">提取进程池</text><text class="d-line" x="148" y="448">文本、Office、PDF</text><text class="d-line" x="148" y="464">每个文件限时</text>
+<text class="d-name" x="380" y="432">格式转换</text><text class="d-line" x="380" y="448">LibreOffice 常驻进程</text><text class="d-line" x="380" y="464">老格式、WPS</text>
+<text class="d-name" x="612" y="432">OCR</text><text class="d-line" x="612" y="448">RapidOCR</text><text class="d-line" x="612" y="464">扫描页、图片</text>
+<g class="d-edge"><path d="M612 88V148" marker-end="url(#arr)"/><path d="M248 184H280" marker-end="url(#arr)"/><path d="M420 220V268" marker-end="url(#arr)"/><path d="M572 220V268" marker-end="url(#arr)"/><path d="M320 220V372" marker-start="url(#arr)" marker-end="url(#arr)"/></g>
+<text class="d-label" x="622" y="104">查询</text><text class="d-label" x="428" y="258">写入</text><text class="d-label" x="580" y="258">读取</text><text class="d-label end" x="312" y="312">派发文件，返回文本</text>
+</svg>
+<figcaption>系统架构：耗时的解析都在子进程中完成，主进程只做调度、索引和查询</figcaption>
+</figure>
+<p>变更来源把文件变化交给任务调度，调度按优先级把文件派发给子进程，拿回文本后写入索引库；搜索服务只读索引库，所以后台再忙也不影响搜索。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>部分</th>
+<th>建议</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>主程序</td>
+<td>Go</td>
+<td>目录遍历和并发处理快，可打包成单个 exe</td>
+</tr>
+<tr>
+<td>桌面框架</td>
+<td>Wails v2</td>
+<td>基于 WebView2；Windows 10 可能未预装运行时，离线安装包需附带</td>
+</tr>
+<tr>
+<td>界面</td>
+<td>TypeScript + React</td>
+<td>结果列表用虚拟滚动</td>
+</tr>
+<tr>
+<td>元数据与提取文本</td>
+<td>SQLite（WAL 模式）</td>
+<td>提取文本压缩存储，供预览、正则匹配和重建索引使用</td>
+</tr>
+<tr>
+<td>全文索引</td>
+<td>待验证：SQLite FTS5、Bleve、Tantivy</td>
+<td>见下方验证项 1</td>
+</tr>
+<tr>
+<td>Office 新格式</td>
+<td>Go 解析 zip 内的 XML</td>
+<td>无需外部依赖</td>
+</tr>
+<tr>
+<td>PDF 文字层</td>
+<td>优先 PDFium</td>
+<td>BSD 许可；MuPDF 为 AGPL、Poppler 为 GPL，若以后要对外分发需注意</td>
+</tr>
+<tr>
+<td>老格式和 WPS</td>
+<td>LibreOffice 无头模式，常驻进程池</td>
+<td>避免每个文件都启动一次 LibreOffice；备选 Apache Tika（需 Java）</td>
+</tr>
+<tr>
+<td>OCR</td>
+<td>RapidOCR（PaddleOCR 模型的 ONNX 版本），CPU 推理</td>
+<td>备选 Windows 自带 OCR 接口，需安装中文语言包</td>
+</tr>
+<tr>
+<td>正则</td>
+<td>Go 标准库 regexp</td>
+<td>即 RE2 语法，与第 5 节一致</td>
+</tr>
+<tr>
+<td>文件监听</td>
+<td>ReadDirectoryChangesW</td>
+<td>NTFS 可选用 USN 日志加速启动对账</td>
+</tr>
+<tr>
+<td>卷管理</td>
+<td>卷序列号与卷 GUID 接口、设备移除通知</td>
+<td>收到移除请求时释放句柄（F-VOL-07）</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>技术验证项（正式开发前完成）：</strong></p>
+<ol>
+<li><strong>全文索引选型。</strong> 判断标准：一两个字的中文能否精确命中、短语和邻近查询、模糊匹配、10 万个文件下的查询延迟、增量更新速度、索引体积。注意 FTS5 的 trigram 分词器对少于 3 个字的查询无法使用索引，需要配合其他方案。</li>
+<li><strong>老格式转换。</strong> 用真实的 .doc、.xls、.ppt、.wps、.et、.dps 样本各约 100 份，测提取成功率和单个文件平均耗时。</li>
+<li><strong>OCR。</strong> 用真实扫描件和图片测识别准确率和每页耗时，据此确定图片 OCR 的默认开关和预计耗时。</li>
+<li><strong>正则全量扫描。</strong> 测 10 万个文件提取文本的全量扫描时间，决定提取文本的压缩和分块方式。</li>
+<li><strong>首次索引吞吐。</strong> 测各类文件的每秒处理数，校准第 9 节中「待校准」的指标。</li>
+<li><strong>压缩包与邮件。</strong> 确认 7z、rar 的 Go 读取库能否不落盘逐个读取；用真实样本测 zip 中文文件名的编码识别、.msg 的解析成功率；评估 pst 解析方案是否可行。</li>
+</ol>
+<h2 id="s11">11. 版本规划</h2>
+<p>分五个阶段推进，每个阶段结束时都是一个能用的版本；按卷 ID 存储路径（F-VOL-01）放在 M1 实现，避免以后迁移索引。</p>
+<ol>
+<li><strong>M0 技术验证。</strong> 完成第 10 节的 6 项验证。完成标准：确定索引引擎、老格式转换和 OCR 方案，有实测数据支撑。</li>
+<li><strong>M1 核心可用。</strong> 索引范围与排除规则；文本、Office 新格式、PDF 文字层；关键词、短语、布尔、筛选、文件名搜索；结果列表、预览、打开；托盘和全局快捷键；本地实时监听和启动对账；解析子进程隔离；按卷 ID 存储路径。完成标准：日常查找可以用它代替现有方式。</li>
+<li><strong>M2 格式全覆盖。</strong> 老格式和 WPS 转换；扫描 PDF 和图片 OCR；压缩包和邮件；正则搜索；模糊匹配；失败列表与重试；后台资源控制。完成标准：第 4 节所有 P0 和 P1 格式可搜索。</li>
+<li><strong>M3 移动硬盘与网络盘。</strong> 第 7 节全部 P0 需求：离线搜索、重新接入对账、安全弹出、网络盘定时扫描。完成标准：拔插移动硬盘、改变盘符后结果始终正确。</li>
+<li><strong>M4 完善。</strong> 全部 P1 需求，如高级搜索面板、搜索历史、打开到命中位置、重复文件合并。</li>
+</ol>
+<p>P2 需求在 M4 之后按实际使用情况决定是否做。</p>
+<h2 id="s12">12. 不在本期范围与已确定事项</h2>
+<p><strong>不在本期范围：</strong></p>
+<ul>
+<li>多用户使用、局域网共享索引、服务器部署。</li>
+<li>macOS 和 Linux。</li>
+<li>音频和视频转文字。</li>
+<li>云盘中仅在线、未下载到本地的文件内容。</li>
+<li>按语义查找（不含相同字词、但意思相近的内容）。</li>
+</ul>
+<p><strong>已确定事项：</strong></p>
+<ul>
+<li>支持压缩包和邮件文件，见第 4 节。</li>
+<li>繁简体归一默认开启，可在设置中关闭。</li>
+<li>全局快捷键默认 <code>Ctrl+Alt+F</code>，可修改。</li>
+<li>界面采用 React。</li>
+<li>软件名称为「找找」（ZhaoZhao），见第 1 节。</li>
+</ul>
+</main>
+</div>
+</body>
+</html>
