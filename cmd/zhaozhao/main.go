@@ -169,6 +169,12 @@ func resolveDataDir(flagVal string) string {
 	if d := os.Getenv("ZHAOZHAO_DATA"); d != "" {
 		return d
 	}
+	// 便携版：程序旁边有 portable.flag 时，数据放在程序目录下的 data 文件夹
+	if exe, err := os.Executable(); err == nil {
+		if _, err := os.Stat(filepath.Join(filepath.Dir(exe), "portable.flag")); err == nil {
+			return filepath.Join(filepath.Dir(exe), "data")
+		}
+	}
 	if runtime.GOOS == "windows" {
 		if l := os.Getenv("LOCALAPPDATA"); l != "" {
 			return filepath.Join(l, "ZhaoZhao")

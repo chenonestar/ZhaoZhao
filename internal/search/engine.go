@@ -108,6 +108,40 @@ func hasNode(n query.Node, pred func(query.Node) bool) bool {
 	return false
 }
 
+// searchFast 是 exact 查询的快速路径（见 Search）。总数不含跨窗口的重复文件合并，可能略多。
+func (e *Engine) searchFast(ctx context.Context, ast query.Node, p Params, o norm.Options, now time.Time, match string, start time.Time) (*Response, error) {
+	resp := &Response{Results: []Result{}, Exact: true}
+	total, err := e.DB.CountMatch(match)
+	if err != nil {
+		return nil, fmt.Errorf("查询索引失败：%w", err)
+	}
+	ranked, err := e.DB.TopRanked(match, p.Offset+p.Limit+50)
+	if err != nil {
+		return nil, fmt.Errorf("查询索引失败：%w", err)
+	}
+	cands := make([]*cand, 0, len(ranked))
+	for i := range ranked {
+		c := &cand{Ranked: ranked[i]}
+		c.path, c.online, c.volLabel = e.Res.Display(&c.File)
+		c.score = -c.Rank
+		cands = append(cands, c)
+	}
+	cands = groupDuplicates(cands)
+	resp.Total = total
+	lo, hi := p.Offset, p.Offset+p.Limit
+	if lo > len(cands) {
+		lo = len(cands)
+	}
+	if hi > len(cands) {
+		hi = len(cands)
+	}
+	for _, c := range cands[lo:hi] {
+		resp.Results = append(resp.Results, e.render(ast, p, o, now, c))
+	}
+	resp.ElapsedMs = time.Since(start).Milliseconds()
+	return resp, ctx.Err()
+}
+
 func (e *Engine) newMeta(f *store.File, o norm.Options, now time.Time) *metaEval {
 	path, _, label := e.Res.Display(f)
 	return &metaEval{now: now, norm: o, path: path, volLabel: label, file: f}
@@ -148,6 +182,15 @@ func (e *Engine) Search(ctx context.Context, p Params) (*Response, error) {
 	if plan.kind == fxExpr {
 		match = plan.s
 	}
+	now := time.Now()
+	hasFilter := hasNode(ast, func(n query.Node) bool { _, ok := n.(*query.Filter); return ok })
+
+	// 快速路径：命中集合完全由索引决定、按相关度排序、没有元数据过滤时，
+	// 只取相关度最高的一批，总数单独计数，不为全部命中构造对象。
+	if plan.exact && plan.kind == fxExpr && !plan.fuzzy && !hasFilter && (p.Sort == "" || p.Sort == "relevance") && p.Offset+p.Limit <= 2000 {
+		return e.searchFast(ctx, ast, p, o, now, match, start)
+	}
+
 	ranked, err := e.DB.QueryRanked(match)
 	if err != nil {
 		return nil, fmt.Errorf("查询索引失败：%w", err)
@@ -155,9 +198,23 @@ func (e *Engine) Search(ctx context.Context, p Params) (*Response, error) {
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-
-	now := time.Now()
-	hasFilter := hasNode(ast, func(n query.Node) bool { _, ok := n.(*query.Filter); return ok })
+	// 模糊查询：命中集合是「精确 ∪ 模糊」，单独取出精确命中的集合，精确结果排在前面
+	var exactSet map[int64]bool
+	if plan.exact && plan.fuzzy {
+		p0 := *pl
+		p0.noFuzzy = true
+		px := p0.plan(ast)
+		switch px.kind {
+		case fxExpr:
+			if exactSet, err = e.DB.MatchIDs(px.s); err != nil {
+				return nil, fmt.Errorf("查询索引失败：%w", err)
+			}
+		case fxNone:
+			exactSet = map[int64]bool{}
+		default:
+			plan.exact = false // 无法用索引区分精确命中，退回逐个校验
+		}
+	}
 	cands := make([]*cand, 0, len(ranked))
 	for i := range ranked {
 		c := &cand{Ranked: ranked[i]}
@@ -213,6 +270,10 @@ func (e *Engine) Search(ctx context.Context, p Params) (*Response, error) {
 	for _, c := range cands {
 		if plan.exact {
 			c.score = -c.Rank
+			if exactSet != nil && !exactSet[c.ID] {
+				c.fuzzy = true
+				c.score -= 1e6 // 模糊结果排在精确结果之后
+			}
 		}
 	}
 

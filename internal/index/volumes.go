@@ -62,16 +62,16 @@ func (m *Manager) refreshVolumes(initial bool) {
 	}
 	// 未映射盘符的网络共享
 	m.mu.RLock()
-	var probe []*volState
+	var probe []store.Volume
 	for id, vs := range m.vols {
 		if _, ok := live[id]; !ok && strings.HasPrefix(id, "unc:") && vs.known.Label != "" {
-			probe = append(probe, vs)
+			probe = append(probe, vs.known)
 		}
 	}
 	m.mu.RUnlock()
-	for _, vs := range probe {
-		if probeNetwork(vs.known.Label) {
-			live[vs.known.ID] = volume.Info{ID: vs.known.ID, Label: vs.known.Label, Kind: volume.KindNetwork, Mount: vs.known.Label + `\`}
+	for _, k := range probe {
+		if probeNetwork(k.Label) {
+			live[k.ID] = volume.Info{ID: k.ID, Label: k.Label, Kind: volume.KindNetwork, Mount: k.Label + `\`}
 		}
 	}
 
@@ -208,7 +208,11 @@ func (m *Manager) periodicScans() {
 				every = 10 * 60
 			}
 		}
-		if every > 0 && now-rt.LastScan >= every {
+		last := rt.LastScan
+		if d := m.scanStateOf(id).lastDone.Load(); d > last {
+			last = d
+		}
+		if every > 0 && now-last >= every {
 			due = append(due, id)
 		}
 	}
@@ -226,7 +230,7 @@ func (m *Manager) autoDeleteStale() {
 	cut := time.Now().Add(-time.Duration(days) * 24 * time.Hour).Unix()
 	vs, _ := m.DB.ListVolumes()
 	for _, v := range vs {
-		if o := m.volOf(v.ID); o != nil && !o.online && v.LastSeen > 0 && v.LastSeen < cut {
+		if _, _, online, ok := m.volSnapshot(v.ID); ok && !online && v.LastSeen > 0 && v.LastSeen < cut {
 			m.logf("超过 %d 天未接入，删除卷索引: %s", days, v.Label)
 			_ = m.DeleteVolume(v.ID)
 		}

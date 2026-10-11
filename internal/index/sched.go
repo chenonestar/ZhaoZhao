@@ -286,8 +286,8 @@ func (m *Manager) process(f store.File) {
 	if !online {
 		return // 卷离线：保持待处理，接入后继续
 	}
-	vs := m.volOf(f.VolumeID)
-	isNet := vs != nil && vs.info.Kind == volume.KindNetwork
+	info, _, _, _ := m.volSnapshot(f.VolumeID)
+	isNet := info.Kind == volume.KindNetwork
 	if isNet {
 		select {
 		case s.net <- struct{}{}:
@@ -335,6 +335,9 @@ func (m *Manager) process(f store.File) {
 	}
 	opts := m.extractOptions(cfg, useOCR)
 	pool, timeout := m.Pool, opts.Timeout+15*time.Second
+	if extract.IsContainer(f.Ext) {
+		timeout = 20 * time.Minute // 压缩包和邮箱可能很大
+	}
 	if useOCR {
 		// OCR 按页计时（每页的超时在 OCR 组件内处理），整份文件给更长的总时限
 		timeout = 45 * time.Minute
@@ -402,7 +405,7 @@ func (m *Manager) prepare(f store.File, res doc.Result) *prepared {
 	if res.Status == doc.StatusOK || len(res.Children) > 0 {
 		p.text = &store.Text{Text: res.Text, LineBased: res.LineBased, Locs: res.Locs}
 		p.fts = ftsOf(o, res.Text)
-		if len(res.Children) > 0 && res.Status != doc.StatusOK {
+		if len(res.Children) > 0 && (res.Status == doc.StatusNoContent || res.Status == doc.StatusSkipped) {
 			p.state = store.StateDone
 		}
 	}

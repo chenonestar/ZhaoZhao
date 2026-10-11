@@ -185,7 +185,8 @@ func findTerm(dt, q []norm.Token, fuzzy bool) ([]Span, bool) {
 	}
 	switch {
 	case len(q) >= 2 && allCJK(q):
-		return findProximity(dt, q, 2), true
+		out := findProximity(dt, q, 2)
+		return out, len(out) > 0
 	case len(q) == 1 && !q[0].CJK:
 		k := editBudget(utf8.RuneCountInString(q[0].Text))
 		if k == 0 {
@@ -200,7 +201,7 @@ func findTerm(dt, q []norm.Token, fuzzy bool) ([]Span, bool) {
 				}
 			}
 		}
-		return out, true
+		return out, len(out) > 0
 	}
 	return nil, false
 }

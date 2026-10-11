@@ -71,4 +71,17 @@ if so:
     shutil.copy(f"{out}/报销.xls", f"{out}/报销2.et")
     shutil.copy(f"{out}/汇报.ppt", f"{out}/汇报2.dps")
     shutil.rmtree(out + "/_c", ignore_errors=True)
+try:
+    import py7zr, tempfile
+    d7 = tempfile.mkdtemp()
+    os.makedirs(d7 + "/合同", exist_ok=True)
+    open(d7 + "/合同/说明.txt", "w", encoding="utf8").write("这里提到海獭这个词")
+    open(d7 + "/顶层.txt", "w", encoding="utf8").write("顶层文件 内容")
+    with py7zr.SevenZipFile(f"{out}/归档.7z", "w") as z:
+        z.write(d7 + "/合同/说明.txt", "合同/说明.txt"); z.write(d7 + "/顶层.txt", "顶层.txt")
+    with py7zr.SevenZipFile(f"{out}/加密.7z", "w", password="secret") as z:
+        z.set_encrypted_header(True)
+        z.write(d7 + "/顶层.txt", "顶层.txt")
+except ImportError:
+    pass
 print("ok")

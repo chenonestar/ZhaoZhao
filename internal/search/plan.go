@@ -25,6 +25,7 @@ type fx struct {
 	kind  fxKind
 	s     string
 	exact bool
+	fuzzy bool // 表达式里含模糊部分：命中集合是「精确 ∪ 模糊」，精确命中需要另行区分
 }
 
 type planner struct {
@@ -32,6 +33,7 @@ type planner struct {
 	norm     norm.Options
 	scope    string // all | content | name
 	fuzzyAll bool   // 全局模糊开关
+	noFuzzy  bool   // 忽略所有模糊（用于单独取出精确命中的集合）
 }
 
 func (p *planner) col(nameOnly bool) string {
@@ -67,8 +69,7 @@ func (p *planner) plan(n query.Node) fx {
 	case *query.Term:
 		return p.planTerm(t)
 	case *query.Near:
-		a, b := p.planTerm(t.A), p.planTerm(t.B)
-		return andFx([]fx{a, b}, false)
+		return p.planNear(t)
 	case *query.Regex:
 		return p.planRegex(t)
 	case *query.Filter:
@@ -77,7 +78,7 @@ func (p *planner) plan(n query.Node) fx {
 		return p.planAnd(t)
 	case *query.Or:
 		var parts []string
-		exact := true
+		exact, fuzzy := true, false
 		for _, c := range t.Items {
 			f := p.plan(c)
 			switch f.kind {
@@ -88,11 +89,12 @@ func (p *planner) plan(n query.Node) fx {
 			}
 			parts = append(parts, "("+f.s+")")
 			exact = exact && f.exact
+			fuzzy = fuzzy || f.fuzzy
 		}
 		if len(parts) == 0 {
 			return fx{kind: fxNone}
 		}
-		return fx{kind: fxExpr, s: strings.Join(parts, " OR "), exact: exact}
+		return fx{kind: fxExpr, s: strings.Join(parts, " OR "), exact: exact, fuzzy: fuzzy}
 	case *query.Not:
 		return fx{kind: fxAll}
 	}
@@ -101,6 +103,7 @@ func (p *planner) plan(n query.Node) fx {
 
 func andFx(fs []fx, exact bool) fx {
 	var parts []string
+	fuzzy := false
 	for _, f := range fs {
 		switch f.kind {
 		case fxNone:
@@ -110,11 +113,38 @@ func andFx(fs []fx, exact bool) fx {
 		}
 		parts = append(parts, "("+f.s+")")
 		exact = exact && f.exact
+		fuzzy = fuzzy || f.fuzzy
 	}
 	if len(parts) == 0 {
 		return fx{kind: fxAll}
 	}
-	return fx{kind: fxExpr, s: strings.Join(parts, " AND "), exact: exact}
+	return fx{kind: fxExpr, s: strings.Join(parts, " AND "), exact: exact, fuzzy: fuzzy}
+}
+
+// planNear 把 A NEAR/n B 翻译成 FTS5 的 NEAR()：n 个字内最多隔 n 个词元，因此是候选的超集。
+func (p *planner) planNear(n *query.Near) fx {
+	pa, pb := p.nearPhrase(n.A), p.nearPhrase(n.B)
+	if pa == "" || pb == "" {
+		a, b := p.planTerm(n.A), p.planTerm(n.B)
+		r := andFx([]fx{a, b}, false)
+		r.exact = false
+		return r
+	}
+	col := ""
+	if n.A.NameOnly || n.B.NameOnly {
+		col = "n : "
+	} else if c := p.col(false); c != "" {
+		col = c
+	}
+	return fx{kind: fxExpr, s: fmt.Sprintf("%sNEAR(%s %s, %d)", col, pa, pb, n.N)}
+}
+
+func (p *planner) nearPhrase(t *query.Term) string {
+	toks := norm.Tokenize(p.norm.Runes(t.Text))
+	if len(toks) == 0 {
+		return ""
+	}
+	return phraseExpr(toks)
 }
 
 func (p *planner) planAnd(a *query.And) fx {
@@ -163,7 +193,7 @@ func (p *planner) planTerm(t *query.Term) fx {
 		return fx{kind: fxAll} // 纯符号：校验阶段按子串匹配
 	}
 	col := p.col(t.NameOnly)
-	fuzzy := t.Fuzzy || (p.fuzzyAll && !t.Phrase)
+	fuzzy := (t.Fuzzy || (p.fuzzyAll && !t.Phrase)) && !p.noFuzzy
 	if fuzzy && !t.Phrase {
 		if f, ok := p.planFuzzy(toks, col); ok {
 			return f
@@ -193,7 +223,12 @@ func (p *planner) planFuzzy(toks []norm.Token, col string) (fx, bool) {
 				parts = append(parts, quote(t.Text))
 			}
 		}
-		return fx{kind: fxExpr, s: col + "(" + strings.Join(parts, " AND ") + ")"}, true
+		// 相邻字之间最多夹 2 个字：整个查询词的字都落在一个窗口内（NEAR 不分先后，是超集）
+		near := fmt.Sprintf("NEAR(%s, %d)", strings.Join(parts, " "), 2*(len(toks)-1))
+		if len(parts) != len(toks) { // 有重复的字，退化为 AND
+			near = "(" + strings.Join(parts, " AND ") + ")"
+		}
+		return fx{kind: fxExpr, s: col + near, fuzzy: true}, true
 	case len(toks) == 1 && !toks[0].CJK:
 		k := editBudget(len([]rune(toks[0].Text)))
 		if k == 0 {
@@ -204,7 +239,8 @@ func (p *planner) planFuzzy(toks []norm.Token, col string) (fx, bool) {
 		for _, v := range terms {
 			parts = append(parts, quote(v))
 		}
-		return fx{kind: fxExpr, s: col + "(" + strings.Join(parts, " OR ") + ")"}, true
+		// 词表里的近似词已完整列出（没有被截断）时，索引命中集合与查询语义一致，无需逐个文件校验
+		return fx{kind: fxExpr, s: col + "(" + strings.Join(parts, " OR ") + ")", exact: len(terms) < 400, fuzzy: true}, true
 	}
 	return fx{}, false
 }

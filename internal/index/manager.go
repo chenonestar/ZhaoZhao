@@ -51,11 +51,11 @@ type scanReq struct {
 	force  bool   // 忽略大小/时间对账，全部重新入队
 }
 
+// scanState 记录某个索引根的扫描进度；各字段会被扫描协程和状态查询并发读写。
 type scanState struct {
-	running  bool
-	count    int64
-	started  time.Time
-	finished time.Time
+	running  atomic.Bool
+	count    int64        // 原子访问
+	lastDone atomic.Int64 // 最近一次完整扫描完成的 Unix 时间
 }
 
 // Manager 管理索引的整个生命周期。
@@ -107,6 +107,8 @@ func New(db *store.DB, prov volume.Provider, pool *worker.Pool, dataDir string) 
 		vols: map[string]*volState{}, roots: map[int64]*rootRT{},
 		kickCh: make(chan struct{}, 1), scanQ: make(chan scanReq, 1024),
 		scanSet: map[scanReq]bool{}, scanInfo: map[int64]*scanState{}}
+	m.watch.watched = map[int64]recursiveWatcher{}
+	m.watch.pending = map[string]pendingEvent{}
 	if m.Pool == nil {
 		m.Pool = worker.NewPool("", 1)
 	}
@@ -257,6 +259,17 @@ func (m *Manager) volOf(id string) *volState {
 	return m.vols[id]
 }
 
+// volSnapshot 在锁内取出卷信息的副本，避免与卷监控协程并发读写。
+func (m *Manager) volSnapshot(id string) (info volume.Info, known store.Volume, online, ok bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	v := m.vols[id]
+	if v == nil {
+		return volume.Info{}, store.Volume{}, false, false
+	}
+	return v.info, v.known, v.online, true
+}
+
 func joinMount(mount, rel string) string {
 	if rel == "" {
 		return mount
@@ -300,11 +313,11 @@ func (m *Manager) Display(f *store.File) (string, bool, string) {
 func (m *Manager) OpenTarget(f *store.File) (path string, err error) {
 	p, on := m.AbsPath(f.VolumeID, f.RelPath)
 	if !on {
-		v := m.volOf(f.VolumeID)
-		if v == nil {
+		info, known, _, ok := m.volSnapshot(f.VolumeID)
+		if !ok {
 			return "", fmt.Errorf("文件所在的磁盘已不在索引中")
 		}
-		return "", &OfflineError{Label: v.info.Label, LastMount: v.known.LastMount, LastSeen: v.known.LastSeen}
+		return "", &OfflineError{Label: info.Label, LastMount: known.LastMount, LastSeen: known.LastSeen}
 	}
 	if _, err := os.Stat(p); err != nil {
 		return "", fmt.Errorf("文件不存在或无法访问：%v", err)
@@ -426,6 +439,7 @@ func (m *Manager) SetRootOpts(id int64, o RootOpts) error {
 		return err
 	}
 	_ = m.reloadRoots()
+	m.saveRootsBackup()
 	m.enqueueScan(scanReq{rootID: id})
 	return nil
 }

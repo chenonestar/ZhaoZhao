@@ -810,3 +810,84 @@ func (d *DB) VolumeIndexBytes(volID string) (int64, error) {
 	err := d.R.QueryRow(`SELECT SUM(length(t.data)) FROM texts t JOIN files f ON f.id=t.file_id WHERE f.volume_id=?`, volID).Scan(&n)
 	return n.Int64, err
 }
+
+// CountMatch 返回 FTS5 表达式命中的文件数（只扫描倒排索引，很快）。
+func (d *DB) CountMatch(match string) (int, error) {
+	var n int
+	err := d.R.QueryRow(`SELECT count(*) FROM fts WHERE fts MATCH ?`, match).Scan(&n)
+	return n, err
+}
+
+// MatchIDs 返回 FTS5 表达式命中的全部文件 id。
+func (d *DB) MatchIDs(match string) (map[int64]bool, error) {
+	rows, err := d.R.Query(`SELECT rowid FROM fts WHERE fts MATCH ?`, match)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
+// TopRanked 取相关度最高的 k 个候选。大量命中时只为前 k 个构造文件对象，避免整体开销。
+func (d *DB) TopRanked(match string, k int) ([]Ranked, error) {
+	rows, err := d.R.Query(`SELECT rowid, bm25(fts, 1.0, 8.0) r FROM fts WHERE fts MATCH ? ORDER BY r LIMIT ?`, match, k)
+	if err != nil {
+		return nil, err
+	}
+	var ids []int64
+	rank := map[int64]float64{}
+	for rows.Next() {
+		var id int64
+		var r float64
+		if err := rows.Scan(&id, &r); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+		rank[id] = r
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	byID := make(map[int64]File, len(ids))
+	for i := 0; i < len(ids); i += 500 {
+		j := i + 500
+		if j > len(ids) {
+			j = len(ids)
+		}
+		chunk := ids[i:j]
+		args := make([]any, len(chunk))
+		for n, id := range chunk {
+			args[n] = id
+		}
+		fr, err := d.R.Query(`SELECT `+fileCols+` FROM files WHERE id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for fr.Next() {
+			f, err := scanFile(fr)
+			if err != nil {
+				fr.Close()
+				return nil, err
+			}
+			byID[f.ID] = f
+		}
+		fr.Close()
+	}
+	out := make([]Ranked, 0, len(ids))
+	for _, id := range ids {
+		if f, ok := byID[id]; ok {
+			out = append(out, Ranked{File: f, Rank: rank[id]})
+		}
+	}
+	return out, nil
+}

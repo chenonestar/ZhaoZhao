@@ -6,6 +6,7 @@ import (
 	"log"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -128,7 +129,9 @@ var (
 func shutdownShell() {
 	if shellHwnd != 0 {
 		procPostMessage.Call(shellHwnd, wmQuitShell, 0, 0)
+		return
 	}
+	stopOnce.Do(func() { close(stopCh) }) // 没能创建隐藏窗口时，runShell 只是在等待退出
 }
 
 // parseHotkey 解析 "Ctrl+Alt+F" 形式的快捷键。
@@ -297,6 +300,9 @@ func runShell(c *shellCtx) {
 	}
 }
 
-var stopCh = make(chan struct{})
+var (
+	stopCh   = make(chan struct{})
+	stopOnce sync.Once
+)
 
 func waitOnly() { <-stopCh }

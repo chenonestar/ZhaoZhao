@@ -224,3 +224,62 @@ func TestEmptyAndSyntaxError(t *testing.T) {
 	}
 	check(t, e, "#")
 }
+
+func TestFuzzyOrderingAndFlag(t *testing.T) {
+	docs := append([]doc{}, corpus...)
+	docs = append(docs,
+		doc{"a/exact.txt", "this document mentions quarterlt typo exactly", 10, time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local)},
+		doc{"a/near.txt", "another says quarterly results", 10, time.Date(2025, 9, 1, 0, 0, 0, 0, time.Local)})
+	e := newEngine(t, docs)
+	r, err := e.Search(context.Background(), Params{Query: "quarterlt~"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for _, x := range r.Results {
+		order = append(order, fmt.Sprintf("%s:%v", x.Name, x.Fuzzy))
+	}
+	// 精确命中（含前缀）排在前，模糊命中其后并带「模糊」标记
+	if len(order) != 3 || order[0] != "exact.txt:false" || order[1] != "invoice.txt:true" && order[1] != "near.txt:true" {
+		t.Fatalf("%v", order)
+	}
+	if !r.Exact {
+		t.Error("英文模糊在词表完整时应由索引直接给出命中集合")
+	}
+	// 中文模糊同样：精确的排前面，只有「合同的审批」这种夹字写法的排最后
+	e2 := newEngine(t, append(append([]doc{}, corpus...), doc{"x/f.txt", "走流程：合同的审批要三天", 1, time.Now()}))
+	r, _ = e2.Search(context.Background(), Params{Query: "合同审批~"})
+	n := len(r.Results)
+	if n < 2 || r.Results[n-1].Name != "f.txt" || !r.Results[n-1].Fuzzy || r.Results[0].Fuzzy {
+		t.Fatalf("%+v", r.Results)
+	}
+}
+
+func TestFastPathTotals(t *testing.T) {
+	var docs []doc
+	for i := 0; i < 300; i++ {
+		docs = append(docs, doc{fmt.Sprintf("d/f%03d.txt", i), fmt.Sprintf("共同的词 唯一%03d", i), int64(i), time.Now()})
+	}
+	e := newEngine(t, docs)
+	r, _ := e.Search(context.Background(), Params{Query: "共同", Limit: 20})
+	if r.Total != 300 || len(r.Results) != 20 || !r.Exact {
+		t.Fatalf("total=%d n=%d", r.Total, len(r.Results))
+	}
+	r2, _ := e.Search(context.Background(), Params{Query: "共同", Limit: 20, Offset: 20})
+	if len(r2.Results) != 20 || r2.Results[0].ID == r.Results[0].ID {
+		t.Fatal("翻页应取到不同的结果")
+	}
+	seen := map[int64]bool{}
+	for off := 0; off < 300; off += 100 {
+		rr, _ := e.Search(context.Background(), Params{Query: "共同", Limit: 100, Offset: off})
+		for _, x := range rr.Results {
+			if seen[x.ID] {
+				t.Fatalf("翻页出现重复结果 %d", x.ID)
+			}
+			seen[x.ID] = true
+		}
+	}
+	if len(seen) != 300 {
+		t.Fatalf("翻页应覆盖全部结果: %d", len(seen))
+	}
+}

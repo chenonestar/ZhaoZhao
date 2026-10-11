@@ -109,7 +109,7 @@ func (m *Manager) decide(rt *rootRT, cfg Config, abs, ext string, size int64, in
 	return store.StateMetaOnly, "非文本文件，仅索引文件名", prio, kind
 }
 
-var knownNoHandler = map[string]bool{"7z": true, "rar": true, "tar": true, "gz": true, "tgz": true, "pst": true, "ost": true}
+var knownNoHandler = map[string]bool{"pst": true, "ost": true}
 
 func readHead(p string, n int) ([]byte, error) {
 	f, err := os.Open(p)
@@ -166,7 +166,7 @@ func (m *Manager) runScan(req scanReq) {
 	startAbs := joinMount(mount, startRel)
 	st := m.scanStateOf(rt.ID)
 	if req.sub == "" {
-		st.running, st.started = true, time.Now()
+		st.running.Store(true)
 		atomic.StoreInt64(&st.count, 0)
 	}
 	cfg := m.Config()
@@ -241,7 +241,7 @@ func (m *Manager) runScan(req scanReq) {
 		} else {
 			m.logf("无法访问索引根 %s: %v", startAbs, err)
 		}
-		st.running, st.finished = false, time.Now()
+		st.running.Store(false)
 		return
 	} else if !fi.IsDir() {
 		visit(startAbs, startRel, fi)
@@ -250,7 +250,9 @@ func (m *Manager) runScan(req scanReq) {
 	}
 	flush()
 	if w.aborted() || aborted || m.ctx.Err() != nil {
-		st.running = false
+		if req.sub == "" {
+			st.running.Store(false)
+		}
 		return // 中途卷被拔出或程序退出：不做删除对账
 	}
 	// 对账：数据库里有、磁盘上没有的文件
@@ -273,9 +275,10 @@ func (m *Manager) runScan(req scanReq) {
 		}
 	}
 	if req.sub == "" {
-		_ = m.DB.SetRootScanned(rt.ID, time.Now().Unix())
-		rt.LastScan = time.Now().Unix()
-		st.running, st.finished = false, time.Now()
+		now := time.Now().Unix()
+		_ = m.DB.SetRootScanned(rt.ID, now)
+		st.lastDone.Store(now)
+		st.running.Store(false)
 	}
 	m.kick()
 }

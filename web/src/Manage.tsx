@@ -134,6 +134,7 @@ function RootOptsDialog({ root, onClose, onSave }: { root: RootStatus; onClose: 
   const [inc, setInc] = useState((root.opts?.includeExts ?? []).join(" "));
   const [exc, setExc] = useState((root.opts?.excludeGlobs ?? []).join("\n"));
   const [follow, setFollow] = useState(root.opts?.followLinks ?? false);
+  const [ocr, setOcr] = useState(root.opts?.ocr ?? true);
   return (
     <div className="modal-back" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -144,12 +145,14 @@ function RootOptsDialog({ root, onClose, onSave }: { root: RootStatus; onClose: 
         <label className="field"><span>附加排除规则（每行一条，支持 * ? 通配符）</span>
           <textarea rows={4} value={exc} onChange={(e) => setExc(e.target.value)} /></label>
         <label className="check"><input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} />跟随符号链接和目录联接</label>
+        <label className="check"><input type="checkbox" checked={ocr} onChange={(e) => setOcr(e.target.checked)} />对该索引根里的图片和扫描 PDF 做 OCR（需要 OCR 组件）</label>
         <div className="modal-foot">
           <button onClick={onClose}>取消</button>
           <button className="primary" onClick={() => onSave({
             includeExts: inc.split(/[\s,]+/).filter(Boolean),
             excludeGlobs: exc.split("\n").map((s) => s.trim()).filter(Boolean),
             followLinks: follow || undefined,
+            ocr: ocr ? undefined : false,
           })}>保存</button>
         </div>
       </div>

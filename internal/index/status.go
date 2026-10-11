@@ -97,8 +97,8 @@ func (m *Manager) Status() Status {
 		}
 		rs.Path = m.rootDisplay(r)
 		ss := m.scanStateOf(r.ID)
-		rs.Scanning, rs.Scanned = ss.running, atomic.LoadInt64(&ss.count)
-		if ss.running {
+		rs.Scanning, rs.Scanned = ss.running.Load(), atomic.LoadInt64(&ss.count)
+		if rs.Scanning {
 			st.Scanning = true
 			volSync[r.VolumeID] = true
 		}

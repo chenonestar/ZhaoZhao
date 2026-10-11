@@ -35,8 +35,6 @@ type pendingEvent struct {
 const debounce = 700 * time.Millisecond
 
 func (m *Manager) initWatch() {
-	m.watch.watched = map[int64]recursiveWatcher{}
-	m.watch.pending = map[string]pendingEvent{}
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()

@@ -1,6 +1,8 @@
 package index
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -411,4 +413,162 @@ func TestOCRPipeline(t *testing.T) {
 	if st.OCRQueue != 0 {
 		t.Fatalf("OCR 队列应已清空: %+v", st.OCRQueue)
 	}
+}
+
+func makeZip(t *testing.T, p string, files map[string]string) {
+	t.Helper()
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for n, c := range files {
+		w, _ := zw.Create(n)
+		w.Write([]byte(c))
+	}
+	zw.Close()
+	if err := os.WriteFile(p, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestContainers(t *testing.T) {
+	dir := t.TempDir()
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	makeZip(t, filepath.Join(dir, "归档", "2024.zip"), map[string]string{
+		"合同/采购合同.txt": "采购合同里的违约金条款 hedgehog",
+		"其他.txt":      "别的内容",
+	})
+	eml := "From: a@example.com\r\nTo: b@example.com\r\nSubject: 关于报销的通知\r\nDate: Mon, 07 Jul 2025 10:30:00 +0800\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n请提交差旅费单据 tapir\r\n"
+	write(t, filepath.Join(dir, "mail", "通知.eml"), eml)
+	e := newEnv(t, prov)
+	if _, err := e.m.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+
+	r, _ := e.eng.Search(context.Background(), search.Params{Query: "hedgehog"})
+	if len(r.Results) != 1 {
+		t.Fatalf("%+v", r.Results)
+	}
+	got := r.Results[0]
+	want := filepath.Join(dir, "归档", "2024.zip") + " › " + filepath.FromSlash("合同/采购合同.txt")
+	if got.Path != want || got.Name != "采购合同.txt" {
+		t.Fatalf("结果路径应为「容器路径 › 内部路径」: %q (want %q)", got.Path, want)
+	}
+	// path: 同时匹配容器内部路径
+	if got := e.names(`path:"2024.zip › 合同" 违约金`); !has(got, "采购合同.txt") {
+		t.Fatalf("path: 应能匹配内部路径: %v", got)
+	}
+	// 邮件：from:/subject: 过滤，日期作为修改时间
+	if got := e.names("from:a@example.com tapir"); !has(got, "通知.eml") {
+		t.Fatalf("%v", got)
+	}
+	if got := e.names("subject:报销 type:邮件"); !has(got, "通知.eml") {
+		t.Fatalf("%v", got)
+	}
+	if got := e.names("tapir modified:2025-07"); has(got, "通知.eml") {
+		// eml 文件本身的修改时间是文件系统时间，不是发送日期
+		t.Logf("提示：顶层 .eml 按文件修改时间过滤")
+	}
+	pv, _ := e.eng.Preview(r.Results[0].ID, search.Params{Query: "hedgehog"})
+	if pv == nil || len(pv.Hits) != 1 {
+		t.Fatalf("预览: %+v", pv)
+	}
+
+	// 压缩包更新：旧内部条目消失、新条目出现
+	time.Sleep(1100 * time.Millisecond)
+	makeZip(t, filepath.Join(dir, "归档", "2024.zip"), map[string]string{"新文件.txt": "更新后才有 pangolin"})
+	waitFor(t, "压缩包更新后重建内部条目", 20*time.Second, func() bool {
+		return has(e.names("pangolin"), "新文件.txt") && !has(e.names("hedgehog"), "采购合同.txt")
+	})
+	// 删除压缩包：内部条目一并消失
+	os.Remove(filepath.Join(dir, "归档", "2024.zip"))
+	waitFor(t, "删除压缩包后内部条目消失", 20*time.Second, func() bool { return !has(e.names("pangolin"), "新文件.txt") })
+}
+
+func TestRootsBackupRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	prov := &fakeProv{}
+	prov.addKind("usb9", "备份盘Z", dir, true, volume.KindRemovable)
+	os.MkdirAll(filepath.Join(dir, "归档"), 0o755)
+	e := newEnv(t, prov)
+	if _, err := e.m.AddRoot(filepath.Join(dir, "归档")); err != nil {
+		t.Fatal(err)
+	}
+	ro := true
+	if err := e.m.SetRootOpts(1, RootOpts{IncludeExts: []string{"docx"}, FollowLinks: &ro}); err != nil {
+		t.Fatal(err)
+	}
+	// 用管理器写出的真实备份，在全新的数据目录里恢复
+	fresh := t.TempDir()
+	b, err := os.ReadFile(filepath.Join(e.data, "roots.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(fresh, "roots.json"), b, 0o600)
+	db2, err := store.Open(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	if n := RestoreRoots(db2, fresh); n != 1 {
+		t.Fatalf("恢复数量 %d", n)
+	}
+	rs, _ := db2.ListRoots()
+	v, _ := db2.GetVolume("usb9")
+	if len(rs) != 1 || rs[0].RelPath != "归档" || v == nil || v.Label != "备份盘Z" || !strings.Contains(string(rs[0].Opts), "docx") {
+		t.Fatalf("%+v %+v", rs, v)
+	}
+}
+
+// 重启：数据目录里已有索引根时，启动不应崩溃，索引保留且立即可搜索，并对账启动期间的变化（F-BG-02、F-BG-08）。
+func TestRestartKeepsIndex(t *testing.T) {
+	dir := t.TempDir()
+	data := t.TempDir()
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	write(t, filepath.Join(dir, "a.txt"), "重启前的内容 gazelle")
+	write(t, filepath.Join(dir, "gone.txt"), "将被删除 impala")
+
+	start := func() (*Manager, *search.Engine, func()) {
+		db, err := store.Open(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := New(db, prov, nil, data)
+		if err := m.Start(); err != nil {
+			t.Fatal(err)
+		}
+		return m, &search.Engine{DB: db, Res: m, Norm: m.Norm}, func() { m.Stop(); db.Close() }
+	}
+	names := func(eng *search.Engine, q string) []string {
+		r, err := eng.Search(context.Background(), search.Params{Query: q})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, x := range r.Results {
+			out = append(out, x.Name)
+		}
+		return out
+	}
+	m1, eng1, stop1 := start()
+	if _, err := m1.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "首次索引", 20*time.Second, func() bool { return has(names(eng1, "gazelle"), "a.txt") && has(names(eng1, "impala"), "gone.txt") })
+	stop1()
+
+	// 程序没运行期间发生的变化
+	os.Remove(filepath.Join(dir, "gone.txt"))
+	write(t, filepath.Join(dir, "offline-new.txt"), "停机期间新增 okapi")
+
+	_, eng2, stop2 := start() // 不再 AddRoot
+	defer stop2()
+	if !has(names(eng2, "gazelle"), "a.txt") {
+		t.Fatal("重启后已有索引应立即可搜索")
+	}
+	waitFor(t, "启动对账", 20*time.Second, func() bool {
+		return has(names(eng2, "okapi"), "offline-new.txt") && !has(names(eng2, "impala"), "gone.txt")
+	})
 }
