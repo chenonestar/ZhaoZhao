@@ -86,7 +86,11 @@ func (m *Manager) decide(rt *rootRT, cfg Config, abs, ext string, size int64, in
 	switch {
 	case extract.IsImage(ext):
 		if !m.ocrEnabled(rt) {
-			return store.StateMetaOnly, "OCR 未启用，仅索引文件名", prioOCR, kind
+			why := "OCR 未启用，仅索引文件名"
+			if !m.ocrAvailable() {
+				why = "未安装 OCR 组件，仅索引文件名"
+			}
+			return store.StateMetaOnly, why, prioOCR, kind
 		}
 		return state, "", prioOCR, kind
 	case extract.IsLegacy(ext):
@@ -121,7 +125,16 @@ func readHead(p string, n int) ([]byte, error) {
 	return b[:k], err
 }
 
-func (m *Manager) ocrEnabled(rt *rootRT) bool { return false }
+// ocrAvailable 说明 OCR 组件是否已安装。
+func (m *Manager) ocrAvailable() bool { return m.ocrCfg.Enabled() }
+
+// ocrEnabled 说明某个索引根是否做 OCR：总开关、组件可用、索引根没有单独关闭。
+func (m *Manager) ocrEnabled(rt *rootRT) bool {
+	if !m.Config().OCREnabled || !m.ocrAvailable() {
+		return false
+	}
+	return rt == nil || rt.opts.OCR == nil || *rt.opts.OCR
+}
 
 func (m *Manager) nameFTS(name string) string {
 	return norm.FTSText(norm.Tokenize(m.Norm().Runes(name)))

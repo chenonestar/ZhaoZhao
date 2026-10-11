@@ -97,3 +97,43 @@ func TestSniffUnknown(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+// OCR 集成测试：设置 ZHAOZHAO_OCR 指向 RapidOCR-json 或 tools/ocr_bridge.py，
+// 并设置 ZHAOZHAO_OCR_FIXTURES 指向含 scan.png/scan.jpg/scan.bmp/scan.webp/multi.tif/icon.png/scanned.pdf 的目录。
+func TestOCR(t *testing.T) {
+	dir := os.Getenv("ZHAOZHAO_OCR_FIXTURES")
+	cfg := FindOCR()
+	if dir == "" || !cfg.Enabled() {
+		t.Skip("未设置 ZHAOZHAO_OCR / ZHAOZHAO_OCR_FIXTURES")
+	}
+	opt := DefaultOptions()
+	opt.OCR = cfg
+	get := func(name string) doc.Result {
+		r := Extract(filepath.Join(dir, name), Ext(name), opt)
+		t.Logf("%s: status=%s err=%q ocr=%v text=%q locs=%v", name, r.Status, r.Err, r.OCR, r.Text, r.Locs)
+		return r
+	}
+	for _, n := range []string{"scan.png", "scan.jpg", "scan.bmp", "scan.webp"} {
+		r := get(n)
+		if r.Status != doc.StatusOK || !r.OCR || !strings.Contains(r.Text, "违约金") || !strings.Contains(r.Text, "HT-2025-0888") {
+			t.Errorf("%s: %+v", n, r)
+		}
+	}
+	r := get("multi.tif")
+	if r.Status != doc.StatusOK || !strings.Contains(r.Text, "违约金") || !strings.Contains(r.Text, "差旅费") || len(r.Locs) != 2 || r.Locs[1].Label != "第2页" {
+		t.Errorf("multi.tif: %+v", r)
+	}
+	if r := get("icon.png"); r.Status != doc.StatusSkipped { // 短边小于 200 像素的图片跳过
+		t.Errorf("icon: %+v", r)
+	}
+	r = get("scanned.pdf")
+	if r.Status != doc.StatusOK || !r.OCR || !strings.Contains(r.Text, "违约金") || !strings.Contains(r.Text, "差旅费") || len(r.Locs) != 2 {
+		t.Errorf("scanned.pdf: %+v", r)
+	}
+	// 未配置 OCR 时：扫描 PDF 标记需要 OCR
+	off := DefaultOptions()
+	r2 := Extract(filepath.Join(dir, "scanned.pdf"), "pdf", off)
+	if r2.Status != doc.StatusNoContent || !r2.NeedOCR {
+		t.Errorf("无 OCR 的扫描 pdf: %+v", r2)
+	}
+}

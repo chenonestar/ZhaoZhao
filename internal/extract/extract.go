@@ -82,15 +82,11 @@ func Extract(p, ext string, opt Options) (res doc.Result) {
 	case hODF:
 		return extractODF(p)
 	case hPDF:
-		r := extractPDF(p)
-		if r.Status == doc.StatusNoContent && opt.OCR.Enabled() {
-			return ocrPDF(p, opt)
-		}
-		return r
+		return extractPDF(p, opt)
 	case hLegacy:
 		return extractLegacy(p, ext, opt.Timeout)
 	case hImage:
-		return extractImage(p, opt)
+		return extractImage(p, ext, opt)
 	case hZip, hEML, hMbox, hMSG:
 		return extractContainer(p, ext, opt, 0)
 	}

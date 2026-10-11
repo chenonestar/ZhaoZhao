@@ -30,6 +30,8 @@ type Config struct {
 	Workers           int  `json:"workers"`         // 提取并发数，0 表示 CPU 核心数的一半
 	TimeoutSec        int  `json:"timeoutSec"`      // 单文件提取超时
 	LegacyWorkers     int  `json:"legacyWorkers"`   // 老格式转换并发数
+	OCREnabled        bool `json:"ocrEnabled"`      // OCR 总开关
+	OCRWorkers        int  `json:"ocrWorkers"`      // OCR 并发数（每个占用较多内存）
 	NetworkScanMin    int  `json:"networkScanMin"`  // 网络盘定时扫描间隔（分钟）
 	NetworkReadConc   int  `json:"networkReadConc"` // 网络盘读取并发数
 	PauseOnBattery    bool `json:"pauseOnBattery"`  // 使用电池时暂停 OCR 和格式转换
@@ -38,6 +40,8 @@ type Config struct {
 	ArchiveMaxRatio   int  `json:"archiveMaxRatio"` // 单个内部文件压缩比上限
 
 	AutoDeleteDays int `json:"autoDeleteDays"` // 超过 N 天未接入则删除卷索引，0 关闭
+
+	Hotkey string `json:"hotkey"` // 全局快捷键，如 Ctrl+Alt+F；修改后重启生效
 }
 
 // DefaultConfig 返回默认设置，dataDir 会被加入排除列表（软件自身的数据目录）。
@@ -53,6 +57,8 @@ func DefaultConfig(dataDir string) Config {
 		Simplify:          true,
 		TimeoutSec:        60,
 		LegacyWorkers:     2,
+		OCREnabled:        true,
+		OCRWorkers:        1,
 		NetworkScanMin:    60,
 		NetworkReadConc:   2,
 		PauseOnBattery:    true,

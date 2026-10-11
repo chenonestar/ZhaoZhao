@@ -34,6 +34,7 @@ type schedState struct {
 	jobs     chan store.File
 	write    chan *prepared
 	legacy   chan struct{}
+	ocr      chan struct{}
 	net      chan struct{}
 
 	done      atomic.Int64
@@ -51,6 +52,7 @@ type prepared struct {
 	fts      string
 	nameFTS  string
 	reuse    int64 // 复用该文件的提取结果（内容相同）
+	requeue  bool  // 先保存文字层结果，再排到 OCR 队列
 	children []*preparedChild
 }
 
@@ -78,6 +80,11 @@ func (m *Manager) startScheduler() {
 		lw = 1
 	}
 	s.legacy = make(chan struct{}, lw)
+	ow := cfg.OCRWorkers
+	if ow < 1 {
+		ow = 1
+	}
+	s.ocr = make(chan struct{}, ow)
 	nc := cfg.NetworkReadConc
 	if nc < 1 {
 		nc = 2
@@ -250,8 +257,11 @@ func hashFile(p string, size int64) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (m *Manager) extractOptions(cfg Config) extract.Options {
+func (m *Manager) extractOptions(cfg Config, withOCR bool) extract.Options {
 	o := extract.DefaultOptions()
+	if withOCR {
+		o.OCR = m.ocrCfg
+	}
 	o.MaxTextBytes = int64(cfg.MaxTextMB) << 20
 	o.SniffUnknown = cfg.SniffUnknown
 	if cfg.TimeoutSec > 0 {
@@ -287,12 +297,17 @@ func (m *Manager) process(f store.File) {
 		}
 	}
 	if extract.IsLegacy(f.Ext) {
-		select {
-		case s.legacy <- struct{}{}:
-			defer func() { <-s.legacy }()
-		case <-m.ctx.Done():
+		if !m.takeSlot(s.legacy) {
 			return
 		}
+		defer func() { <-s.legacy }()
+	}
+	useOCR := f.Prio == prioOCR
+	if useOCR {
+		if !m.takeSlot(s.ocr) {
+			return
+		}
+		defer func() { <-s.ocr }()
 	}
 	fi, err := os.Stat(abs)
 	if err != nil {
@@ -318,8 +333,16 @@ func (m *Manager) process(f store.File) {
 			}
 		}
 	}
-	opts := m.extractOptions(cfg)
-	res := m.Pool.Extract(m.ctx, abs, f.Ext, opts, opts.Timeout+15*time.Second)
+	opts := m.extractOptions(cfg, useOCR)
+	pool, timeout := m.Pool, opts.Timeout+15*time.Second
+	if useOCR {
+		// OCR 按页计时（每页的超时在 OCR 组件内处理），整份文件给更长的总时限
+		timeout = 45 * time.Minute
+		if m.OCRPool != nil {
+			pool = m.OCRPool
+		}
+	}
+	res := pool.Extract(m.ctx, abs, f.Ext, opts, timeout)
 	if m.ctx.Err() != nil {
 		return
 	}
@@ -327,6 +350,24 @@ func (m *Manager) process(f store.File) {
 		res.Hash = hash
 	}
 	m.send(m.prepare(f, res))
+}
+
+// takeSlot 等待一个受限资源（老格式转换、OCR）的名额。等待期间先让出并发令牌，
+// 避免排队的慢任务占住令牌、拖住快任务。
+func (m *Manager) takeSlot(ch chan struct{}) bool {
+	select {
+	case ch <- struct{}{}:
+		return true
+	default:
+	}
+	m.release()
+	defer m.acquire()
+	select {
+	case ch <- struct{}{}:
+		return true
+	case <-m.ctx.Done():
+		return false
+	}
 }
 
 func (m *Manager) send(p *prepared) {
@@ -355,6 +396,9 @@ func ftsOf(o norm.Options, text string) string {
 func (m *Manager) prepare(f store.File, res doc.Result) *prepared {
 	o := m.Norm()
 	p := &prepared{file: f, res: res, state: stateOf(res), nameFTS: ftsOf(o, f.Name)}
+	if res.NeedOCR && f.Prio != prioOCR && m.ocrEnabled(m.getRoot(f.RootID)) {
+		p.requeue = true // 有页面没有文字层：先保存已有文字，再排到 OCR 队列
+	}
 	if res.Status == doc.StatusOK || len(res.Children) > 0 {
 		p.text = &store.Text{Text: res.Text, LineBased: res.LineBased, Locs: res.Locs}
 		p.fts = ftsOf(o, res.Text)
@@ -479,6 +523,11 @@ func (m *Manager) writeOne(tx *sql.Tx, p *prepared) error {
 	}
 	if err := store.PutResult(tx, f.ID, p.state, p.res.Err, p.res.Hash, p.res.OCR, p.text, p.fts, p.nameFTS); err != nil {
 		return err
+	}
+	if p.requeue {
+		if _, err := tx.Exec(`UPDATE files SET state=?, err='', prio=? WHERE id=?`, store.StatePending, prioOCR, f.ID); err != nil {
+			return err
+		}
 	}
 	if p.res.Meta != "" {
 		if _, err := tx.Exec(`UPDATE files SET meta=?, kind='mail' WHERE id=?`, p.res.Meta, f.ID); err != nil {

@@ -112,7 +112,7 @@ func (m *Manager) refreshVolumes(initial bool) {
 				m.vols[c.id].known = storeVolume(c.info, now)
 				m.mu.Unlock()
 			} else if !initial && m.baseline.Load() && !hasRoots {
-				m.noticeOnce("new:"+c.id, Notice{Kind: "new-volume", Volume: c.id,
+				m.noticeOnce("new:"+c.id, Notice{Kind: "new-volume", Volume: c.id, Path: c.info.Mount,
 					Message: "检测到新接入的磁盘「" + c.info.Label + "」（" + c.info.Mount + "），是否加入索引？"})
 			}
 			if hasRoots {

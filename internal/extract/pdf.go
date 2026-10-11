@@ -11,7 +11,7 @@ import (
 
 // extractPDF 按页提取文字层。没有文字的页视为扫描页：整份文件都没有文字时
 // 返回 StatusNoContent，交给 OCR 处理。
-func extractPDF(p string) (res doc.Result) {
+func extractPDF(p string, opt Options) (res doc.Result) {
 	defer func() {
 		if r := recover(); r != nil {
 			res = doc.Result{Status: doc.StatusFailed, Err: fmt.Sprintf("PDF 解析异常: %v", r)}
@@ -30,37 +30,58 @@ func extractPDF(p string) (res doc.Result) {
 			}
 		}()
 	}
-	var b doc.Builder
-	empty := 0
 	n := r.NumPage()
+	texts := make(map[int]string, n)
+	var blank []int
 	for i := 1; i <= n; i++ {
 		page := r.Page(i)
 		if page.V.IsNull() {
 			continue
 		}
 		txt, err := safePageText(page)
-		if err != nil {
-			if strings.Contains(strings.ToLower(err.Error()), "password") {
-				return doc.Result{Status: doc.StatusEncrypted, Err: "文件已加密"}
-			}
-			empty++
-			continue
+		if err != nil && strings.Contains(strings.ToLower(err.Error()), "password") {
+			return doc.Result{Status: doc.StatusEncrypted, Err: "文件已加密"}
 		}
 		txt = strings.TrimSpace(txt)
-		if txt == "" {
-			empty++
+		if err != nil || txt == "" {
+			blank = append(blank, i) // 逐页判断：没有文字层的页视为扫描页
 			continue
 		}
-		b.Mark("第" + strconv.Itoa(i) + "页")
-		b.Line(plainText(txt))
+		texts[i] = plainText(txt)
 	}
-	if b.Len() == 0 {
-		if n == 0 {
-			return doc.Result{Status: doc.StatusFailed, Err: "PDF 没有页面"}
+	if n == 0 {
+		return doc.Result{Status: doc.StatusFailed, Err: "PDF 没有页面"}
+	}
+	usedOCR := false
+	var ocrErr error
+	if len(blank) > 0 && opt.OCR.Enabled() {
+		var got map[int]string
+		got, ocrErr = ocrPDFPages(p, blank, opt)
+		for pg, t := range got {
+			if strings.TrimSpace(t) != "" {
+				texts[pg] = strings.TrimSpace(t)
+				usedOCR = true
+			}
 		}
-		return doc.Result{Status: doc.StatusNoContent, Err: "没有文字层，需要 OCR"}
 	}
-	return doc.Result{Status: doc.StatusOK, Text: b.String(), Locs: b.Locs}
+	var b doc.Builder
+	for i := 1; i <= n; i++ {
+		if t, ok := texts[i]; ok {
+			b.Mark("第" + strconv.Itoa(i) + "页")
+			b.Line(t)
+		}
+	}
+	needOCR := len(blank) > 0 && !opt.OCR.Enabled()
+	if b.Len() == 0 {
+		if ocrErr != nil {
+			return doc.Result{Status: doc.StatusFailed, Err: ocrErr.Error()}
+		}
+		if !opt.OCR.Enabled() {
+			return doc.Result{Status: doc.StatusNoContent, Err: "没有文字层，需要 OCR", NeedOCR: needOCR}
+		}
+		return doc.Result{Status: doc.StatusNoContent, Err: "没有文字层，OCR 也没有识别到文字"}
+	}
+	return doc.Result{Status: doc.StatusOK, Text: b.String(), Locs: b.Locs, OCR: usedOCR, NeedOCR: needOCR}
 }
 
 func safePageText(p pdf.Page) (s string, err error) {

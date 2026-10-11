@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chenonestar/zhaozhao/internal/extract"
 	"github.com/chenonestar/zhaozhao/internal/norm"
 	"github.com/chenonestar/zhaozhao/internal/store"
 	"github.com/chenonestar/zhaozhao/internal/volume"
@@ -25,6 +26,7 @@ type Notice struct {
 	Kind    string `json:"kind"` // new-volume | volume-conflict | corrupt | info
 	Message string `json:"message"`
 	Volume  string `json:"volume,omitempty"`
+	Path    string `json:"path,omitempty"`
 	Time    int64  `json:"time"`
 }
 
@@ -61,6 +63,8 @@ type Manager struct {
 	DB      *store.DB
 	Prov    volume.Provider
 	Pool    *worker.Pool
+	OCRPool *worker.Pool // OCR 专用进程池（并发数小，避免多个 OCR 引擎同时占用内存）；为空时使用 Pool
+	ocrCfg  extract.OCRConfig
 	DataDir string
 
 	cfgMu sync.RWMutex
@@ -107,6 +111,7 @@ func New(db *store.DB, prov volume.Provider, pool *worker.Pool, dataDir string) 
 		m.Pool = worker.NewPool("", 1)
 	}
 	m.cfg = m.loadConfig()
+	m.ocrCfg = extract.FindOCR()
 	return m
 }
 
@@ -185,6 +190,9 @@ func (m *Manager) Stop() {
 	m.stopWatch()
 	m.wg.Wait()
 	m.Pool.Close()
+	if m.OCRPool != nil {
+		m.OCRPool.Close()
+	}
 }
 
 func (m *Manager) loadState() error {
@@ -573,3 +581,6 @@ func RestoreRoots(db *store.DB, dataDir string) int {
 }
 
 var _ = runtime.GOOS
+
+// RefreshVolumes 立即重新识别在线卷（收到系统的设备变化通知时调用）。
+func (m *Manager) RefreshVolumes() { m.refreshVolumes(false) }

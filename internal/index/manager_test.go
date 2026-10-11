@@ -361,3 +361,54 @@ func TestDuplicateReuse(t *testing.T) {
 		return len(r.Results) == 1 && len(r.Results[0].Dups) == 1 // 内容相同的文件合并为一条
 	})
 }
+
+// OCR 集成：设置 ZHAOZHAO_OCR 与 ZHAOZHAO_OCR_FIXTURES（见 extract 包的 TestOCR）。
+func TestOCRPipeline(t *testing.T) {
+	fx := os.Getenv("ZHAOZHAO_OCR_FIXTURES")
+	if fx == "" || os.Getenv("ZHAOZHAO_OCR") == "" {
+		t.Skip("未设置 OCR 环境")
+	}
+	dir := t.TempDir()
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	for _, n := range []string{"scan.png", "scanned.pdf", "icon.png"} {
+		b, err := os.ReadFile(filepath.Join(fx, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(filepath.Join(dir, n), b, 0o644)
+	}
+	write(t, filepath.Join(dir, "普通.txt"), "普通文本里也有违约金三个字")
+	e := newEnv(t, prov)
+	if _, err := e.m.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "OCR 完成", 90*time.Second, func() bool {
+		r, _ := e.eng.Search(context.Background(), search.Params{Query: "违约金"})
+		ocr := 0
+		for _, x := range r.Results {
+			if x.OCR {
+				ocr++
+			}
+		}
+		return len(r.Results) >= 3 && ocr >= 2
+	})
+	r, _ := e.eng.Search(context.Background(), search.Params{Query: "差旅费"})
+	if len(r.Results) != 1 || r.Results[0].Name != "scanned.pdf" || !r.Results[0].OCR || r.Results[0].Snippets[0].Loc != "第2页" {
+		t.Fatalf("扫描 PDF 的 OCR 结果应带页码: %+v", r.Results)
+	}
+	if got := e.names("name:icon"); !has(got, "icon.png") {
+		t.Fatalf("小图仍可按文件名搜索: %v", got)
+	}
+	// 复制一份图片：按内容哈希复用识别结果，合并为一条
+	b, _ := os.ReadFile(filepath.Join(dir, "scan.png"))
+	os.WriteFile(filepath.Join(dir, "scan-copy.png"), b, 0o644)
+	waitFor(t, "副本复用 OCR 结果", 30*time.Second, func() bool {
+		r, _ := e.eng.Search(context.Background(), search.Params{Query: "HT-2025-0888 ext:png"})
+		return len(r.Results) == 1 && len(r.Results[0].Dups) == 1 && r.Results[0].OCR
+	})
+	st := e.m.Status()
+	if st.OCRQueue != 0 {
+		t.Fatalf("OCR 队列应已清空: %+v", st.OCRQueue)
+	}
+}
