@@ -1,5 +1,8 @@
 ; Inno Setup 脚本：生成离线完整安装包（需先运行 packaging/build-windows.sh，并把组件放进 components）
 ; 编译：iscc packaging\zhaozhao.iss
+#ifndef StageDir
+  #define StageDir "..\dist\ZhaoZhao-portable"
+#endif
 #define AppVer GetEnv("ZZ_VERSION")
 #if AppVer == ""
   #define AppVer "0.1.0"
@@ -14,7 +17,7 @@ DefaultDirName={autopf}\ZhaoZhao
 DefaultGroupName=找找
 OutputDir=..\dist
 OutputBaseFilename=ZhaoZhao-setup-{#AppVer}
-Compression=lzma2
+Compression=lzma2/fast
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -32,7 +35,7 @@ Name: "autostart"; Description: "开机自动启动（常驻托盘）"; Flags: u
 Name: "desktopicon"; Description: "创建桌面快捷方式"; Flags: unchecked
 
 [Files]
-Source: "..\dist\ZhaoZhao-portable\*"; DestDir: "{app}"; Excludes: "portable.flag"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#StageDir}\*"; DestDir: "{app}"; Excludes: "portable.flag"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
 Name: "{group}\找找"; Filename: "{app}\zhaozhao.exe"

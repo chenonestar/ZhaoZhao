@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -118,12 +119,14 @@ func extractLegacy(p, ext string, timeout time.Duration) doc.Result {
 	return r
 }
 
+// fileURL 把本地路径转成 file:// URL，非 ASCII 字符和空格做百分号编码
+// （用户名含中文时，临时目录路径会带中文）。
 func fileURL(p string) string {
 	p = filepath.ToSlash(p)
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
 	}
-	return "file://" + p
+	return (&url.URL{Scheme: "file", Path: p}).String()
 }
 
 func copyFile(src, dst string) error {

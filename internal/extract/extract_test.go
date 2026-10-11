@@ -168,3 +168,13 @@ func TestReadArgsFile(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+func TestFileURLEncodesNonASCII(t *testing.T) {
+	got := fileURL("C:/Users/张三 测试/AppData/Local/Temp/zhaozhao-lo-1")
+	if got != "file:///C:/Users/%E5%BC%A0%E4%B8%89%20%E6%B5%8B%E8%AF%95/AppData/Local/Temp/zhaozhao-lo-1" {
+		t.Fatal(got)
+	}
+	if got := fileURL("/tmp/a b"); got != "file:///tmp/a%20b" {
+		t.Fatal(got)
+	}
+}

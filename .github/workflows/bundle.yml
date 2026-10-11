@@ -54,19 +54,55 @@ jobs:
           robocopy $lo stage\components\libreoffice /E /NFL /NDL /NJH /NJS /NP | Out-Null
           if ($LASTEXITCODE -ge 8) { throw "robocopy 失败: $LASTEXITCODE" }
           $global:LASTEXITCODE = 0
-          & "$lo\program\soffice.exe" --version
+          # 帮助文档和素材库对转换没有用，删掉以减小体积（冒烟测试会验证转换仍然可用）
+          foreach ($d in 'help', 'share\gallery') { Remove-Item "stage\components\libreoffice\$d" -Recurse -Force -ErrorAction SilentlyContinue }
+          & "stage\components\libreoffice\program\soffice.exe" --version
           "{0:N0} MB" -f ((Get-ChildItem stage\components\libreoffice -Recurse | Measure-Object Length -Sum).Sum / 1MB)
 
-      - name: 获取 RapidOCR-json（列出发布包内容）
+      - name: 获取 RapidOCR-json 并放入 components
         shell: pwsh
         run: |
-          gh release view --repo hiroi-sora/RapidOCR-json --json tagName,assets --jq '.tagName, (.assets[] | "\(.name)  \(.size)")'
           New-Item -ItemType Directory -Force ocr-dl, ocr-ex | Out-Null
-          gh release download --repo hiroi-sora/RapidOCR-json --dir ocr-dl --pattern '*'
-          Get-ChildItem ocr-dl | Format-Table Name, Length
-          foreach ($f in Get-ChildItem ocr-dl) {
-            if ($f.Extension -in '.7z', '.zip') { 7z x -y "-oocr-ex" $f.FullName | Select-Object -Last 3 }
-          }
-          Get-ChildItem ocr-ex -Recurse -Depth 3 | Select-Object -First 120 | ForEach-Object { $_.FullName.Substring((Get-Location).Path.Length) }
-          Get-ChildItem ocr-ex -Recurse -Filter cmd.txt | ForEach-Object { "=== $($_.FullName)"; Get-Content $_.FullName -TotalCount 80 }
-          Get-ChildItem ocr-ex -Recurse -Filter '*.md' | Select-Object -First 5 | ForEach-Object { "=== $($_.FullName)" }
+          gh release download --repo hiroi-sora/RapidOCR-json --dir ocr-dl --pattern '*.7z'
+          foreach ($f in Get-ChildItem ocr-dl -Filter *.7z) { 7z x -y "-oocr-ex" $f.FullName | Select-Object -Last 2 }
+          $exe = Get-ChildItem ocr-ex -Recurse -Include 'RapidOCR-json.exe', 'RapidOCR_json.exe' | Select-Object -First 1
+          if (-not $exe) { throw "发布包里没有找到 RapidOCR-json.exe" }
+          Copy-Item $exe.FullName stage\components\ocr\
+          Copy-Item (Join-Path $exe.DirectoryName 'models') stage\components\ocr\models -Recurse
+          # 简体中文（V4）：与发布包 cmd.txt 里的语言库表一致；ensureAscii 让输出全是 ASCII，避免代码页问题
+          @('--models=models', '--det=ch_PP-OCRv4_det_infer.onnx', '--cls=ch_ppocr_mobile_v2.0_cls_infer.onnx',
+            '--rec=rec_ch_PP-OCRv4_infer.onnx', '--keys=dict_chinese.txt', '--ensureAscii=1') |
+            Set-Content stage\components\ocr\args.txt -Encoding utf8
+          Get-ChildItem stage\components\ocr | Format-Table Name, Length
+
+      - name: 冒烟测试（真实运行：老格式转换、OCR、压缩包，TEMP 设为含中文的路径）
+        shell: pwsh
+        run: ./packaging/smoke-windows.ps1 -Stage stage
+
+      - name: 打包完整版 zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $name = "ZhaoZhao-full-$env:VERSION"
+          Rename-Item stage $name
+          7z a -tzip -mx=5 "dist\$name.zip" ".\$name" | Select-Object -Last 3
+          Rename-Item $name stage
+          Get-ChildItem dist | Format-Table Name, @{n='MB';e={[math]::Round($_.Length/1MB)}}
+
+      - name: 编译完整版安装包
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $env:ZZ_VERSION = $env:VERSION -replace '^v', ''
+          $stage = (Resolve-Path stage).Path
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DStageDir=$stage" packaging\zhaozhao.iss
+          Get-ChildItem dist | Format-Table Name, @{n='MB';e={[math]::Round($_.Length/1MB)}}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: full
+          path: |
+            dist/ZhaoZhao-full-*.zip
+            dist/ZhaoZhao-setup-*.exe
+          retention-days: 14
+          compression-level: 0
