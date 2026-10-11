@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT="${1:-dist}"
-VER="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+VER="${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
 
 echo "==> 构建界面"
 (cd web && npm ci --no-audit --no-fund && npm run build)

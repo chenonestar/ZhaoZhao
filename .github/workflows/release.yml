@@ -6,9 +6,14 @@ name: Release
 #   - ZhaoZhao-portable-<版本>.zip 精简版（只有主程序，组件需自行放入 components\）
 # 完整版在真实 Windows 上做过冒烟测试（老格式转换、图片 OCR、压缩包）才会产出。
 
+# 三种触发方式（版本号都形如 v0.1.0）：
+#   1. 推送 v* 标签；
+#   2. Actions 页面手动运行（需要本工作流在默认分支上）；
+#   3. 往 claude/** 分支推送的最后一个提交信息里带 [release v0.1.0]（发布时由 GitHub 创建标签）。
 on:
   push:
     tags: ["v*"]
+    branches: ["claude/**"]
   # 手动触发：在 Actions 页面点 Run workflow，填写版本标签（如 v0.1.0）。
   # 发布时由 GitHub 在所选提交上创建这个标签，不需要本地推送标签。
   workflow_dispatch:
@@ -22,12 +27,36 @@ permissions:
   contents: write
 
 jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          v=""
+          if [ -n "$INPUT_VERSION" ]; then v="$INPUT_VERSION"
+          elif [ "$REF_TYPE" = tag ]; then v="$REF_NAME"
+          elif [[ "$COMMIT_MSG" =~ \[release[[:space:]]+(v[0-9][0-9A-Za-z._-]*)\] ]]; then v="${BASH_REMATCH[1]}"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "发布版本: ${v:-（无，本次推送不发布）}"
+
   full:
+    needs: meta
+    if: needs.meta.outputs.version != ''
     uses: ./.github/workflows/bundle.yml
     with:
-      version: ${{ inputs.version || github.ref_name }}
+      version: ${{ needs.meta.outputs.version }}
 
   lite:
+    needs: meta
+    if: needs.meta.outputs.version != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,6 +72,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: go test ./...
       - run: packaging/build-windows.sh dist
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
       - uses: actions/upload-artifact@v4
         with:
           name: lite
@@ -50,9 +81,8 @@ jobs:
           retention-days: 7
 
   publish:
-    # 下载 CHANGELOG.md 需要代码
-    if: github.ref_type == 'tag' || inputs.version != ''
-    needs: [full, lite]
+    needs: [meta, full, lite]
+    if: needs.meta.outputs.version != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,9 +92,9 @@ jobs:
       - run: find artifacts -type f -printf '%p  %s\n'
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.version || github.ref_name }}
+          tag_name: ${{ needs.meta.outputs.version }}
           target_commitish: ${{ github.sha }}
-          name: 找找 ${{ inputs.version || github.ref_name }}
+          name: 找找 ${{ needs.meta.outputs.version }}
           body_path: CHANGELOG.md
           generate_release_notes: false
           files: |
