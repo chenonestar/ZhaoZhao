@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -74,16 +75,20 @@ func TestCrashAndHangAreIsolated(t *testing.T) {
 	d := t.TempDir()
 	f := filepath.Join(d, "a.txt")
 	os.WriteFile(f, []byte("恢复之后 pika"), 0o644)
-	p := NewPool("/bin/sh", 1)
+	shell, crashArgs, hangArgs := "/bin/sh", []string{"-c", "exit 3"}, []string{"-c", "sleep 30"}
+	if runtime.GOOS == "windows" {
+		shell, crashArgs, hangArgs = "cmd.exe", []string{"/c", "exit 3"}, []string{"/c", "ping -n 30 127.0.0.1 >nul"}
+	}
+	p := NewPool(shell, 1)
 	t.Cleanup(p.Close)
 
-	p.Args = []string{"-c", "exit 3"} // 子进程一启动就崩溃
+	p.Args = crashArgs // 子进程一启动就崩溃
 	r := p.Extract(context.Background(), f, "txt", extract.DefaultOptions(), 5*time.Second)
 	if r.Status != doc.StatusFailed || !strings.Contains(r.Err, "崩溃") {
 		t.Fatalf("崩溃应记为失败: %+v", r)
 	}
 
-	p.Args = []string{"-c", "sleep 30"} // 子进程卡死
+	p.Args = hangArgs // 子进程卡死
 	start := time.Now()
 	r = p.Extract(context.Background(), f, "txt", extract.DefaultOptions(), 600*time.Millisecond)
 	if r.Status != doc.StatusFailed || !strings.Contains(r.Err, "超时") || time.Since(start) > 3*time.Second {

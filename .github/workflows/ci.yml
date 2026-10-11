@@ -128,7 +128,7 @@ jobs:
       - run: go vet ./...
       - name: go test
         shell: bash
-        run: go test -count=1 -timeout 12m -v ./... 2>&1 | tee test.log | grep -E '^(=== RUN|--- (PASS|FAIL|SKIP)|PASS|FAIL|ok|panic)' ; test ${PIPESTATUS[0]} -eq 0
+        run: go test -count=1 -timeout 5m -v ./... 2>&1 | tee test.log | grep -E '^(=== RUN|--- (PASS|FAIL|SKIP)|PASS|FAIL|ok|panic)' ; test ${PIPESTATUS[0]} -eq 0
 
   # Windows 便携版：交叉编译并打包，作为构建产物下载
   package:
