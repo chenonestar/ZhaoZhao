@@ -1,7 +1,10 @@
 name: Release
 
-# 推送 v* 标签（如 v0.1.0）时：构建便携版 zip 和离线安装包，并创建 GitHub Release。
-# 安装包里不含 LibreOffice 和 OCR 组件（体积大），见 packaging/components-README.txt。
+# 推送 v* 标签（如 v0.1.0）时构建并发布：
+#   - ZhaoZhao-full-<版本>.zip     完整版便携包（含 LibreOffice 和 OCR 组件，离线可用）
+#   - ZhaoZhao-setup-<版本>.exe    完整版离线安装包
+#   - ZhaoZhao-portable-<版本>.zip 精简版（只有主程序，组件需自行放入 components\）
+# 完整版在真实 Windows 上做过冒烟测试（老格式转换、图片 OCR、压缩包）才会产出。
 
 on:
   push:
@@ -12,7 +15,12 @@ permissions:
   contents: write
 
 jobs:
-  portable:
+  full:
+    uses: ./.github/workflows/bundle.yml
+    with:
+      version: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+
+  lite:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,47 +38,23 @@ jobs:
       - run: packaging/build-windows.sh dist
       - uses: actions/upload-artifact@v4
         with:
-          name: portable
-          path: |
-            dist/ZhaoZhao-portable-*.zip
-            dist/ZhaoZhao-portable
+          name: lite
+          path: dist/ZhaoZhao-portable-*.zip
           retention-days: 7
-
-  installer:
-    needs: portable
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: portable
-          path: dist
-      - name: 安装 Inno Setup
-        run: choco install innosetup -y --no-progress
-      - name: 编译安装包
-        shell: pwsh
-        env:
-          ZZ_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.0.0-dev' }}
-        run: |
-          $env:ZZ_VERSION = $env:ZZ_VERSION -replace '^v', ''
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\zhaozhao.iss
-          Get-ChildItem dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: installer
-          path: dist/ZhaoZhao-setup-*.exe
 
   publish:
     if: github.ref_type == 'tag'
-    needs: [portable, installer]
+    needs: [full, lite]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - run: find artifacts -type f -printf '%p  %s\n'
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            artifacts/portable/ZhaoZhao-portable-*.zip
-            artifacts/installer/ZhaoZhao-setup-*.exe
+            artifacts/full/ZhaoZhao-full-*.zip
+            artifacts/full/ZhaoZhao-setup-*.exe
+            artifacts/lite/ZhaoZhao-portable-*.zip
