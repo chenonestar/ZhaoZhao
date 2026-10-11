@@ -28,7 +28,12 @@ WizardStyle=modern
 UninstallDisplayIcon={app}\zhaozhao.exe
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; 简体中文是 Inno Setup 的非官方翻译，不随安装器发行；构建流程会把它下载到本目录，没有时用英文向导
+#ifexist "ChineseSimplified.isl"
+Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
+#else
+Name: "english"; MessagesFile: "compiler:Default.isl"
+#endif
 
 [Tasks]
 Name: "autostart"; Description: "开机自动启动（常驻托盘）"; Flags: unchecked

@@ -90,6 +90,10 @@ jobs:
         shell: pwsh
         run: |
           choco install innosetup -y --no-progress
+          try {
+            Invoke-WebRequest -UseBasicParsing -OutFile packaging\ChineseSimplified.isl `
+              https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl
+          } catch { Write-Warning "没能下载简体中文语言文件，安装向导将使用英文: $_" }
           $env:ZZ_VERSION = $env:VERSION -replace '^v', ''
           $stage = (Resolve-Path ZhaoZhao).Path
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DStageDir=$stage" packaging\zhaozhao.iss

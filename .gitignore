@@ -5,3 +5,4 @@
 *.db
 *.db-wal
 *.db-shm
+/packaging/ChineseSimplified.isl
