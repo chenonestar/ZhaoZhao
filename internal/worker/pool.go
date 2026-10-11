@@ -115,13 +115,14 @@ func (p *Pool) Extract(ctx context.Context, path, ext string, opts extract.Optio
 		err error
 	}
 	ch := make(chan reply, 1)
+	cur := pr // 协程只使用自己的副本：超时分支会把外层的 pr 置空
 	go func() {
-		if _, err := pr.in.Write(line); err != nil {
+		if _, err := cur.in.Write(line); err != nil {
 			ch <- reply{err: err}
 			return
 		}
 		for {
-			b, err := pr.out.ReadBytes('\n')
+			b, err := cur.out.ReadBytes('\n')
 			if err != nil {
 				ch <- reply{err: err}
 				return

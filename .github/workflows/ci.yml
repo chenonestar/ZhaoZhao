@@ -114,6 +114,7 @@ jobs:
   test-windows:
     needs: web
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -124,7 +125,9 @@ jobs:
           name: web-dist
           path: internal/web/dist
       - run: go vet ./...
-      - run: go test -count=1 ./...
+      - name: go test
+        shell: bash
+        run: go test -count=1 -timeout 12m -v ./... 2>&1 | tee test.log | grep -E '^(=== RUN|--- (PASS|FAIL|SKIP)|PASS|FAIL|ok|panic)' ; test ${PIPESTATUS[0]} -eq 0
 
   # Windows 便携版：交叉编译并打包，作为构建产物下载
   package:
