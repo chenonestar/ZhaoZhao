@@ -81,6 +81,15 @@ packaging/build-windows.sh
 iscc packaging\zhaozhao.iss
 ```
 
+### 持续集成与发布（GitHub Actions）
+
+| 工作流 | 触发 | 内容 |
+|---|---|---|
+| `.github/workflows/ci.yml` | push、PR | 界面类型检查与构建；Linux：`gofmt`、`go vet`、Windows 交叉编译检查、`go test -race`；Linux 集成测试（装 LibreOffice，真实样本 + OCR + 7z）；**Windows：`go vet` 与 `go test`**；通过后打包便携版 zip，可在 Actions 页面的 Artifacts 里下载 |
+| `.github/workflows/release.yml` | 推送 `v*` 标签 | 便携版 zip + Inno Setup 离线安装包，自动创建 GitHub Release |
+
+发布版本：`git tag v0.1.0 && git push origin v0.1.0`。安装包和便携版里不含 LibreOffice / OCR 组件（体积大），需要的话按 `components\README.txt` 放入。
+
 ### 组件
 
 - **LibreOffice**（老格式与 WPS 转换）：放到 `components\libreoffice\program\soffice.exe`，或直接安装 LibreOffice（自动查找）。

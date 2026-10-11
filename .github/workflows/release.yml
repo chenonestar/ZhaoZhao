@@ -1,0 +1,76 @@
+name: Release
+
+# 推送 v* 标签（如 v0.1.0）时：构建便携版 zip 和离线安装包，并创建 GitHub Release。
+# 安装包里不含 LibreOffice 和 OCR 组件（体积大），见 packaging/components-README.txt。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: go test ./...
+      - run: packaging/build-windows.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable
+          path: |
+            dist/ZhaoZhao-portable-*.zip
+            dist/ZhaoZhao-portable
+          retention-days: 7
+
+  installer:
+    needs: portable
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: portable
+          path: dist
+      - name: 安装 Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: 编译安装包
+        shell: pwsh
+        env:
+          ZZ_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.0.0-dev' }}
+        run: |
+          $env:ZZ_VERSION = $env:ZZ_VERSION -replace '^v', ''
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\zhaozhao.iss
+          Get-ChildItem dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: dist/ZhaoZhao-setup-*.exe
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [portable, installer]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/portable/ZhaoZhao-portable-*.zip
+            artifacts/installer/ZhaoZhao-setup-*.exe

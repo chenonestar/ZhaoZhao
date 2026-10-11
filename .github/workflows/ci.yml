@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 界面：类型检查 + 构建，并上传构建产物供后面的任务嵌入
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: internal/web/dist
+          retention-days: 3
+
+  # Linux：静态检查 + 带竞态检测的单元/集成测试
+  test-linux:
+    needs: web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: internal/web/dist
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      - name: 交叉编译检查（Windows 专有代码）
+        run: GOOS=windows GOARCH=amd64 go vet ./... && GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/zhaozhao
+      - run: go test -race ./...
+
+  # Linux：真实样本集成测试（LibreOffice 转换老格式、OCR、7z）
+  integration:
+    needs: web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: internal/web/dist
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装 LibreOffice 与中文字体
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-writer libreoffice-calc libreoffice-impress fonts-wqy-zenhei
+      - name: 安装样本生成与 OCR 依赖
+        run: pip install python-docx openpyxl python-pptx py7zr reportlab pillow rapidocr-onnxruntime
+      - name: 生成样本
+        run: |
+          python tools/make_fixtures.py "$RUNNER_TEMP/fx"
+      - name: 生成 OCR 样本
+        run: |
+          mkdir -p "$RUNNER_TEMP/ocr"
+          python - <<'PY'
+          import os
+          from PIL import Image, ImageDraw, ImageFont
+          from reportlab.pdfgen import canvas
+          from reportlab.lib.utils import ImageReader
+          out = os.environ["RUNNER_TEMP"] + "/ocr"
+          f = ImageFont.truetype("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", 36)
+          img = Image.new("RGB", (900, 260), "white")
+          d = ImageDraw.Draw(img)
+          d.text((30, 30), "合同编号 HT-2025-0888 已盖章", font=f, fill="black")
+          d.text((30, 110), "违约金为合同总额的百分之五", font=f, fill="black")
+          for ext in ("png", "jpg", "bmp", "webp"):
+              img.save(f"{out}/scan.{ext}")
+          p2 = Image.new("RGB", (900, 260), "white")
+          ImageDraw.Draw(p2).text((30, 30), "第二页内容：差旅费报销单", font=f, fill="black")
+          img.save(f"{out}/multi.tif", save_all=True, append_images=[p2], compression="tiff_lzw")
+          tiny = Image.new("RGB", (64, 64), "white"); ImageDraw.Draw(tiny).text((2, 2), "图标", font=f, fill="black"); tiny.save(f"{out}/icon.png")
+          p2.save(f"{out}/p2.jpg")
+          c = canvas.Canvas(f"{out}/scanned.pdf", pagesize=(612, 200))
+          c.drawImage(ImageReader(f"{out}/scan.jpg"), 0, 0, 612, 176); c.showPage()
+          c.drawImage(ImageReader(f"{out}/p2.jpg"), 0, 0, 612, 176); c.showPage()
+          c.save()
+          PY
+      - name: 测试
+        env:
+          ZHAOZHAO_OCR_FIXTURES: ${{ runner.temp }}/ocr
+        run: |
+          export ZHAOZHAO_FIXTURES="$RUNNER_TEMP/fx"
+          export ZHAOZHAO_OCR="python3 $PWD/tools/ocr_bridge.py"
+          go test -count=1 ./internal/extract ./internal/index
+
+  # Windows：真正在 Windows 上运行测试，验证卷识别、目录监听等平台相关代码
+  test-windows:
+    needs: web
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: internal/web/dist
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+
+  # Windows 便携版：交叉编译并打包，作为构建产物下载
+  package:
+    needs: [test-linux, test-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: packaging/build-windows.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ZhaoZhao-portable
+          path: dist/ZhaoZhao-portable-*.zip
+          retention-days: 14
