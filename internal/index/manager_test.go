@@ -658,7 +658,8 @@ func TestOrphansCleanedOnStart(t *testing.T) {
 	if err := m.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer m.Stop()
+	// Windows 上不关闭数据库，临时目录删不掉，测试会失败
+	t.Cleanup(func() { m.Stop(); db.Close() })
 	if c, _ := db.AllCounts(); c.Total != 0 {
 		t.Fatalf("启动时应清理孤儿记录: %+v", c)
 	}

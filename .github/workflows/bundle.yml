@@ -112,7 +112,7 @@ jobs:
           } catch { Write-Warning "没能下载简体中文语言文件，安装向导将使用英文: $_" }
           $env:ZZ_VERSION = $env:VERSION -replace '^v', ''
           $stage = (Resolve-Path ZhaoZhao).Path
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DStageDir=$stage" packaging\zhaozhao.iss
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DStageDir=$stage" packaging\zhaozhao.iss
           Get-ChildItem dist | Format-Table Name, @{n='MB';e={[math]::Round($_.Length/1MB)}}
 
       - uses: actions/upload-artifact@v4
