@@ -423,6 +423,12 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,0)`,
 }
 
 // DeleteFiles 删除文件及其文本与索引；同时删除以它们为容器的内部条目。
+// SetSig 更新文件记录的大小和修改时间（提取时发现与扫描记录不一致时，以实际读到的为准）。
+func (d *DB) SetSig(id, size, mtime int64) error {
+	_, err := d.W.Exec(`UPDATE files SET size=?, mtime=? WHERE id=?`, size, mtime, id)
+	return err
+}
+
 func (d *DB) DeleteFiles(ids []int64) error {
 	return d.Tx(func(tx *sql.Tx) error { return DeleteFilesTx(tx, ids) })
 }

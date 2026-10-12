@@ -28,7 +28,7 @@ import (
 	"github.com/chenonestar/zhaozhao/internal/worker"
 )
 
-var version = "0.1.1"
+var version = "0.1.2"
 
 type instanceInfo struct {
 	Port  int    `json:"port"`

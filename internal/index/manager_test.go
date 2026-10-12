@@ -671,3 +671,29 @@ func TestOrphansCleanedOnStart(t *testing.T) {
 		t.Fatalf("应返回 ErrRootGone: %v", err)
 	}
 }
+
+// 扫描记录的大小/修改时间与提取时读到的不一致（网络盘目录缓存、扫描时文件还在复制）：
+// 以提取时读到的为准完成索引，不能把结果当成过期丢掉、让文件永远停在待处理反复提取。
+func TestStaleScanSigStillCompletes(t *testing.T) {
+	dir := t.TempDir()
+	prov := &fakeProv{}
+	prov.addKind("v1", "共享", dir, true, volume.KindNetwork)
+	write(t, filepath.Join(dir, "合同.txt"), "网络盘上的文件 wombat")
+	e := newEnv(t, prov)
+	if _, err := e.m.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+	e.m.PauseAll()
+	if _, err := e.m.DB.W.Exec(`UPDATE files SET state=?, mtime=mtime-3600, size=size+1`, store.StatePending); err != nil {
+		t.Fatal(err)
+	}
+	e.m.ResumeAll()
+	waitFor(t, "文件提取完成", 10*time.Second, func() bool {
+		c, _ := e.m.DB.AllCounts()
+		return c.Total == 1 && c.Done == 1
+	})
+	if !has(e.names("wombat"), "合同.txt") {
+		t.Fatal("应能搜到内容")
+	}
+}

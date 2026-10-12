@@ -93,7 +93,7 @@ iscc packaging\zhaozhao.iss
 | `.github/workflows/bundle.yml` | 手动、改动打包文件、被 release 调用 | **完整版**：choco 安装 LibreOffice，下载 RapidOCR-json（简体中文 V4 模型），随包放入 VC++ 运行库，在真实 Windows 上冒烟测试（含组件自检、退出后无残留进程）通过后，产出完整版 zip（约 340 MB）和离线安装包 |
 | `.github/workflows/release.yml` | 推送 `v*` 标签；或提交信息里带 `[release vX.Y.Z]` | 调用完整版构建，并发布完整版 zip、安装包、精简版 zip 到 GitHub Release |
 
-发布版本：`git tag v0.1.1 && git push origin v0.1.1`，或在推送的提交信息里写 `[release v0.1.1]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice 和 OCR 组件**；精简版（只有主程序）需要按 `components\README.txt` 自行放入。
+发布版本：`git tag v0.1.2 && git push origin v0.1.2`，或在推送的提交信息里写 `[release v0.1.2]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice 和 OCR 组件**；精简版（只有主程序）需要按 `components\README.txt` 自行放入。
 
 ### 组件
 

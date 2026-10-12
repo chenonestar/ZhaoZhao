@@ -319,7 +319,15 @@ func (m *Manager) process(f store.File) {
 		m.send(&prepared{file: f, res: doc.Result{Status: doc.StatusFailed, Err: "无权限访问或无法读取: " + err.Error()}})
 		return
 	}
-	f.Size, f.MTime = fi.Size(), fi.ModTime().Unix()
+	if size, mtime := fi.Size(), fi.ModTime().Unix(); size != f.Size || mtime != f.MTime {
+		// 与扫描时记录的不一致（网络盘的目录缓存、扫描时文件还在复制等）：以现在读到的为准。
+		// 否则写入时会把结果当成「提取期间文件又被修改」丢弃，文件永远停在待处理、反复提取。
+		m.logf("%s 的大小/修改时间与扫描记录不同（扫描 %d/%d，现在 %d/%d），以现在为准", abs, f.Size, f.MTime, size, mtime)
+		if err := m.DB.SetSig(f.ID, size, mtime); err != nil {
+			m.logf("更新 %s 的文件信息失败: %v", abs, err)
+		}
+		f.Size, f.MTime = size, mtime
+	}
 	cfg := m.Config()
 
 	hash := ""
