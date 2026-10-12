@@ -106,10 +106,16 @@ jobs:
         shell: pwsh
         run: |
           choco install innosetup -y --no-progress
-          try {
-            Invoke-WebRequest -UseBasicParsing -OutFile packaging\ChineseSimplified.isl `
-              https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl
-          } catch { Write-Warning "没能下载简体中文语言文件，安装向导将使用英文: $_" }
+          # 简体中文语言文件：新版 Inno Setup 自带；否则从源码仓库下载（新旧两个位置都试）
+          $isl = "${env:ProgramFiles(x86)}\Inno Setup 6\Languages\ChineseSimplified.isl"
+          if (Test-Path $isl) { Copy-Item $isl packaging\ChineseSimplified.isl; Write-Host "使用 Inno Setup 自带的简体中文" }
+          else {
+            foreach ($u in 'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl',
+                           'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl') {
+              try { Invoke-WebRequest -UseBasicParsing -OutFile packaging\ChineseSimplified.isl $u; Write-Host "下载 $u"; break } catch { }
+            }
+            if (-not (Test-Path packaging\ChineseSimplified.isl)) { Write-Warning "没能获取简体中文语言文件，安装向导将使用英文" }
+          }
           $env:ZZ_VERSION = $env:VERSION -replace '^v', ''
           $stage = (Resolve-Path ZhaoZhao).Path
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DStageDir=$stage" packaging\zhaozhao.iss
