@@ -48,8 +48,12 @@ jobs:
       - name: 安装 LibreOffice 并放入 components
         shell: pwsh
         run: |
-          choco install libreoffice-still -y --no-progress
           $lo = "${env:ProgramFiles}\LibreOffice"
+          # 下载服务器偶尔连不上：最多试 3 次
+          for ($i = 1; $i -le 3 -and -not (Test-Path "$lo\program\soffice.exe"); $i++) {
+            if ($i -gt 1) { Write-Host "第 $i 次重试安装 LibreOffice"; Start-Sleep -Seconds 30 }
+            choco install libreoffice-still -y --no-progress --force
+          }
           if (-not (Test-Path "$lo\program\soffice.exe")) { throw "没有找到 $lo\program\soffice.exe" }
           robocopy $lo ZhaoZhao\components\libreoffice /E /NFL /NDL /NJH /NJS /NP | Out-Null
           if ($LASTEXITCODE -ge 8) { throw "robocopy 失败: $LASTEXITCODE" }
