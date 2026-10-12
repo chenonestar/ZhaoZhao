@@ -6,7 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -59,35 +62,101 @@ func launchUI(url string) error {
 }
 
 var (
-	procFindWindow          = user32.NewProc("FindWindowW")
-	procShowWindow          = user32.NewProc("ShowWindow")
-	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
+	procEnumWindows         = user32.NewProc("EnumWindows")
+	procGetWindowText       = user32.NewProc("GetWindowTextW")
+	procGetClassName        = user32.NewProc("GetClassNameW")
 	procIsWindowVisible     = user32.NewProc("IsWindowVisible")
+	procIsIconic            = user32.NewProc("IsIconic")
+	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
+	procKeybdEvent          = user32.NewProc("keybd_event")
+	procSetErrorMode        = windows.NewLazySystemDLL("kernel32.dll").NewProc("SetErrorMode")
+
+	enumMu    sync.Mutex
+	enumFound []uintptr
+	enumCB    = syscall.NewCallback(func(h, _ uintptr) uintptr {
+		if isUIWindow(h) {
+			enumFound = append(enumFound, h)
+		}
+		return 1 // 继续枚举
+	})
 )
 
-// uiWindow 按标题找到界面窗口（页面标题为「找找」）。
-func uiWindow() uintptr {
-	t, _ := windows.UTF16PtrFromString("找找")
-	h, _, _ := procFindWindow.Call(0, uintptr(unsafePointer(t)))
-	return h
+const (
+	wmSysCommand = 0x0112
+	wmClose      = 0x0010
+	scMinimize   = 0xF020
+	scRestore    = 0xF120
+	uiTitle      = "找找"
+)
+
+func windowString(proc *windows.LazyProc, h uintptr) string {
+	buf := make([]uint16, 256)
+	n, _, _ := proc.Call(h, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	return windows.UTF16ToString(buf[:n])
 }
 
-// showOrLaunchUI 呼出已有窗口，没有就新开一个。
+// isUIWindow 判断是不是界面所在的浏览器应用窗口：Chromium 顶层窗口、标题为「找找」、可见或已最小化。
+// 只按标题找会误中资源管理器里同名的文件夹窗口，或浏览器内部不可见的辅助窗口。
+func isUIWindow(h uintptr) bool {
+	if !strings.HasPrefix(windowString(procGetClassName, h), "Chrome_WidgetWin_") {
+		return false
+	}
+	if windowString(procGetWindowText, h) != uiTitle {
+		return false
+	}
+	vis, _, _ := procIsWindowVisible.Call(h)
+	icon, _, _ := procIsIconic.Call(h)
+	return vis != 0 || icon != 0
+}
+
+func uiWindows() []uintptr {
+	enumMu.Lock()
+	defer enumMu.Unlock()
+	enumFound = nil
+	procEnumWindows.Call(enumCB, 0)
+	return append([]uintptr(nil), enumFound...)
+}
+
+// bringToFront 还原并激活窗口。Windows 限制后台程序抢焦点，按一下 Alt 是公认的绕过办法。
+func bringToFront(h uintptr) {
+	if icon, _, _ := procIsIconic.Call(h); icon != 0 {
+		procPostMessage.Call(h, wmSysCommand, scRestore, 0)
+	}
+	const vkMenu, keyUp = 0x12, 0x0002
+	procKeybdEvent.Call(vkMenu, 0, 0, 0)
+	procSetForegroundWindow.Call(h)
+	procKeybdEvent.Call(vkMenu, 0, keyUp, 0)
+}
+
+// showOrLaunchUI 呼出已有的界面窗口，没有就新开一个。
 func showOrLaunchUI(url string) error {
-	if h := uiWindow(); h != 0 {
-		procShowWindow.Call(h, 9) // SW_RESTORE
-		procSetForegroundWindow.Call(h)
+	if ws := uiWindows(); len(ws) > 0 {
+		bringToFront(ws[0])
 		return nil
 	}
 	return launchUI(url)
 }
 
-// hideUI 隐藏界面窗口（保持页面状态，下次呼出更快）。
+// hideUI 把界面窗口最小化。用窗口自己的「最小化」命令，而不是外部隐藏：
+// Chromium 窗口被外部 ShowWindow 隐藏后常常停止绘制，再显示时一片空白。
 func hideUI() bool {
-	h := uiWindow()
-	if h == 0 {
-		return false
+	ws := uiWindows()
+	for _, h := range ws {
+		procPostMessage.Call(h, wmSysCommand, scMinimize, 0)
 	}
-	procShowWindow.Call(h, 0) // SW_HIDE
-	return true
+	return len(ws) > 0
+}
+
+// closeUI 关闭界面窗口（退出时调用，避免留下连不上后台的空白窗口）。
+func closeUI() {
+	for _, h := range uiWindows() {
+		procPostMessage.Call(h, wmClose, 0, 0)
+	}
+}
+
+// suppressErrorDialogs 关闭系统错误弹窗。子进程会继承这个设置：组件缺少 DLL（例如 VC++ 运行库）时
+// 立即以错误码退出，而不是弹出一个看不见的对话框一直卡住。
+func suppressErrorDialogs() {
+	const semFailCriticalErrors, semNoGPFaultErrorBox, semNoOpenFileErrorBox = 0x0001, 0x0002, 0x8000
+	procSetErrorMode.Call(semFailCriticalErrors | semNoGPFaultErrorBox | semNoOpenFileErrorBox)
 }

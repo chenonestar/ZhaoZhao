@@ -75,6 +75,22 @@ jobs:
             Set-Content ZhaoZhao\components\ocr\args.txt -Encoding utf8
           Get-ChildItem ZhaoZhao\components\ocr | Format-Table Name, Length
 
+      - name: 随包放入 VC++ 运行库（目标电脑没装 VC++ 2015-2022 运行库时组件也能启动）
+        shell: pwsh
+        run: |
+          # LibreOffice 和 RapidOCR 都依赖 VC++ 2015-2022 x64 运行库。安装版 LibreOffice 会把它装进系统，
+          # 但我们是直接复制程序目录，目标电脑可能没有。按微软允许的「应用本地部署」方式放在 exe 旁边。
+          $dlls = 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll', 'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll',
+                  'vcruntime140.dll', 'vcruntime140_1.dll', 'concrt140.dll', 'vcomp140.dll'
+          foreach ($dest in 'ZhaoZhao\components\libreoffice\program', 'ZhaoZhao\components\ocr') {
+            foreach ($d in $dlls) {
+              $src = Join-Path $env:SystemRoot "System32\$d"
+              if (Test-Path (Join-Path $dest $d)) { Write-Host "$dest 已自带 $d"; continue }
+              if (Test-Path $src) { Copy-Item $src $dest; Write-Host "复制 $d → $dest" }
+              else { Write-Warning "系统里没有 $d" }
+            }
+          }
+
       - name: 冒烟测试（真实运行：老格式转换、OCR、压缩包，TEMP 设为含中文的路径）
         shell: pwsh
         run: ./packaging/smoke-windows.ps1 -Stage ZhaoZhao

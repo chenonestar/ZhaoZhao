@@ -33,7 +33,7 @@ func newTestServer(t *testing.T) (*Server, string) {
 	os.WriteFile(filepath.Join(docs, "合同.txt"), []byte("违约金条款 axolotl"), 0o644)
 	eng := &search.Engine{DB: db, Res: m, Norm: m.Norm}
 	var revealed string
-	srv, err := New(m, eng, 0, Actions{
+	srv, err := New(m, eng, 0, "", Actions{
 		Version:    "test",
 		OpenFile:   func(p string) error { return nil },
 		RevealFile: func(p string) error { revealed = p; return nil },

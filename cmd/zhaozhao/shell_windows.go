@@ -37,8 +37,6 @@ var (
 	procGetModuleHandle  = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetModuleHandleW")
 )
 
-func unsafePointer(p *uint16) unsafe.Pointer { return unsafe.Pointer(p) }
-
 const (
 	wmDestroy      = 0x0002
 	wmCommand      = 0x0111

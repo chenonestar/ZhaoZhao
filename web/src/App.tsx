@@ -103,7 +103,12 @@ export function App() {
   }, [current?.id, results]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 状态与通知
-  const refreshStatus = useCallback(() => api.status().then(setStatus).catch(() => {}), []);
+  // 连续几次取不到状态，说明找找主程序已经退出或重启：提示用户，而不是留下一个不会动的界面
+  const [lost, setLost] = useState(false);
+  const fails = useRef(0);
+  const refreshStatus = useCallback(() => api.status()
+    .then((s) => { fails.current = 0; setLost(false); setStatus(s); })
+    .catch(() => { if (++fails.current >= 2) setLost(true); }), []);
   useEffect(() => {
     refreshStatus();
     const busy = status && !status.idle;
@@ -265,6 +270,12 @@ export function App() {
         </section>
       </main>
 
+      {lost && (
+        <div className="lost">
+          与找找主程序的连接已断开（程序可能已退出或正在重启）。
+          <button className="primary" onClick={() => location.reload()}>重新连接</button>
+        </div>
+      )}
       <footer onClick={() => setPanel("index")}>
         <span>{idleText}</span>
         {status && failedN > 0 && <span className="warn"> · {failedN} 个文件处理失败</span>}

@@ -53,13 +53,16 @@ func newToken() string {
 	return hex.EncodeToString(b)
 }
 
-// New 创建服务。port 为 0 表示随机端口。
-func New(m *index.Manager, eng *search.Engine, port int, act Actions) (*Server, error) {
+// New 创建服务。port 为 0 表示随机端口；token 为空时随机生成。
+func New(m *index.Manager, eng *search.Engine, port int, token string, act Actions) (*Server, error) {
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{M: m, Engine: eng, Token: newToken(), Addr: ln.Addr().String(), Actions: act, ln: ln}
+	if token == "" {
+		token = newToken()
+	}
+	s := &Server{M: m, Engine: eng, Token: token, Addr: ln.Addr().String(), Actions: act, ln: ln}
 	mux := http.NewServeMux()
 	s.routes(mux)
 	dist, err := fs.Sub(web.FS, "dist")

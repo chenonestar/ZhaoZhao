@@ -22,6 +22,10 @@ func showOrLaunchUI(url string) error { return launchUI(url) }
 
 func hideUI() bool { return false }
 
+func closeUI() {}
+
+func suppressErrorDialogs() {}
+
 type shellCtx struct {
 	URL    string
 	Mgr    *index.Manager

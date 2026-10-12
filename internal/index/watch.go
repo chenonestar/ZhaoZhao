@@ -1,6 +1,7 @@
 package index
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -239,6 +240,9 @@ func (m *Manager) handlePath(rt *rootRT, abs string) {
 	f := &store.File{RootID: rt.ID, VolumeID: rt.VolumeID, RelPath: rel, Name: fi.Name(), Ext: ext, Kind: kind,
 		Size: fi.Size(), MTime: fi.ModTime().Unix(), State: state, Err: msg, Prio: prio}
 	err = m.DB.Tx(func(tx *sql.Tx) error { return store.UpsertFile(tx, f, m.nameFTS(f.Name)) })
+	if errors.Is(err, store.ErrRootGone) {
+		return
+	}
 	if err != nil {
 		m.logf("写入索引失败: %v", err)
 		return

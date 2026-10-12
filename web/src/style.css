@@ -130,3 +130,10 @@ table.grid .actions button { margin-left: 4px; padding: 2px 8px; }
 .help h4 { margin: 14px 0 6px; } .help li { margin: 4px 0; line-height: 1.6; }
 
 @media (max-width: 900px) { main { flex-direction: column; } .left { width: 100%; height: 50%; border-right: none; } }
+
+.crash { padding: 40px; max-width: 720px; margin: 0 auto; }
+.crash pre { white-space: pre-wrap; background: var(--accent-weak); padding: 10px; border-radius: 6px; }
+.lost { position: fixed; left: 50%; top: 12px; transform: translateX(-50%); z-index: 100; background: var(--panel); color: var(--bad);
+  border: 1px solid var(--bad); border-radius: 8px; padding: 8px 12px; display: flex; gap: 10px; align-items: center; box-shadow: 0 4px 16px rgba(0,0,0,.15); }
+.components { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+.components .bad { color: var(--bad); }

@@ -66,9 +66,18 @@ function IndexTab({ status, refresh }: { status: Status | null; refresh: () => v
         {status.current.length > 0 && (
           <div className="current dim">正在处理（{status.active}/{status.workers}）：{status.current.map((c) => <div key={c} title={c}>{c}</div>)}</div>
         )}
+        <div className="components small">
+          {status.componentsChecking && <div className="dim">正在检测格式转换和 OCR 组件…</div>}
+          {(status.components ?? []).map((c) => (
+            <div key={c.name} className={c.ok ? "dim" : "bad"} title={c.path}>
+              {c.ok ? "✓" : "✗"} {c.name}：{c.message}
+            </div>
+          ))}
+        </div>
         <div className="btns">
           {status.paused ? <button className="primary" onClick={() => run(api.resume())}>恢复全部任务</button> : <button onClick={() => run(api.pause())}>暂停全部任务</button>}
           <button onClick={() => run(api.rescan())}>立即扫描全部</button>
+          <button disabled={status.componentsChecking} onClick={() => run(api.checkComponents())}>检测组件</button>
           <button onClick={() => { if (confirm("重建会重新提取所有文件的内容，耗时较长。继续吗？")) run(api.rebuild()); }}>重建全部索引</button>
         </div>
       </div>
@@ -210,7 +219,7 @@ function SettingsTab() {
   );
   const listField = (k: "excludeDirNames" | "excludePrefixes" | "excludeGlobs" | "excludeExts", label: string) => (
     <label className="field"><span>{label}（每行一条）</span>
-      <textarea rows={4} value={c[k].join("\n")} onChange={(e) => setC({ ...c, [k]: lines(e.target.value) })} /></label>
+      <textarea rows={4} value={(c[k] ?? []).join("\n")} onChange={(e) => setC({ ...c, [k]: lines(e.target.value) })} /></label>
   );
   return (
     <div className="settings">

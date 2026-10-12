@@ -6,6 +6,7 @@ import (
 	"compress/zlib"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -377,9 +378,20 @@ func (d *DB) RootSigs(rootID int64) (map[string]FileSig, error) {
 	return m, rows.Err()
 }
 
+// ErrRootGone 表示文件所属的索引根已被删除：正在进行的扫描不应再写入。
+var ErrRootGone = errors.New("索引根已被删除")
+
 // UpsertFile 写入文件元数据与文件名索引。nameFTS 为已分词的文件名。
 // 元数据发生变化时状态重置为 f.State（通常是待提取），并清除旧的提取文本。
 func UpsertFile(tx *sql.Tx, f *File, nameFTS string) error {
+	// 写入是串行的：在同一事务里确认索引根仍然存在，删除索引根之后就不会再冒出它的文件
+	var one int
+	if err := tx.QueryRow(`SELECT 1 FROM roots WHERE id=?`, f.RootID).Scan(&one); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrRootGone
+		}
+		return err
+	}
 	var id int64
 	err := tx.QueryRow(`SELECT id FROM files WHERE volume_id=? AND rel_path=? AND inner=?`, f.VolumeID, f.RelPath, f.Inner).Scan(&id)
 	switch {
@@ -450,6 +462,15 @@ func deleteChildren(tx *sql.Tx, vol, rel string) error {
 		}
 	}
 	return nil
+}
+
+// DeleteOrphans 删除不属于任何索引根的文件（旧版本删除索引根时可能残留），返回删除数量。
+func (d *DB) DeleteOrphans() (int64, error) {
+	var n int64
+	if err := d.R.QueryRow(`SELECT COUNT(*) FROM files WHERE root_id NOT IN (SELECT id FROM roots)`).Scan(&n); err != nil || n == 0 {
+		return 0, err
+	}
+	return n, d.Tx(func(tx *sql.Tx) error { return deleteWhere(tx, `root_id NOT IN (SELECT id FROM roots) AND 1=?`, 1) })
 }
 
 // ReplaceChildren 删除容器的全部内部条目（重新提取前调用）。

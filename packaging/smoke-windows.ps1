@@ -55,7 +55,7 @@ try {
     while ($true) {
         $st = Invoke-RestMethod "$api/api/status" -WebSession $sess
         Write-Host ("  总数={0} 待处理={1} 失败={2} 扫描中={3} 正在处理={4}" -f $st.totals.Total, $st.totals.Pending, $st.totals.Failed, $st.scanning, ($st.current -join ";"))
-        if (-not $st.scanning -and $st.totals.Total -ge 4 -and $st.totals.Pending -eq 0 -and $st.current.Count -eq 0) { break }
+        if (-not $st.scanning -and $st.totals.Total -ge 4 -and $st.totals.Pending -eq 0 -and $st.current.Count -eq 0 -and -not $st.componentsChecking) { break }
         if ((Get-Date) -gt $deadline) { $fail.Add("索引超时未完成"); break }
         Start-Sleep -Seconds 3
     }
@@ -78,8 +78,24 @@ try {
     $ocr = Search "HT-2025-0888" | Where-Object { $_.path -like "*扫描件.png" }
     if ($ocr -and -not $ocr[0].ocr) { $fail.Add("OCR 结果应带 OCR 标记") }
 
+    Write-Host "== 组件自检"
+    foreach ($c in $st.components) {
+        Write-Host "  $($c.name)：$($c.message)"
+        if (-not $c.ok) { $fail.Add("组件自检失败：$($c.name)：$($c.message)") }
+    }
+    if (@($st.components).Count -lt 2) { $fail.Add("状态里缺少组件自检结果") }
+
     Write-Host "== 失败列表"
     Invoke-RestMethod "$api/api/failed" -WebSession $sess | ForEach-Object { Write-Host "  $($_.path)  $($_.reason)" }
+
+    Write-Host "== 退出（与托盘「退出」相同的路径）"
+    Invoke-RestMethod "$api/api/quit" -Method Post -WebSession $sess -Headers @{ "X-ZhaoZhao" = "1" } -ContentType "application/json" -Body "{}" | Out-Null
+    if (-not $proc.WaitForExit(15000)) { $fail.Add("调用退出后 15 秒内没有退出") }
+    else { Write-Host "  主程序已退出" }
+    Start-Sleep -Seconds 2
+    $left = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(zhaozhao|soffice|RapidOCR)' }
+    if ($left) { $fail.Add("退出后仍有残留进程：" + (($left | ForEach-Object { "$($_.Name)($($_.Id))" }) -join ", ")) }
+    else { Write-Host "  没有残留进程" }
 }
 catch { $fail.Add("异常: $_") }
 finally {

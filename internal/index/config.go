@@ -44,12 +44,23 @@ type Config struct {
 	Hotkey string `json:"hotkey"` // 全局快捷键，如 Ctrl+Alt+F；修改后重启生效
 }
 
+// normalized 把列表字段的 nil 换成空列表：JSON 里的 null 会让界面崩溃。
+func (c Config) normalized() Config {
+	for _, p := range []*[]string{&c.ExcludeDirNames, &c.ExcludePrefixes, &c.ExcludeGlobs, &c.ExcludeExts} {
+		if *p == nil {
+			*p = []string{}
+		}
+	}
+	return c
+}
+
 // DefaultConfig 返回默认设置，dataDir 会被加入排除列表（软件自身的数据目录）。
 func DefaultConfig(dataDir string) Config {
 	c := Config{
 		ExcludeDirNames:   []string{"node_modules", ".git", ".svn", ".hg", "__pycache__", ".venv", "$Recycle.Bin", "System Volume Information", "$RECYCLE.BIN"},
 		ExcludePrefixes:   defaultPrefixes(),
 		ExcludeExts:       []string{},
+		ExcludeGlobs:      []string{},
 		MaxTextMB:         100,
 		MaxOtherMB:        200,
 		SniffUnknown:      true,

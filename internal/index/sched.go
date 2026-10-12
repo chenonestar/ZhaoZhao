@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -335,6 +336,9 @@ func (m *Manager) process(f store.File) {
 	}
 	opts := m.extractOptions(cfg, useOCR)
 	pool, timeout := m.Pool, opts.Timeout+15*time.Second
+	if extract.IsLegacy(f.Ext) {
+		timeout = extract.LegacyTimeout(opts.Timeout) + 30*time.Second
+	}
 	if extract.IsContainer(f.Ext) {
 		timeout = 20 * time.Minute // 压缩包和邮箱可能很大
 	}
@@ -540,7 +544,9 @@ func (m *Manager) writeOne(tx *sql.Tx, p *prepared) error {
 	for _, c := range p.children {
 		cf := c.file
 		cf.State = store.StatePending
-		if err := store.UpsertFile(tx, &cf, c.nameFTS); err != nil {
+		if err := store.UpsertFile(tx, &cf, c.nameFTS); errors.Is(err, store.ErrRootGone) {
+			return nil
+		} else if err != nil {
 			return err
 		}
 		if err := store.PutResult(tx, cf.ID, c.state, c.err, "", c.ocr, c.text, c.fts, c.nameFTS); err != nil {

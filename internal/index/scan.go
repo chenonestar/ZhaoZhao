@@ -1,6 +1,7 @@
 package index
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -176,6 +177,7 @@ func (m *Manager) runScan(req scanReq) {
 		return
 	}
 	seen := make(map[string]struct{}, len(sigs))
+	rootGone := false
 	var batch []*store.File
 	flush := func() {
 		if len(batch) == 0 {
@@ -189,7 +191,9 @@ func (m *Manager) runScan(req scanReq) {
 			}
 			return nil
 		})
-		if err != nil {
+		if errors.Is(err, store.ErrRootGone) {
+			rootGone = true
+		} else if err != nil {
 			m.logf("写入索引失败: %v", err)
 		}
 		batch = batch[:0]
@@ -225,7 +229,12 @@ func (m *Manager) runScan(req scanReq) {
 		follow = *rt.opts.FollowLinks
 	}
 	w := &walker{m: m, rt: rt, follow: follow, visited: map[string]bool{}, visit: visit, abort: func() bool {
-		if m.ctx.Err() != nil {
+		if m.ctx.Err() != nil || rootGone {
+			return true
+		}
+		// 索引根被删除或暂停：立即停止，不再写入
+		if cur := m.getRoot(rt.ID); cur == nil || cur.Paused {
+			aborted = true
 			return true
 		}
 		if m.volOf(rt.VolumeID) == nil || !m.volOnlineNow(rt.VolumeID) {
@@ -249,7 +258,7 @@ func (m *Manager) runScan(req scanReq) {
 		w.walk(startAbs, startRel)
 	}
 	flush()
-	if w.aborted() || aborted || m.ctx.Err() != nil {
+	if w.aborted() || aborted || rootGone || m.ctx.Err() != nil {
 		if req.sub == "" {
 			st.running.Store(false)
 		}

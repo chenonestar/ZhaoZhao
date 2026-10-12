@@ -65,7 +65,32 @@ func SofficePath() string {
 	return sofficePath
 }
 
+// CleanupWorker 在解析子进程退出前调用：结束 OCR 子进程，删除本进程的 LibreOffice 配置目录。
+func CleanupWorker() {
+	ShutdownOCR()
+	if profileDir != "" {
+		_ = os.RemoveAll(profileDir)
+	}
+}
+
+// LegacyTimeout 是一次老格式转换的时限：至少 2 分钟。每个解析子进程第一次转换要新建
+// LibreOffice 配置目录，在慢一些的电脑上需要几十秒。
+func LegacyTimeout(t time.Duration) time.Duration {
+	if t < 2*time.Minute {
+		return 2 * time.Minute
+	}
+	return t
+}
+
 func extractLegacy(p, ext string, timeout time.Duration) doc.Result {
+	if profileDir == "" {
+		profileDir = filepath.Join(os.TempDir(), fmt.Sprintf("zhaozhao-lo-%d", os.Getpid()))
+	}
+	return convertLegacy(p, ext, LegacyTimeout(timeout), profileDir)
+}
+
+// convertLegacy 用 LibreOffice 把老格式转成 OOXML 再提取。profile 是 LibreOffice 的配置目录。
+func convertLegacy(p, ext string, timeout time.Duration, profile string) doc.Result {
 	target := legacyTarget[ext]
 	so := SofficePath()
 	if so == "" {
@@ -76,9 +101,6 @@ func extractLegacy(p, ext string, timeout time.Duration) doc.Result {
 		return doc.Result{Status: doc.StatusFailed, Err: err.Error()}
 	}
 	defer os.RemoveAll(tmp)
-	if profileDir == "" {
-		profileDir = filepath.Join(os.TempDir(), fmt.Sprintf("zhaozhao-lo-%d", os.Getpid()))
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	// 复制到临时目录并用 ASCII 文件名，规避 LibreOffice 对特殊路径的处理问题
@@ -89,20 +111,27 @@ func extractLegacy(p, ext string, timeout time.Duration) doc.Result {
 	outDir := filepath.Join(tmp, "out")
 	_ = os.MkdirAll(outDir, 0o700)
 	cmd := exec.CommandContext(ctx, so, "--headless", "--norestore", "--nologo", "--nodefault", "--nolockcheck",
-		"-env:UserInstallation="+fileURL(profileDir), "--convert-to", target, "--outdir", outDir, src)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+		"-env:UserInstallation="+fileURL(profile), "--convert-to", target, "--outdir", outDir, src)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
 	setProcAttr(cmd)
+	start := time.Now()
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
-			return doc.Result{Status: doc.StatusFailed, Err: "格式转换超时"}
+			return doc.Result{Status: doc.StatusFailed, Err: fmt.Sprintf("格式转换超时（%s）", timeout.Round(time.Second))}
 		}
-		return doc.Result{Status: doc.StatusFailed, Err: "格式转换失败: " + strings.TrimSpace(stderr.String())}
+		return doc.Result{Status: doc.StatusFailed, Err: "格式转换失败：" + DescribeExit(err, output.String())}
 	}
 	out := filepath.Join(outDir, "in."+target)
 	if _, err := os.Stat(out); err != nil {
-		return doc.Result{Status: doc.StatusFailed, Err: "格式转换失败（文件可能已加密或损坏）"}
+		msg := "格式转换失败（文件可能已加密或损坏）"
+		if o := strings.TrimSpace(output.String()); o != "" {
+			msg += "：" + truncate(o, 300)
+		}
+		return doc.Result{Status: doc.StatusFailed, Err: msg}
 	}
+	_ = start
 	var r doc.Result
 	switch target {
 	case "docx":
@@ -119,8 +148,6 @@ func extractLegacy(p, ext string, timeout time.Duration) doc.Result {
 	return r
 }
 
-// fileURL 把本地路径转成 file:// URL，非 ASCII 字符和空格做百分号编码
-// （用户名含中文时，临时目录路径会带中文）。
 func fileURL(p string) string {
 	p = filepath.ToSlash(p)
 	if !strings.HasPrefix(p, "/") {

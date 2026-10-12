@@ -3,19 +3,22 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
-	"github.com/chenonestar/zhaozhao/internal/extract"
 	"github.com/chenonestar/zhaozhao/internal/index"
 	"github.com/chenonestar/zhaozhao/internal/logx"
 	"github.com/chenonestar/zhaozhao/internal/search"
@@ -25,7 +28,7 @@ import (
 	"github.com/chenonestar/zhaozhao/internal/worker"
 )
 
-var version = "0.1.0"
+var version = "0.1.1"
 
 type instanceInfo struct {
 	Port  int    `json:"port"`
@@ -41,7 +44,7 @@ func main() {
 	}
 	var (
 		dataFlag = flag.String("data", "", "数据目录（默认 %LOCALAPPDATA%\\ZhaoZhao）")
-		port     = flag.Int("port", 0, "界面服务端口（默认随机）")
+		port     = flag.Int("port", 0, "界面服务端口（默认优先 17891，被占用时随机）")
 		noUI     = flag.Bool("no-ui", false, "启动时不自动打开界面窗口")
 		showVer  = flag.Bool("version", false, "显示版本")
 		addRoots multiFlag
@@ -57,10 +60,12 @@ func main() {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		fatalf("无法创建数据目录 %s: %v", dataDir, err)
 	}
+	var logw *logx.Rotating
 	if lw, err := logx.New(filepath.Join(dataDir, "zhaozhao.log"), 5<<20, 3); err == nil {
 		log.SetOutput(lw)
-		defer lw.Close()
+		logw = lw
 	}
+	suppressErrorDialogs()
 	log.Printf("找找 %s 启动，数据目录 %s", version, dataDir)
 
 	// 单实例：已有实例在运行则直接呼出它的窗口
@@ -72,11 +77,11 @@ func main() {
 		return
 	}
 
+	cleanStaleTemp()
 	db, err := openDB(dataDir)
 	if err != nil {
 		fatalf("无法打开索引库: %v", err)
 	}
-	defer db.Close()
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -93,11 +98,10 @@ func main() {
 	if err := mgr.Start(); err != nil {
 		fatalf("启动索引服务失败: %v", err)
 	}
-	defer mgr.Stop()
+	mgr.CheckComponents()
 
 	eng := &search.Engine{DB: db, Res: mgr, Norm: mgr.Norm}
 	tmp := newTempCache()
-	defer tmp.Cleanup()
 	quit := make(chan struct{}, 1)
 	var srv *server.Server
 	act := server.Actions{
@@ -114,18 +118,17 @@ func main() {
 		},
 		OpenInner: func(container, inner string) (string, error) { return tmp.Open(container, inner, mgr.Config()) },
 	}
-	srv, err = server.New(mgr, eng, *port, act)
+	// 端口和令牌尽量保持不变：程序重启后，已经打开的界面窗口刷新一下就能继续用
+	srv, err = server.New(mgr, eng, pickPort(*port), loadSecret(dataDir), act)
 	if err != nil {
 		fatalf("无法启动界面服务: %v", err)
 	}
-	defer srv.Shutdown()
 	go func() {
 		if err := srv.Serve(); err != nil && err != http.ErrServerClosed {
 			log.Printf("界面服务退出: %v", err)
 		}
 	}()
 	writeInstance(dataDir, srv)
-	defer os.Remove(filepath.Join(dataDir, "instance.json"))
 
 	for _, p := range addRoots {
 		if _, err := mgr.AddRoot(p); err != nil {
@@ -146,8 +149,76 @@ func main() {
 		}
 		shutdownShell()
 	}()
-	runShell(&shellCtx{URL: srv.URL(), Mgr: mgr, Hotkey: mgr.Config().Hotkey, Quit: func() { quit <- struct{}{} }})
-	log.Printf("找找退出")
+	runShell(&shellCtx{URL: srv.URL(), Mgr: mgr, Hotkey: mgr.Config().Hotkey, Quit: act.Quit})
+
+	// 退出：先让新实例可以启动、关掉界面窗口，再停止后台任务。
+	// 任何一步卡住（例如网络盘上的目录读取）都不能让程序退不出去：最多等 8 秒。
+	log.Printf("正在退出…")
+	_ = os.Remove(filepath.Join(dataDir, "instance.json"))
+	closeUI()
+	done := make(chan struct{})
+	go func() {
+		srv.Shutdown()
+		mgr.Stop() // 结束解析子进程（连同 LibreOffice、OCR）
+		tmp.Cleanup()
+		db.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+		log.Printf("找找退出")
+	case <-time.After(8 * time.Second):
+		log.Printf("退出超时，强制结束（子进程随作业对象一并结束）")
+	}
+	if logw != nil {
+		logw.Close()
+	}
+	os.Exit(0)
+}
+
+// pickPort 返回要监听的端口：指定了就用指定的，否则优先固定端口，被占用时由系统分配。
+func pickPort(flagPort int) int {
+	if flagPort != 0 {
+		return flagPort
+	}
+	const preferred = 17891
+	if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", preferred)); err == nil {
+		ln.Close()
+		return preferred
+	}
+	return 0
+}
+
+// loadSecret 读取（或生成）数据目录里的访问令牌。令牌保持不变，重启后旧窗口的登录状态仍然有效。
+func loadSecret(dataDir string) string {
+	p := filepath.Join(dataDir, "secret")
+	if b, err := os.ReadFile(p); err == nil {
+		if s := strings.TrimSpace(string(b)); len(s) >= 32 {
+			return s
+		}
+	}
+	buf := make([]byte, 16)
+	_, _ = rand.Read(buf)
+	s := hex.EncodeToString(buf)
+	_ = os.WriteFile(p, []byte(s), 0o600)
+	return s
+}
+
+// cleanStaleTemp 删除上次异常退出遗留的临时目录（LibreOffice 配置、转换与 OCR 中间文件）。
+func cleanStaleTemp() {
+	ents, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		n := e.Name()
+		if !e.IsDir() || !strings.HasPrefix(n, "zhaozhao-") {
+			continue
+		}
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > 10*time.Minute {
+			_ = os.RemoveAll(filepath.Join(os.TempDir(), n))
+		}
+	}
 }
 
 type multiFlag []string
@@ -245,5 +316,3 @@ func existingInstance(dataDir string) (string, bool) {
 	}
 	return url + "/?t=" + in.Token, true
 }
-
-var _ = extract.Ext

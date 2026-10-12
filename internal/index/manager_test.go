@@ -4,6 +4,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -571,4 +574,99 @@ func TestRestartKeepsIndex(t *testing.T) {
 	waitFor(t, "启动对账", 20*time.Second, func() bool {
 		return has(names(eng2, "okapi"), "offline-new.txt") && !has(names(eng2, "impala"), "gone.txt")
 	})
+}
+
+// 设置里的列表字段不能是 null（界面对 null 调用 join 会整页崩溃）。
+func TestConfigListsNeverNull(t *testing.T) {
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", t.TempDir(), true, volume.KindLocal)
+	e := newEnv(t, prov)
+	for _, c := range []Config{e.m.Config(), DefaultConfig("")} {
+		b, _ := json.Marshal(c)
+		if strings.Contains(string(b), "null") {
+			t.Fatalf("配置 JSON 里不应有 null: %s", b)
+		}
+	}
+	c := e.m.Config()
+	c.ExcludeGlobs, c.ExcludeExts = nil, nil // 模拟界面提交了 null
+	if err := e.m.SetConfig(c); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(e.m.Config())
+	if strings.Contains(string(b), "null") {
+		t.Fatalf("保存后配置不应出现 null: %s", b)
+	}
+}
+
+// 扫描进行中删除索引根：扫描应立即停止，之后不能残留该索引根的任何文件（问题 6）。
+func TestRemoveRootDuringScan(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 60; i++ {
+		for j := 0; j < 50; j++ {
+			write(t, filepath.Join(dir, fmt.Sprintf("d%02d", i), fmt.Sprintf("f%03d.txt", j)), "内容")
+		}
+	}
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	e := newEnv(t, prov)
+	r, err := e.m.AddRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "扫描开始写入", 10*time.Second, func() bool { c, _ := e.m.DB.AllCounts(); return c.Total > 0 })
+	if err := e.m.RemoveRoot(r.ID); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1500 * time.Millisecond) // 留时间给仍在进行的扫描和提取
+	c, _ := e.m.DB.AllCounts()
+	if c.Total != 0 {
+		t.Fatalf("删除索引根后不应残留文件，实际 %d 个", c.Total)
+	}
+	// 换一个目录作为新索引根，只应看到新目录的文件
+	other := t.TempDir()
+	prov.addKind("v2", "另一盘", other, true, volume.KindLocal)
+	write(t, filepath.Join(other, "新的.txt"), "新目录的内容 meerkat")
+	if _, err := e.m.AddRoot(other); err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+	c, _ = e.m.DB.AllCounts()
+	if c.Total != 1 || !has(e.names("meerkat"), "新的.txt") {
+		t.Fatalf("应只有新目录的 1 个文件: %+v", c)
+	}
+}
+
+// 旧版本残留的孤儿记录在启动时清理。
+func TestOrphansCleanedOnStart(t *testing.T) {
+	data := t.TempDir()
+	db, err := store.Open(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rid, _ := db.AddRoot("v1", "a")
+	err = db.Tx(func(tx *sql.Tx) error {
+		return store.UpsertFile(tx, &store.File{RootID: rid, VolumeID: "v1", RelPath: "a/x.txt", Name: "x.txt"}, "x txt")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.W.Exec(`DELETE FROM roots`) // 模拟旧版本：索引根删了，文件还在
+	if c, _ := db.AllCounts(); c.Total != 1 {
+		t.Fatal("准备数据失败")
+	}
+	m := New(db, &fakeProv{}, nil, data)
+	if err := m.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	if c, _ := db.AllCounts(); c.Total != 0 {
+		t.Fatalf("启动时应清理孤儿记录: %+v", c)
+	}
+	// 索引根已删除时写入被拒绝
+	err = db.Tx(func(tx *sql.Tx) error {
+		return store.UpsertFile(tx, &store.File{RootID: rid, VolumeID: "v1", RelPath: "a/y.txt", Name: "y.txt"}, "y txt")
+	})
+	if !errors.Is(err, store.ErrRootGone) {
+		t.Fatalf("应返回 ErrRootGone: %v", err)
+	}
 }

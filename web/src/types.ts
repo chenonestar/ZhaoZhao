@@ -112,6 +112,16 @@ export interface Status {
   processed: number;
   roots: RootStatus[];
   volumes: VolumeStatus[];
+  components: ComponentStatus[] | null;
+  componentsChecking: boolean;
+}
+
+export interface ComponentStatus {
+  name: string;
+  path: string;
+  ok: boolean;
+  message: string;
+  seconds?: number;
 }
 
 export interface FailedItem {

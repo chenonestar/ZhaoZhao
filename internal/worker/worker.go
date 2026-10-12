@@ -34,7 +34,8 @@ const FlagName = "--extract-worker"
 // Serve 是子进程入口：从标准输入逐行读取任务，把结果逐行写到标准输出。
 // 库代码误写到标准输出的内容会被重定向到标准错误，避免破坏协议。
 func Serve() {
-	defer extract.ShutdownOCR() // 主程序退出（标准输入关闭）时，一并结束 OCR 子进程
+	// 主程序退出（标准输入关闭）时，结束 OCR 子进程并删除 LibreOffice 配置目录
+	defer extract.CleanupWorker()
 	out := os.Stdout
 	os.Stdout = os.Stderr
 	w := bufio.NewWriterSize(out, 1<<20)

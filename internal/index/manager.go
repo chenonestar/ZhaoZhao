@@ -99,6 +99,10 @@ type Manager struct {
 	rebuilding atomic.Bool
 	startedAt  time.Time
 	baseline   atomic.Bool // 首次卷扫描完成后才通知「新卷」
+
+	compMu       sync.Mutex
+	components   []extract.ComponentStatus
+	compChecking bool
 }
 
 // New 创建管理器。pool 为 nil 时在进程内提取（测试用）。
@@ -124,18 +128,19 @@ func (m *Manager) loadConfig() Config {
 	if b, err := os.ReadFile(m.configPath()); err == nil {
 		_ = json.Unmarshal(b, &c)
 	}
-	return c
+	return c.normalized()
 }
 
 // Config 返回当前设置的副本。
 func (m *Manager) Config() Config {
 	m.cfgMu.RLock()
 	defer m.cfgMu.RUnlock()
-	return m.cfg
+	return m.cfg.normalized()
 }
 
 // SetConfig 保存设置。繁简归一变化时在后台重建全文索引。
 func (m *Manager) SetConfig(c Config) error {
+	c = c.normalized()
 	old := m.Config()
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
@@ -173,6 +178,9 @@ func (m *Manager) Start() error {
 	if err := m.loadState(); err != nil {
 		return err
 	}
+	if n, err := m.DB.DeleteOrphans(); err == nil && n > 0 {
+		m.logf("清理了 %d 条不属于任何索引根的残留记录", n)
+	}
 	m.refreshVolumes(true)
 	m.initWatch()
 	m.startScanners(2)
@@ -188,6 +196,12 @@ func (m *Manager) Start() error {
 func (m *Manager) Stop() {
 	if m.cancel != nil {
 		m.cancel()
+	}
+	// 在锁内广播：等待并发令牌的协程要么已看到取消，要么正在 Wait，不会错过唤醒
+	if m.sched.cond != nil {
+		m.sched.mu.Lock()
+		m.sched.cond.Broadcast()
+		m.sched.mu.Unlock()
 	}
 	m.stopWatch()
 	m.wg.Wait()
@@ -415,7 +429,7 @@ func (m *Manager) RemoveRoot(id int64) error {
 	if err := m.DB.RemoveRoot(id); err != nil {
 		return err
 	}
-	_ = m.reloadRoots()
+	_ = m.reloadRoots() // 正在进行的扫描会在下一次检查时发现索引根已删除并停止
 	m.saveRootsBackup()
 	m.kick()
 	return nil

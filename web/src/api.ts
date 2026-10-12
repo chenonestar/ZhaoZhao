@@ -44,6 +44,7 @@ export const api = {
     call<Preview>(`/api/preview?${qs({ id, q, scope: o.scope, fuzzy: o.fuzzy, cs: o.cs })}`),
   open: (id: number, action: "open" | "folder") => post<{ ok: boolean; readOnlyCopy?: boolean }>("/api/open", { id, action }),
   status: () => call<Status>("/api/status"),
+  checkComponents: () => post("/api/components/check"),
   pause: (root?: number) => post("/api/pause", { root: root ?? 0 }),
   resume: (root?: number) => post("/api/resume", { root: root ?? 0 }),
   addRoot: (path: string) => post("/api/roots/add", { path }),

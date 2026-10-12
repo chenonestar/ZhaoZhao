@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/png"
@@ -136,7 +137,8 @@ func startOCR(c OCRConfig) (*ocrProc, error) {
 	if !filepath.IsAbs(c.Command) {
 		cmd.Dir = ""
 	}
-	cmd.Stderr = io.Discard
+	errBuf := &tailBuffer{max: 2048}
+	cmd.Stderr = errBuf
 	setProcAttr(cmd)
 	cmd.Cancel = nil
 	in, err := cmd.StdinPipe()
@@ -169,14 +171,57 @@ func startOCR(c OCRConfig) (*ocrProc, error) {
 	select {
 	case err := <-ready:
 		if err != nil {
-			killOCR(p)
-			return nil, err
+			// 进程在初始化完成前就退出了：取退出码说明原因（例如缺少运行库）
+			p.in.Close()
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			var werr error
+			select {
+			case werr = <-done:
+			case <-time.After(5 * time.Second):
+				_ = cmd.Process.Kill()
+				werr = <-done
+			}
+			if werr == nil {
+				werr = err
+			}
+			return nil, fmt.Errorf("OCR 组件启动失败：%s", DescribeExit(werr, errBuf.String()))
 		}
 	case <-time.After(90 * time.Second):
 		killOCR(p)
-		return nil, fmt.Errorf("OCR 组件启动超时")
+		return nil, fmt.Errorf("OCR 组件启动超时（90 秒内没有完成初始化）%s", suffix(errBuf.String()))
 	}
 	return p, nil
+}
+
+func suffix(s string) string {
+	if s = strings.TrimSpace(s); s != "" {
+		return "：" + truncate(s, 300)
+	}
+	return ""
+}
+
+// tailBuffer 只保留最后 max 个字节的输出，用于错误诊断。
+type tailBuffer struct {
+	mu  sync.Mutex
+	max int
+	b   []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.b = append(t.b, p...)
+	if len(t.b) > t.max {
+		t.b = t.b[len(t.b)-t.max:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.ToValidUTF8(string(t.b), "?")
 }
 
 // ShutdownOCR 结束常驻的 OCR 子进程。解析子进程退出前调用，避免留下孤儿进程。
@@ -217,10 +262,23 @@ func ocrImage(c OCRConfig, imgPath string) (string, error) {
 		ocrCur = p
 	}
 	p := ocrCur
-	if _, err := p.in.Write(ocrRequest(imgPath)); err != nil {
-		killOCR(p)
+	text, err := recognizeWith(p, c, imgPath)
+	if err != nil && (errors.Is(err, errOCRDead) || errors.Is(err, errOCRTimeout)) {
+		killOCR(p) // 进程已退出或卡住：下次重新启动
 		ocrCur = nil
-		return "", fmt.Errorf("OCR 组件已退出: %v", err)
+	}
+	return text, err
+}
+
+var (
+	errOCRDead    = errors.New("OCR 组件已退出")
+	errOCRTimeout = errors.New("OCR 超时")
+)
+
+// recognizeWith 用一个已启动的 OCR 进程识别一张图片。
+func recognizeWith(p *ocrProc, c OCRConfig, imgPath string) (string, error) {
+	if _, err := p.in.Write(ocrRequest(imgPath)); err != nil {
+		return "", fmt.Errorf("%w: %v", errOCRDead, err)
 	}
 	sec := c.PageSec
 	if sec <= 0 {
@@ -235,7 +293,7 @@ func ocrImage(c OCRConfig, imgPath string) (string, error) {
 		for {
 			line, err := p.out.ReadBytes('\n')
 			if err != nil {
-				ch <- reply{err: err}
+				ch <- reply{err: fmt.Errorf("%w: %v", errOCRDead, err)}
 				return
 			}
 			var r ocrResp
@@ -265,19 +323,11 @@ func ocrImage(c OCRConfig, imgPath string) (string, error) {
 			return
 		}
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(sec)*time.Second)
-	defer cancel()
 	select {
 	case r := <-ch:
-		if r.err != nil && (strings.Contains(r.err.Error(), "EOF") || strings.Contains(r.err.Error(), "file already closed")) {
-			killOCR(p)
-			ocrCur = nil
-		}
 		return r.text, r.err
-	case <-ctx.Done():
-		killOCR(p)
-		ocrCur = nil
-		return "", fmt.Errorf("OCR 超时")
+	case <-time.After(time.Duration(sec) * time.Second):
+		return "", fmt.Errorf("%w（单张图片超过 %d 秒）", errOCRTimeout, sec)
 	}
 }
 

@@ -24,6 +24,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	h("/api/preview", s.handlePreview)
 	h("/api/open", s.handleOpen)
 	h("/api/status", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.M.Status()) })
+	h("/api/components/check", s.post(func(r *http.Request) (any, error) {
+		s.M.CheckComponents()
+		return map[string]bool{"ok": true}, nil
+	}))
 	h("/api/pause", s.post(func(r *http.Request) (any, error) {
 		var b struct {
 			Root int64 `json:"root"`

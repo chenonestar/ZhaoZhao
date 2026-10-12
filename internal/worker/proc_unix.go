@@ -7,7 +7,10 @@ import (
 	"syscall"
 )
 
-func prepare(cmd *exec.Cmd) { cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} }
+func prepare(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setParentDeathSignal(cmd.SysProcAttr)
+}
 
 // lowerPriority 降低子进程优先级，后台索引不影响正常使用电脑（F-BG-04）。
 func lowerPriority(cmd *exec.Cmd) {

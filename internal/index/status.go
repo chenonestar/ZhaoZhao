@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chenonestar/zhaozhao/internal/extract"
 	"github.com/chenonestar/zhaozhao/internal/store"
 )
 
@@ -53,6 +54,9 @@ type Status struct {
 	Processed   int64          `json:"processed"`
 	Roots       []RootStatus   `json:"roots"`
 	Volumes     []VolumeStatus `json:"volumes"`
+	// Components 是外部组件（LibreOffice、OCR）的自检结果
+	Components         []extract.ComponentStatus `json:"components"`
+	ComponentsChecking bool                      `json:"componentsChecking"`
 }
 
 // Status 汇总当前状态。
@@ -121,6 +125,7 @@ func (m *Manager) Status() Status {
 		vs.IndexBytes, _ = m.DB.VolumeIndexBytes(v.ID)
 		st.Volumes = append(st.Volumes, vs)
 	}
+	st.Components, st.ComponentsChecking = m.Components()
 	st.Idle = s.idle.Load() && !st.Scanning && st.Totals.Pending == 0
 	return st
 }
