@@ -1,6 +1,7 @@
 package index
 
 import (
+	"context"
 	"crypto/sha1"
 	"database/sql"
 	"encoding/hex"
@@ -10,7 +11,7 @@ import (
 	"io"
 	"os"
 	"path"
-	"runtime"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,30 +19,70 @@ import (
 
 	"github.com/chenonestar/zhaozhao/internal/doc"
 	"github.com/chenonestar/zhaozhao/internal/extract"
+	"github.com/chenonestar/zhaozhao/internal/logx"
 	"github.com/chenonestar/zhaozhao/internal/norm"
 	"github.com/chenonestar/zhaozhao/internal/store"
 	"github.com/chenonestar/zhaozhao/internal/volume"
+	"github.com/chenonestar/zhaozhao/internal/worker"
 )
 
-const hashMaxSize = 256 << 20
+const (
+	hashMaxSize = 256 << 20
+	// 网络盘上的文件先复制到本机临时目录再提取：网络盘读取名额只在复制期间占用，
+	// 之后耗时的格式转换、OCR 不再占着名额，网络盘也只读一遍（复制时顺带算校验值）。
+	// 超过这个大小的文件不复制，直接在网络盘上提取（期间一直占用读取名额）。
+	netCopyMax = 512 << 20
+)
+
+var (
+	// stallAfter：有任务在处理或等待处理，却这么久没有任何进展（文件完成、进度报告），判定为疑似卡住。
+	stallAfter = 10 * time.Minute
+	// watchEvery 是看门狗检查的间隔。
+	watchEvery = 30 * time.Second
+)
+
+// job 是一个已派发的提取任务。
+type job struct {
+	f        store.File
+	path     string
+	class    int  // prioFast / prioLegacy / prioOCR
+	slot     *sem // 派发时预占的老格式转换或 OCR 名额（快速任务为 nil）
+	since    time.Time
+	stage    string
+	progress string
+	sent     bool // 结果已交给写入协程：写入完成后才从「处理中」移除，避免同一文件被再次派发
+}
 
 // schedState 是提取调度的运行时状态。
+//
+// 并发控制（不会死锁的关键）：
+//   - 提取协程的数量就是并发上限：派发器只在有协程空闲时才交出任务，交出的任务立即开始处理；
+//   - 老格式转换、OCR 的名额由派发器在交出任务前「不等待地」预占，占不到就先派发别的文件；
+//   - 网络盘读取名额只在把文件复制到本机期间占用，持有它时不再等待任何别的资源。
+//
+// 任何协程都不会持有一种资源去等待另一种被别人反向持有的资源，因此不会出现循环等待。
 type schedState struct {
 	mu       sync.Mutex
-	cond     *sync.Cond
-	limit    int // 当前允许的并发数
-	running  int
-	inflight map[int64]string // 处理中的文件 id → 路径
-	jobs     chan store.File
+	inflight map[int64]*job
+	jobs     chan *job
 	write    chan *prepared
-	legacy   chan struct{}
-	ocr      chan struct{}
-	net      chan struct{}
+	legacy   *sem
+	ocr      *sem
+	net      *sem
 
-	done      atomic.Int64
-	doneByPri [4]atomic.Int64
-	startedAt time.Time
-	idle      atomic.Bool
+	nworkers int           // 现有提取协程数
+	target   int           // 目标并发数
+	resize   chan struct{} // 并发数变化时关闭并换新，唤醒空闲协程检查是否该退出
+	running  int
+
+	done         atomic.Int64
+	doneByPri    [4]atomic.Int64
+	startedAt    time.Time
+	idle         atomic.Bool
+	wantWork     atomic.Bool  // 派发器手里有可处理的文件
+	lastActivity atomic.Int64 // 最近一次进展的时间（UnixNano）
+	ocrDone      []time.Time  // 最近完成的 OCR 文件的时间，估算剩余时间用
+	stallLogged  time.Time
 }
 
 // prepared 是已提取完毕、等待写入数据库的结果。
@@ -70,74 +111,50 @@ type preparedChild struct {
 
 func (m *Manager) startScheduler() {
 	s := &m.sched
-	s.cond = sync.NewCond(&s.mu)
-	s.inflight = map[int64]string{}
-	s.jobs = make(chan store.File)
-	s.write = make(chan *prepared, 256)
 	cfg := m.Config()
-	s.limit = cfg.workers()
-	lw := cfg.LegacyWorkers
-	if lw < 1 {
-		lw = 1
-	}
-	s.legacy = make(chan struct{}, lw)
-	ow := cfg.OCRWorkers
-	if ow < 1 {
-		ow = 1
-	}
-	s.ocr = make(chan struct{}, ow)
-	nc := cfg.NetworkReadConc
-	if nc < 1 {
-		nc = 2
-	}
-	s.net = make(chan struct{}, nc)
+	s.inflight = map[int64]*job{}
+	s.jobs = make(chan *job)
+	s.write = make(chan *prepared, 256)
+	s.legacy = newSem(cfg.legacyWorkers())
+	s.ocr = newSem(cfg.ocrWorkers())
+	s.net = newSem(cfg.netConc())
+	s.resize = make(chan struct{})
 	s.startedAt = time.Now()
+	s.lastActivity.Store(time.Now().UnixNano())
+	m.applyWorkers()
+	m.wg.Add(3)
+	go m.dispatcher()
+	go m.writer()
+	go m.watchdog()
+}
 
-	max := runtime.NumCPU()
-	if s.limit > max {
-		max = s.limit
+// applyWorkers 按当前设置调整并发数和各类名额（设置修改后立即生效，不用重启）。
+func (m *Manager) applyWorkers() {
+	s := &m.sched
+	if s.jobs == nil {
+		return
 	}
-	for i := 0; i < max; i++ {
+	cfg := m.Config()
+	n := cfg.workers()
+	s.legacy.SetCap(cfg.legacyWorkers())
+	s.ocr.SetCap(cfg.ocrWorkers())
+	s.net.SetCap(cfg.netConc())
+	m.Pool.SetSize(n)
+	if m.OCRPool != nil {
+		m.OCRPool.SetSize(cfg.ocrWorkers())
+	}
+	s.mu.Lock()
+	s.target = n
+	for s.nworkers < n && m.ctx.Err() == nil {
+		s.nworkers++
 		m.wg.Add(1)
 		go m.worker()
 	}
-	m.wg.Add(2)
-	go m.dispatcher()
-	go m.writer()
-}
-
-// applyWorkers 在设置变化后调整并发数。
-func (m *Manager) applyWorkers() {
-	s := &m.sched
-	if s.cond == nil {
-		return
-	}
-	s.mu.Lock()
-	s.limit = m.Config().workers()
+	close(s.resize)
+	s.resize = make(chan struct{})
 	s.mu.Unlock()
-	s.cond.Broadcast()
-}
-
-func (m *Manager) acquire() bool {
-	s := &m.sched
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for s.running >= s.limit {
-		if m.ctx.Err() != nil {
-			return false
-		}
-		s.cond.Wait()
-	}
-	s.running++
-	return true
-}
-
-func (m *Manager) release() {
-	s := &m.sched
-	s.mu.Lock()
-	s.running--
-	s.mu.Unlock()
-	s.cond.Broadcast()
+	logx.Debugf("并发设置：提取 %d，老格式转换 %d，OCR %d，网络盘读取 %d", n, cfg.legacyWorkers(), cfg.ocrWorkers(), cfg.netConc())
+	m.kick()
 }
 
 func (m *Manager) offlineVolumes() []string {
@@ -163,49 +180,81 @@ func (m *Manager) inflightIDs() []int64 {
 	return ids
 }
 
+// classOf 决定文件属于哪类任务：OCR、老格式转换，或快速提取。
+func classOf(f store.File) int {
+	switch {
+	case f.Prio == prioOCR:
+		return prioOCR
+	case extract.IsLegacy(f.Ext):
+		return prioLegacy
+	}
+	return prioFast
+}
+
 func (m *Manager) dispatcher() {
 	defer m.wg.Done()
 	s := &m.sched
-	defer func() {
-		// 唤醒阻塞的 worker 以便退出
-		s.cond.Broadcast()
-	}()
 	for {
 		if m.ctx.Err() != nil {
 			return
 		}
 		if m.pausedAll.Load() {
 			s.idle.Store(false)
+			s.wantWork.Store(false)
 			m.waitKick(time.Second)
 			continue
 		}
-		maxPrio := prioOCR
-		if m.Config().PauseOnBattery && onBattery() {
-			maxPrio = prioFast
+		// 只查询当前有名额的类别：名额已满的类别留在队列里，不占派发机会
+		prios := []int{prioFast}
+		if !(m.Config().PauseOnBattery && onBattery()) {
+			if s.legacy.Free() {
+				prios = append(prios, prioLegacy)
+			}
+			if s.ocr.Free() {
+				prios = append(prios, prioOCR)
+			}
 		}
-		batch := 2*m.Config().workers() + 2
-		files, err := m.DB.NextPending(batch, maxPrio, m.offlineVolumes(), m.inflightIDs())
+		files, err := m.DB.NextPending(8, prios, m.offlineVolumes(), m.inflightIDs())
 		if err != nil {
 			m.logf("读取待处理队列失败: %v", err)
 			m.waitKick(2 * time.Second)
 			continue
 		}
 		if len(files) == 0 {
+			s.wantWork.Store(false)
 			s.idle.Store(len(m.inflightIDs()) == 0)
 			m.waitKick(3 * time.Second)
 			continue
 		}
 		s.idle.Store(false)
+		s.wantWork.Store(true)
+		sent := 0
 		for _, f := range files {
-			p, _ := m.AbsPath(f.VolumeID, f.RelPath)
+			j := &job{f: f, class: classOf(f)}
+			switch j.class {
+			case prioLegacy:
+				j.slot = s.legacy
+			case prioOCR:
+				j.slot = s.ocr
+			}
+			if j.slot != nil && !j.slot.TryAcquire() {
+				continue // 这一类的名额刚被占满：先派发别的
+			}
+			j.path, _ = m.AbsPath(f.VolumeID, f.RelPath)
+			j.stage = "等待空闲的提取线程"
+			j.since = time.Now()
 			s.mu.Lock()
-			s.inflight[f.ID] = p
+			s.inflight[f.ID] = j
 			s.mu.Unlock()
 			select {
-			case s.jobs <- f:
+			case s.jobs <- j:
+				sent++
 			case <-m.ctx.Done():
 				return
 			}
+		}
+		if sent == 0 {
+			m.waitKick(time.Second)
 		}
 	}
 }
@@ -224,22 +273,55 @@ func (m *Manager) worker() {
 	defer m.wg.Done()
 	s := &m.sched
 	for {
-		var f store.File
+		s.mu.Lock()
+		if s.nworkers > s.target {
+			s.nworkers--
+			s.mu.Unlock()
+			return
+		}
+		rs := s.resize
+		s.mu.Unlock()
+		var j *job
 		select {
-		case f = <-s.jobs:
+		case j = <-s.jobs:
+		case <-rs:
+			continue
 		case <-m.ctx.Done():
 			return
 		}
-		if !m.acquire() {
-			return
-		}
-		m.process(f)
-		m.release()
 		s.mu.Lock()
-		delete(s.inflight, f.ID)
+		s.running++
+		j.since = time.Now()
 		s.mu.Unlock()
+		m.activity()
+		m.runJob(j)
+		s.mu.Lock()
+		s.running--
+		if !j.sent {
+			delete(s.inflight, j.f.ID)
+		}
+		s.mu.Unlock()
+		if j.slot != nil {
+			j.slot.Release()
+		}
+		m.kick()
 		throttleForUser(m.ctx)
 	}
+}
+
+func (m *Manager) activity() { m.sched.lastActivity.Store(time.Now().UnixNano()) }
+
+func (m *Manager) setStage(j *job, stage string) {
+	m.sched.mu.Lock()
+	j.stage, j.progress = stage, ""
+	m.sched.mu.Unlock()
+}
+
+func (m *Manager) setProgress(j *job, p string) {
+	m.sched.mu.Lock()
+	j.progress = p
+	m.sched.mu.Unlock()
+	m.activity()
 }
 
 func hashFile(p string, size int64) string {
@@ -256,6 +338,74 @@ func hashFile(p string, size int64) string {
 		return ""
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// ctxReader 在每次读取前检查是否已取消（退出程序时尽快停止复制）。
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
+}
+
+// progressWriter 每复制 8 MB 报告一次进度（大文件复制较久，不能被误判为卡住）。
+type progressWriter struct {
+	n, last int64
+	report  func(int64)
+}
+
+func (p *progressWriter) Write(b []byte) (int, error) {
+	p.n += int64(len(b))
+	if p.report != nil && p.n-p.last >= 8<<20 {
+		p.last = p.n
+		p.report(p.n)
+	}
+	return len(b), nil
+}
+
+// copyLocal 把网络盘上的文件复制到本机临时目录，复制时顺带计算校验值（wantHash）。
+// 返回本机副本路径；调用方负责删除其所在目录。
+func copyLocal(ctx context.Context, src string, size int64, wantHash bool, report func(int64)) (string, string, error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return "", "", err
+	}
+	defer in.Close()
+	dir, err := os.MkdirTemp("", "zhaozhao-net-")
+	if err != nil {
+		return "", "", err
+	}
+	dst := filepath.Join(dir, filepath.Base(src))
+	out, err := os.Create(dst)
+	if err != nil {
+		os.RemoveAll(dir)
+		return "", "", err
+	}
+	h := sha1.New()
+	ws := []io.Writer{out, &progressWriter{report: report}}
+	hash := wantHash && size <= hashMaxSize
+	if hash {
+		ws = append(ws, h)
+	}
+	w := io.MultiWriter(ws...)
+	_, err = io.CopyBuffer(w, ctxReader{ctx, in}, make([]byte, 1<<20))
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.RemoveAll(dir)
+		return "", "", err
+	}
+	sum := ""
+	if hash {
+		sum = hex.EncodeToString(h.Sum(nil))
+	}
+	return dst, sum, nil
 }
 
 func (m *Manager) extractOptions(cfg Config, withOCR bool) extract.Options {
@@ -280,109 +430,197 @@ func (m *Manager) extractOptions(cfg Config, withOCR bool) extract.Options {
 	return o
 }
 
-// process 提取一个文件并把结果交给写入协程。
-func (m *Manager) process(f store.File) {
+var classNames = map[int]string{prioFast: "普通", prioLegacy: "老格式", prioOCR: "OCR"}
+
+var statusNames = map[string]string{doc.StatusOK: "成功", doc.StatusFailed: "失败", doc.StatusEncrypted: "已加密",
+	doc.StatusNoContent: "没有文字内容", doc.StatusSkipped: "跳过"}
+
+// KindName 返回磁盘类型的中文名称。
+func KindName(kind string) string {
+	switch kind {
+	case volume.KindLocal:
+		return "本地盘"
+	case volume.KindRemovable:
+		return "移动盘"
+	case volume.KindNetwork:
+		return "网络盘"
+	}
+	return kind
+}
+
+// runJob 提取一个文件并把结果交给写入协程。
+func (m *Manager) runJob(j *job) {
+	f := j.f
 	s := &m.sched
 	abs, online := m.AbsPath(f.VolumeID, f.RelPath)
 	if !online {
+		logx.Debugf("暂缓 %s：所在磁盘离线，接入后继续", logx.P(abs))
 		return // 卷离线：保持待处理，接入后继续
 	}
+	j.path = abs
 	info, _, _, _ := m.volSnapshot(f.VolumeID)
 	isNet := info.Kind == volume.KindNetwork
-	if isNet {
-		select {
-		case s.net <- struct{}{}:
-			defer func() { <-s.net }()
-		case <-m.ctx.Done():
-			return
-		}
-	}
-	if extract.IsLegacy(f.Ext) {
-		if !m.takeSlot(s.legacy) {
-			return
-		}
-		defer func() { <-s.legacy }()
-	}
-	useOCR := f.Prio == prioOCR
-	if useOCR {
-		if !m.takeSlot(s.ocr) {
-			return
-		}
-		defer func() { <-s.ocr }()
-	}
+	start := time.Now()
+	var netWait, readDur time.Duration
+
+	m.setStage(j, "读取文件信息")
 	fi, err := os.Stat(abs)
 	if err != nil {
 		if os.IsNotExist(err) {
+			logx.Debugf("文件已不存在，移除记录 %s", logx.P(abs))
 			_ = m.DB.DeleteFiles([]int64{f.ID})
 			return
 		}
-		m.send(&prepared{file: f, res: doc.Result{Status: doc.StatusFailed, Err: "无权限访问或无法读取: " + err.Error()}})
+		res := doc.Result{Status: doc.StatusFailed, Err: "无权限访问或无法读取: " + err.Error()}
+		m.logJob(j, res, start, 0, 0)
+		m.sendJob(j, &prepared{file: f, res: res})
 		return
 	}
 	if size, mtime := fi.Size(), fi.ModTime().Unix(); size != f.Size || mtime != f.MTime {
 		// 与扫描时记录的不一致（网络盘的目录缓存、扫描时文件还在复制等）：以现在读到的为准。
 		// 否则写入时会把结果当成「提取期间文件又被修改」丢弃，文件永远停在待处理、反复提取。
-		m.logf("%s 的大小/修改时间与扫描记录不同（扫描 %d/%d，现在 %d/%d），以现在为准", abs, f.Size, f.MTime, size, mtime)
+		logx.Debugf("%s 的大小/修改时间与扫描记录不同（扫描 %d/%d，现在 %d/%d），以现在为准", logx.P(abs), f.Size, f.MTime, size, mtime)
 		if err := m.DB.SetSig(f.ID, size, mtime); err != nil {
-			m.logf("更新 %s 的文件信息失败: %v", abs, err)
+			m.logf("更新 %s 的文件信息失败: %v", logx.P(abs), err)
 		}
 		f.Size, f.MTime = size, mtime
+		j.f = f
 	}
 	cfg := m.Config()
-
-	hash := ""
-	if !extract.IsContainer(f.Ext) {
-		hash = hashFile(abs, f.Size)
-		if hash != "" {
-			if dup, _ := m.DB.FindDuplicate(hash, f.Size, f.ID); dup != 0 {
-				if p := m.prepareReuse(f, dup, hash); p != nil {
-					m.send(p)
-					return
-				}
+	container := extract.IsContainer(f.Ext)
+	src, hash := abs, ""
+	switch {
+	case isNet && f.Size <= netCopyMax:
+		m.setStage(j, "等待读取网络盘")
+		t0 := time.Now()
+		if !s.net.Acquire(m.ctx) {
+			return
+		}
+		netWait = time.Since(t0)
+		m.setStage(j, "从网络盘读取")
+		t1 := time.Now()
+		local, sum, err := copyLocal(m.ctx, abs, f.Size, !container, func(n int64) {
+			m.setProgress(j, fmt.Sprintf("已读取 %s / %s", fmtBytes(n), fmtBytes(f.Size)))
+		})
+		s.net.Release()
+		readDur = time.Since(t1)
+		if m.ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			res := doc.Result{Status: doc.StatusFailed, Err: "无法从网络盘读取: " + err.Error()}
+			m.logJob(j, res, start, netWait, readDur)
+			m.sendJob(j, m.prepare(f, res))
+			return
+		}
+		defer os.RemoveAll(filepath.Dir(local))
+		src, hash = local, sum
+	default:
+		if isNet {
+			// 太大的文件不复制：直接在网络盘上提取，期间一直占用读取名额
+			m.setStage(j, "等待读取网络盘")
+			t0 := time.Now()
+			if !s.net.Acquire(m.ctx) {
+				return
+			}
+			netWait = time.Since(t0)
+			defer s.net.Release()
+		}
+		if !container {
+			m.setStage(j, "计算校验值")
+			hash = hashFile(abs, f.Size)
+		}
+	}
+	if hash != "" {
+		if dup, _ := m.DB.FindDuplicate(hash, f.Size, f.ID); dup != 0 {
+			if p := m.prepareReuse(f, dup, hash); p != nil {
+				logx.Debugf("内容与已索引的文件相同，复用结果 %s", logx.P(abs))
+				m.sendJob(j, p)
+				return
 			}
 		}
 	}
+
+	useOCR := j.class == prioOCR
 	opts := m.extractOptions(cfg, useOCR)
-	pool, timeout := m.Pool, opts.Timeout+15*time.Second
-	if extract.IsLegacy(f.Ext) {
-		timeout = extract.LegacyTimeout(opts.Timeout) + 30*time.Second
-	}
-	if extract.IsContainer(f.Ext) {
-		timeout = 20 * time.Minute // 压缩包和邮箱可能很大
-	}
-	if useOCR {
-		// OCR 按页计时（每页的超时在 OCR 组件内处理），整份文件给更长的总时限
-		timeout = 45 * time.Minute
+	pool := m.Pool
+	t := worker.Timeouts{Total: opts.Timeout + 15*time.Second}
+	stage := "提取内容"
+	switch {
+	case useOCR:
+		// OCR 逐页报告进度：10 分钟没有任何进展才算超时，整份文件最多 6 小时
+		stage = "OCR 识别"
+		t = worker.Timeouts{Idle: 10 * time.Minute, Total: 6 * time.Hour}
 		if m.OCRPool != nil {
 			pool = m.OCRPool
 		}
+	case j.class == prioLegacy:
+		stage = "格式转换"
+		t.Total = extract.LegacyTimeout(opts.Timeout) + 30*time.Second
+	case container:
+		// 压缩包、邮箱逐项报告进度
+		stage = "解开压缩包/邮件"
+		t = worker.Timeouts{Idle: 10 * time.Minute, Total: time.Hour}
 	}
-	res := pool.Extract(m.ctx, abs, f.Ext, opts, timeout)
+	m.setStage(j, stage)
+	res := pool.Run(m.ctx, src, f.Ext, opts, t, func(p string) { m.setProgress(j, p) })
 	if m.ctx.Err() != nil {
 		return
+	}
+	if src != abs && res.Err != "" {
+		res.Err = strings.ReplaceAll(res.Err, src, abs) // 错误信息里不出现临时副本的路径
 	}
 	if res.Hash == "" {
 		res.Hash = hash
 	}
-	m.send(m.prepare(f, res))
+	m.logJob(j, res, start, netWait, readDur)
+	m.sendJob(j, m.prepare(f, res))
 }
 
-// takeSlot 等待一个受限资源（老格式转换、OCR）的名额。等待期间先让出并发令牌，
-// 避免排队的慢任务占住令牌、拖住快任务。
-func (m *Manager) takeSlot(ch chan struct{}) bool {
-	select {
-	case ch <- struct{}{}:
-		return true
-	default:
+// logJob 记录一个文件的处理结果：失败总是记录，成功只在详细日志里记录。
+func (m *Manager) logJob(j *job, res doc.Result, start time.Time, netWait, readDur time.Duration) {
+	failed := res.Status == doc.StatusFailed
+	if !failed && !logx.Verbose() {
+		return
 	}
-	m.release()
-	defer m.acquire()
-	select {
-	case ch <- struct{}{}:
-		return true
-	case <-m.ctx.Done():
-		return false
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s [%s] 结果 %s，大小 %s，用时 %.1fs", map[bool]string{true: "失败", false: "完成"}[failed],
+		logx.P(j.path), classNames[j.class], statusNames[res.Status], fmtBytes(j.f.Size), time.Since(start).Seconds())
+	if netWait > 0 || readDur > 0 {
+		fmt.Fprintf(&b, "（等待网络盘 %.1fs，读取 %.1fs）", netWait.Seconds(), readDur.Seconds())
 	}
+	m.sched.mu.Lock()
+	if j.progress != "" {
+		fmt.Fprintf(&b, "，最后进度 %s", j.progress)
+	}
+	m.sched.mu.Unlock()
+	if res.Err != "" {
+		fmt.Fprintf(&b, "，%s", res.Err)
+	}
+	if failed {
+		m.logf("%s", b.String())
+	} else {
+		logx.Debugf("%s", b.String())
+	}
+}
+
+func fmtBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.0f KB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", n)
+}
+
+// sendJob 把任务结果交给写入协程。写入完成后才把文件从「处理中」移除。
+func (m *Manager) sendJob(j *job, p *prepared) {
+	m.setStage(j, "写入索引")
+	j.sent = true
+	m.send(p)
 }
 
 func (m *Manager) send(p *prepared) {
@@ -498,16 +736,27 @@ func (m *Manager) writer() {
 			m.logf("批量写入失败，改为逐个写入: %v", err)
 			for _, p := range batch {
 				if err := m.DB.Tx(func(tx *sql.Tx) error { return m.writeOne(tx, p) }); err != nil {
-					m.logf("写入 %s 失败: %v", p.file.Name, err)
+					m.logf("写入 %s 失败: %v", logx.P(p.file.RelPath), err)
 				}
 			}
 		}
+		now := time.Now()
+		s.mu.Lock()
 		for _, p := range batch {
+			delete(s.inflight, p.file.ID) // 已写入：之后才允许再次派发同一文件
 			s.done.Add(1)
 			if p.file.Prio >= 1 && p.file.Prio <= 3 {
 				s.doneByPri[p.file.Prio].Add(1)
 			}
+			if p.file.Prio == prioOCR {
+				s.ocrDone = append(s.ocrDone, now)
+				if len(s.ocrDone) > 30 {
+					s.ocrDone = s.ocrDone[len(s.ocrDone)-30:]
+				}
+			}
 		}
+		s.mu.Unlock()
+		m.activity()
 	}
 }
 
@@ -522,6 +771,7 @@ func (m *Manager) writeOne(tx *sql.Tx, p *prepared) error {
 		return err
 	}
 	if size != f.Size || mtime != f.MTime {
+		logx.Debugf("丢弃 %s 的提取结果：提取期间文件又被修改（将重新提取）", logx.P(f.RelPath))
 		return nil
 	}
 	if p.reuse != 0 {

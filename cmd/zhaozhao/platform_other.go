@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/chenonestar/zhaozhao/internal/index"
+	"github.com/chenonestar/zhaozhao/internal/server"
 )
 
 func openFile(path string) error { return exec.Command("xdg-open", path).Start() }
@@ -27,11 +28,18 @@ func closeUI() {}
 func suppressErrorDialogs() {}
 
 type shellCtx struct {
-	URL    string
-	Mgr    *index.Manager
-	Hotkey string
-	Quit   func()
+	URL       string
+	Mgr       *index.Manager
+	Hotkey    string
+	Quit      func()
+	OpenPanel func(panel string)
 }
+
+func applyHotkey(spec string) server.HotkeyState {
+	return server.HotkeyState{Hotkey: spec, Message: "全局快捷键只在 Windows 上可用"}
+}
+
+func currentHotkey() server.HotkeyState { return applyHotkey("") }
 
 var stop = make(chan struct{}, 1)
 

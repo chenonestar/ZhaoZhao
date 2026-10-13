@@ -99,6 +99,12 @@ jobs:
         shell: pwsh
         run: ./packaging/smoke-windows.ps1 -Stage ZhaoZhao
 
+      - name: 网络盘冒烟测试（共享文件夹映射成盘符，几百个混合文件，默认设置）
+        shell: pwsh
+        run: |
+          go build -o mkscanpdf.exe ./packaging/tools/mkscanpdf
+          ./packaging/smoke-network.ps1 -Stage ZhaoZhao -MkScanPdf (Resolve-Path mkscanpdf.exe).Path
+
       - name: 打包完整版 zip
         shell: pwsh
         run: |

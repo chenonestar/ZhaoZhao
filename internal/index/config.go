@@ -3,9 +3,11 @@ package index
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/chenonestar/zhaozhao/internal/extract"
@@ -31,7 +33,7 @@ type Config struct {
 	TimeoutSec        int  `json:"timeoutSec"`      // 单文件提取超时
 	LegacyWorkers     int  `json:"legacyWorkers"`   // 老格式转换并发数
 	OCREnabled        bool `json:"ocrEnabled"`      // OCR 总开关
-	OCRWorkers        int  `json:"ocrWorkers"`      // OCR 并发数（每个占用较多内存）
+	OCRWorkers        int  `json:"ocrWorkers"`      // OCR 并发数（每个占用较多内存），0 表示自动
 	NetworkScanMin    int  `json:"networkScanMin"`  // 网络盘定时扫描间隔（分钟）
 	NetworkReadConc   int  `json:"networkReadConc"` // 网络盘读取并发数
 	PauseOnBattery    bool `json:"pauseOnBattery"`  // 使用电池时暂停 OCR 和格式转换
@@ -41,8 +43,62 @@ type Config struct {
 
 	AutoDeleteDays int `json:"autoDeleteDays"` // 超过 N 天未接入则删除卷索引，0 关闭
 
-	Hotkey string `json:"hotkey"` // 全局快捷键，如 Ctrl+Alt+F；修改后重启生效
+	Hotkey string `json:"hotkey"` // 全局快捷键，如 Ctrl+Alt+Space；空表示不使用（默认）
+
+	LogLevel string `json:"logLevel"` // 日志详细程度：detail（详细）或 normal（普通）
+
+	Version int `json:"configVersion"` // 设置文件格式版本，用于升级旧设置
 }
+
+// configVersion 是当前设置文件格式版本。
+//   - 2：OCR 并发数改为自动（0）；默认不使用全局快捷键；增加日志详细程度。
+const configVersion = 2
+
+// migrate 把旧版本保存的设置升级到当前版本：旧版本把当时的默认值原样写进了文件，
+// 这些值在新版本里有了更好的默认（自动），不升级的话用户永远用不上。
+func (c Config) migrate() Config {
+	if c.Version < 2 {
+		if c.OCRWorkers == 1 {
+			c.OCRWorkers = 0
+		}
+		if strings.EqualFold(strings.ReplaceAll(c.Hotkey, " ", ""), "Ctrl+Alt+F") {
+			c.Hotkey = "" // 与 QQ 冲突
+		}
+		if c.LogLevel == "" {
+			c.LogLevel = "detail"
+		}
+	}
+	c.Version = configVersion
+	return c
+}
+
+// ocrWorkers 返回 OCR 并发数：0 表示自动，8 个以上逻辑处理器时用 2 个，否则 1 个。
+func (c Config) ocrWorkers() int {
+	if c.OCRWorkers > 0 {
+		return c.OCRWorkers
+	}
+	if runtime.NumCPU() >= 8 {
+		return 2
+	}
+	return 1
+}
+
+func (c Config) legacyWorkers() int {
+	if c.LegacyWorkers > 0 {
+		return c.LegacyWorkers
+	}
+	return 2
+}
+
+func (c Config) netConc() int {
+	if c.NetworkReadConc > 0 {
+		return c.NetworkReadConc
+	}
+	return 2
+}
+
+// Verbose 说明是否记录详细日志。
+func (c Config) Verbose() bool { return c.LogLevel != "normal" }
 
 // normalized 把列表字段的 nil 换成空列表：JSON 里的 null 会让界面崩溃。
 func (c Config) normalized() Config {
@@ -69,13 +125,15 @@ func DefaultConfig(dataDir string) Config {
 		TimeoutSec:        60,
 		LegacyWorkers:     2,
 		OCREnabled:        true,
-		OCRWorkers:        1,
+		OCRWorkers:        0,
 		NetworkScanMin:    60,
 		NetworkReadConc:   2,
 		PauseOnBattery:    true,
 		ContainerMaxDepth: 3,
 		ArchiveMaxMB:      2048,
 		ArchiveMaxRatio:   100,
+		LogLevel:          "detail", // 问题排查期间默认详细；稳定后改为 normal
+		Version:           configVersion,
 	}
 	if dataDir != "" {
 		c.ExcludePrefixes = append(c.ExcludePrefixes, dataDir)
@@ -217,4 +275,27 @@ func (c Config) sizeLimit(ext string) int64 {
 		mb = c.MaxTextMB
 	}
 	return int64(mb) << 20
+}
+
+// configDiff 列出两份设置的不同之处（写日志用）。
+func configDiff(a, b Config) string {
+	var ma, mb map[string]any
+	ja, _ := json.Marshal(a)
+	jb, _ := json.Marshal(b)
+	_ = json.Unmarshal(ja, &ma)
+	_ = json.Unmarshal(jb, &mb)
+	var keys []string
+	for k := range mb {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var out []string
+	for _, k := range keys {
+		x, _ := json.Marshal(ma[k])
+		y, _ := json.Marshal(mb[k])
+		if string(x) != string(y) {
+			out = append(out, fmt.Sprintf("%s %s → %s", k, x, y))
+		}
+	}
+	return strings.Join(out, "；")
 }

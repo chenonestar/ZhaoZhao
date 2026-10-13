@@ -11,9 +11,11 @@ import (
 	"image"
 	"image/png"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,7 +25,9 @@ import (
 	_ "image/jpeg"
 
 	"github.com/chenonestar/zhaozhao/internal/doc"
+	"github.com/chenonestar/zhaozhao/internal/logx"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	_ "golang.org/x/image/bmp"
 	"golang.org/x/image/tiff"
@@ -149,6 +153,7 @@ func startOCR(c OCRConfig) (*ocrProc, error) {
 	if err != nil {
 		return nil, err
 	}
+	t0 := time.Now()
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -191,6 +196,7 @@ func startOCR(c OCRConfig) (*ocrProc, error) {
 		killOCR(p)
 		return nil, fmt.Errorf("OCR 组件启动超时（90 秒内没有完成初始化）%s", suffix(errBuf.String()))
 	}
+	logx.Debugf("OCR 组件已启动（进程 %d，加载模型用时 %.1fs）", cmd.Process.Pid, time.Since(t0).Seconds())
 	return p, nil
 }
 
@@ -264,6 +270,7 @@ func ocrImage(c OCRConfig, imgPath string) (string, error) {
 	p := ocrCur
 	text, err := recognizeWith(p, c, imgPath)
 	if err != nil && (errors.Is(err, errOCRDead) || errors.Is(err, errOCRTimeout)) {
+		log.Printf("OCR 组件（进程 %d）%v，结束后重新启动", p.cmd.Process.Pid, err)
 		killOCR(p) // 进程已退出或卡住：下次重新启动
 		ocrCur = nil
 	}
@@ -423,10 +430,12 @@ func extractImage(p, ext string, opt Options) doc.Result {
 		if err != nil {
 			return err
 		}
+		t1 := time.Now()
 		text, err := ocrImage(opt.OCR, path)
 		if err != nil {
 			return err
 		}
+		logx.Debugf("OCR %s %s用时 %.1fs，识别出 %d 字", logx.P(p), label, time.Since(t1).Seconds(), len([]rune(text)))
 		if strings.TrimSpace(text) != "" {
 			if label != "" {
 				b.Mark(label)
@@ -444,6 +453,7 @@ func extractImage(p, ext string, opt Options) doc.Result {
 		}
 		small := 0
 		for i, off := range pages {
+			opt.Progress("第 %d/%d 页", i+1, len(pages))
 			pngData, err := tiffPagePNG(raw, off)
 			if err != nil {
 				return doc.Result{Status: doc.StatusFailed, Err: fmt.Sprintf("TIFF 第 %d 页无法解码: %v", i+1, err)}
@@ -505,84 +515,129 @@ func decodeConfig(b []byte, fileType string) (image.Config, error) {
 	return cfg, err
 }
 
-// ocrPDFPages 对没有文字层的页取出内嵌图片并做 OCR，返回页码 → 文字。
-func ocrPDFPages(p string, pages []int, opt Options) (map[int]string, error) {
+// pdfOCRResult 是扫描版 PDF 的 OCR 结果。
+type pdfOCRResult struct {
+	texts   map[int]string // 页码 → 文字
+	skipped map[string]int // 无法识别的页：原因 → 页数
+}
+
+func (r pdfOCRResult) note() string {
+	if len(r.skipped) == 0 {
+		return ""
+	}
+	var parts []string
+	for why, n := range r.skipped {
+		parts = append(parts, fmt.Sprintf("%d 页%s", n, why))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "，")
+}
+
+// ocrPDFPages 对没有文字层的页逐页取出内嵌图片并做 OCR：PDF 结构只读一次，
+// 每页取图、识别、删除临时文件后再处理下一页，内存里同时只有一页的图片。
+// 某一页识别超时只跳过这一页；OCR 组件无法启动等错误才让整份文件失败。
+func ocrPDFPages(p string, pages []int, opt Options) (pdfOCRResult, error) {
+	res := pdfOCRResult{texts: map[int]string{}, skipped: map[string]int{}}
 	f, err := os.Open(p)
 	if err != nil {
-		return nil, err
+		return res, err
 	}
 	defer f.Close()
-	sel := make([]string, len(pages))
-	for i, n := range pages {
-		sel[i] = strconv.Itoa(n)
-	}
+	t0 := time.Now()
+	opt.Progress("读取 PDF 结构")
 	conf := model.NewDefaultConfiguration()
-	imgs, err := api.ExtractImagesRaw(context.Background(), f, sel, conf)
+	conf.ValidationMode = model.ValidationRelaxed
+	ctx, err := api.ReadValidateAndOptimize(context.Background(), f, conf, nil)
 	if err != nil {
-		return nil, fmt.Errorf("无法取出页面图片: %v", err)
+		return res, fmt.Errorf("无法取出页面图片: %v", err)
 	}
+	logx.Debugf("PDF %s：读取结构用时 %.1fs，共 %d 页，其中 %d 页没有文字层需要 OCR", logx.P(p), time.Since(t0).Seconds(), ctx.PageCount, len(pages))
 	tmp, err := os.MkdirTemp("", "zhaozhao-pdfocr-")
 	if err != nil {
-		return nil, err
+		return res, err
 	}
 	defer os.RemoveAll(tmp)
 
-	best := map[int]model.Image{}
-	data := map[int][]byte{}
-	for _, m := range imgs {
-		for _, im := range m {
+	skip := func(pg int, why string) {
+		res.skipped[why]++
+		logx.Debugf("PDF %s 第 %d 页%s，跳过", logx.P(p), pg, why)
+	}
+	for i, pg := range pages {
+		opt.Progress("第 %d/%d 页", i+1, len(pages))
+		imgs, err := pdfcpu.ExtractPageImages(context.Background(), ctx, pg, false)
+		if err != nil && len(imgs) == 0 {
+			skip(pg, "取不出图片（"+truncate(err.Error(), 80)+"）")
+			continue
+		}
+		// 一页可能有多张图（水印、印章、分条扫描）：取面积最大的一张
+		var best *model.Image
+		for k := range imgs {
+			im := imgs[k]
 			if im.Thumb {
 				continue
 			}
-			b, err := io.ReadAll(im)
-			if err != nil || len(b) == 0 {
-				continue
+			if best == nil || im.Width*im.Height > best.Width*best.Height {
+				best = &im
 			}
-			w, h := im.Width, im.Height
-			if w == 0 || h == 0 { // 原始提取不一定带尺寸，读图片头获取
-				if cfg, err := decodeConfig(b, im.FileType); err == nil {
-					w, h = cfg.Width, cfg.Height
-				}
-			}
-			if w < minSide(opt.OCR) || h < minSide(opt.OCR) {
-				continue
-			}
-			if cur, ok := best[im.PageNr]; ok && cur.Width*cur.Height >= w*h {
-				continue
-			}
-			im.Width, im.Height = w, h
-			best[im.PageNr] = im
-			data[im.PageNr] = b
 		}
-	}
-	out := map[int]string{}
-	for _, pg := range pages {
-		im, ok := best[pg]
-		if !ok {
+		if best == nil {
+			skip(pg, "没有图片")
 			continue
 		}
-		b := data[pg]
-		ext := "." + strings.ToLower(im.FileType)
-		switch strings.ToLower(im.FileType) {
+		b, err := io.ReadAll(best)
+		if err != nil || len(b) == 0 {
+			skip(pg, "图片无法读取")
+			continue
+		}
+		ext := "." + strings.ToLower(best.FileType)
+		switch strings.ToLower(best.FileType) {
 		case "jpg", "jpeg", "png":
 		case "tif", "tiff":
-			if pages := tiffPages(b); len(pages) > 0 {
-				if pngData, err := tiffPagePNG(b, pages[0]); err == nil {
+			if tp := tiffPages(b); len(tp) > 0 {
+				if pngData, err := tiffPagePNG(b, tp[0]); err == nil {
 					b, ext = pngData, ".png"
 				}
 			}
+		case "jbig2":
+			skip(pg, "是 JBIG2 格式的黑白扫描图，暂不支持识别")
+			continue
+		case "jpx":
+			skip(pg, "是 JPEG 2000 格式的扫描图，暂不支持识别")
+			continue
 		default:
-			continue // jp2 等 OCR 组件不支持的格式
+			skip(pg, "的图片格式（"+best.FileType+"）暂不支持识别")
+			continue
+		}
+		w, h := best.Width, best.Height
+		if w == 0 || h == 0 {
+			if cfg, err := decodeConfig(b, best.FileType); err == nil {
+				w, h = cfg.Width, cfg.Height
+			}
+		}
+		if w < minSide(opt.OCR) || h < minSide(opt.OCR) {
+			skip(pg, "图片太小")
+			continue
 		}
 		path, err := tempImage(tmp, "p"+strconv.Itoa(pg)+ext, b)
+		b = nil
 		if err != nil {
-			return out, err
+			return res, err
 		}
+		t1 := time.Now()
 		text, err := ocrImage(opt.OCR, path)
-		if err != nil {
-			return out, err
+		os.Remove(path)
+		if errors.Is(err, errOCRTimeout) {
+			skip(pg, "识别超时")
+			continue
 		}
-		out[pg] = text
+		if err != nil {
+			return res, err
+		}
+		logx.Debugf("OCR %s 第 %d 页（%d/%d）用时 %.1fs，图片 %dx%d，识别出 %d 字", logx.P(p), pg, i+1, len(pages), time.Since(t1).Seconds(), w, h, len([]rune(text)))
+		res.texts[pg] = text
 	}
-	return out, nil
+	if n := res.note(); n != "" {
+		log.Printf("PDF %s：%s", logx.P(p), n)
+	}
+	return res, nil
 }

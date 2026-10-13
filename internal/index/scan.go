@@ -11,6 +11,7 @@ import (
 
 	"database/sql"
 	"github.com/chenonestar/zhaozhao/internal/extract"
+	"github.com/chenonestar/zhaozhao/internal/logx"
 	"github.com/chenonestar/zhaozhao/internal/norm"
 	"github.com/chenonestar/zhaozhao/internal/store"
 )
@@ -176,6 +177,9 @@ func (m *Manager) runScan(req scanReq) {
 		m.logf("读取索引失败: %v", err)
 		return
 	}
+	scanStart := time.Now()
+	logx.Debugf("开始扫描 %s（%s，已索引 %d 个文件）", logx.P(startAbs), KindName(rt.vol.info.Kind), len(sigs))
+	changed := 0
 	seen := make(map[string]struct{}, len(sigs))
 	rootGone := false
 	var batch []*store.File
@@ -218,6 +222,7 @@ func (m *Manager) runScan(req scanReq) {
 			return
 		}
 		state, msg, prio, kind := m.decide(rt, cfg, abs, ext, size, info)
+		changed++
 		batch = append(batch, &store.File{RootID: rt.ID, VolumeID: rt.VolumeID, RelPath: rel, Name: name, Ext: ext, Kind: kind,
 			Size: size, MTime: mtime, State: state, Err: msg, Prio: prio})
 		if len(batch) >= 500 {
@@ -248,7 +253,7 @@ func (m *Manager) runScan(req scanReq) {
 			// 子路径已不存在：删除其下全部条目
 			_, _ = m.DB.DeleteSubtree(rt.VolumeID, startRel)
 		} else {
-			m.logf("无法访问索引根 %s: %v", startAbs, err)
+			m.logf("无法访问索引根 %s: %v", logx.P(startAbs), err)
 		}
 		st.running.Store(false)
 		return
@@ -262,6 +267,7 @@ func (m *Manager) runScan(req scanReq) {
 		if req.sub == "" {
 			st.running.Store(false)
 		}
+		logx.Debugf("扫描中止 %s（索引根被移除或暂停、磁盘离线、程序退出），已看到 %d 个文件", logx.P(startAbs), len(seen))
 		return // 中途卷被拔出或程序退出：不做删除对账
 	}
 	// 对账：数据库里有、磁盘上没有的文件
@@ -288,6 +294,9 @@ func (m *Manager) runScan(req scanReq) {
 		_ = m.DB.SetRootScanned(rt.ID, now)
 		st.lastDone.Store(now)
 		st.running.Store(false)
+		m.logf("扫描完成 %s：%d 个文件，新增或变化 %d 个，已删除 %d 个，用时 %s", logx.P(startAbs), len(seen), changed, len(gone), fmtDuration(time.Since(scanStart)))
+	} else if changed > 0 || len(gone) > 0 {
+		logx.Debugf("扫描完成 %s：新增或变化 %d 个，已删除 %d 个", logx.P(startAbs), changed, len(gone))
 	}
 	m.kick()
 }
@@ -327,7 +336,7 @@ func (w *walker) walk(abs, rel string) {
 	}
 	entries, err := os.ReadDir(abs)
 	if err != nil {
-		w.m.logf("跳过无法读取的目录 %s: %v", abs, err) // F-IDX-09：记录日志，不弹窗
+		w.m.logf("跳过无法读取的目录 %s: %v", logx.P(abs), err) // F-IDX-09：记录日志，不弹窗
 		return
 	}
 	for _, e := range entries {
@@ -375,7 +384,7 @@ func (w *walker) walk(abs, rel string) {
 			info, err = e.Info()
 		}
 		if err != nil {
-			w.m.logf("跳过无法访问的文件 %s: %v", cabs, err)
+			w.m.logf("跳过无法访问的文件 %s: %v", logx.P(cabs), err)
 			continue
 		}
 		w.visit(cabs, crel, info)

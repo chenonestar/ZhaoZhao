@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenonestar/zhaozhao/internal/logx"
 	"github.com/chenonestar/zhaozhao/internal/store"
 	"github.com/chenonestar/zhaozhao/internal/volume"
 )
@@ -170,7 +171,14 @@ func (m *Manager) rootsOf(volID string) []*rootRT {
 
 // volumeOnline：卷接入或盘符变化。启动监听并后台增量对账（F-VOL-05）。
 func (m *Manager) volumeOnline(id string) {
-	m.logf("卷已接入: %s", id)
+	if o := m.volOf(id); o != nil {
+		m.mu.RLock()
+		info := o.info
+		m.mu.RUnlock()
+		m.logf("磁盘已接入：%s（%s，卷标 %s，挂载于 %s）", id, KindName(info.Kind), info.Label, logx.P(info.Mount))
+	} else {
+		m.logf("磁盘已接入：%s", id)
+	}
 	for _, rt := range m.rootsOf(id) {
 		m.unwatchRoot(rt)
 		m.watchRoot(rt)
@@ -183,7 +191,7 @@ func (m *Manager) volumeOnline(id string) {
 
 // volumeOffline：卷被拔出。释放监听句柄，保留全部索引（F-VOL-03、F-VOL-07）。
 func (m *Manager) volumeOffline(id string) {
-	m.logf("卷已离线: %s", id)
+	m.logf("磁盘已离线：%s（已有索引保留，仍可搜索）", id)
 	for _, rt := range m.rootsOf(id) {
 		m.unwatchRoot(rt)
 	}

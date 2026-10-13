@@ -54,7 +54,7 @@ try {
     $deadline = (Get-Date).AddMinutes(8)
     while ($true) {
         $st = Invoke-RestMethod "$api/api/status" -WebSession $sess
-        Write-Host ("  总数={0} 待处理={1} 失败={2} 扫描中={3} 正在处理={4}" -f $st.totals.Total, $st.totals.Pending, $st.totals.Failed, $st.scanning, ($st.current -join ";"))
+        Write-Host ("  总数={0} 待处理={1} 失败={2} 扫描中={3} 正在处理={4}" -f $st.totals.Total, $st.totals.Pending, $st.totals.Failed, $st.scanning, (($st.current | ForEach-Object { "$($_.kind):$($_.stage)" }) -join ";"))
         if (-not $st.scanning -and $st.totals.Total -ge 4 -and $st.totals.Pending -eq 0 -and $st.current.Count -eq 0 -and -not $st.componentsChecking) { break }
         if ((Get-Date) -gt $deadline) { $fail.Add("索引超时未完成"); break }
         Start-Sleep -Seconds 3

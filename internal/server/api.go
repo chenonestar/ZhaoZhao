@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -160,13 +161,45 @@ func (s *Server) routes(mux *http.ServeMux) {
 				writeErr(w, 400, err)
 				return
 			}
+			old := s.M.Config()
 			if err := s.M.SetConfig(c); err != nil {
 				writeErr(w, 500, err)
 				return
 			}
+			if old.Hotkey != c.Hotkey && s.Actions.ApplyHotkey != nil {
+				s.Actions.ApplyHotkey(c.Hotkey) // 立即生效，不用重启
+			}
 		}
 		writeJSON(w, s.M.Config())
 	})
+	h("/api/hotkey", func(w http.ResponseWriter, r *http.Request) {
+		st := HotkeyState{Message: "不可用"}
+		if s.Actions.Hotkey != nil {
+			st = s.Actions.Hotkey()
+		}
+		writeJSON(w, st)
+	})
+	h("/api/ui/pending", func(w http.ResponseWriter, r *http.Request) {
+		p, _ := s.pendingPanel.Swap("").(string)
+		writeJSON(w, map[string]string{"panel": p})
+	})
+	h("/api/diagnostics", s.post(func(r *http.Request) (any, error) {
+		var b struct {
+			Anonymize bool `json:"anonymize"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		if s.Actions.Diagnostics == nil {
+			return nil, fmt.Errorf("不支持导出诊断信息")
+		}
+		p, err := s.Actions.Diagnostics(b.Anonymize)
+		if err != nil {
+			return nil, err
+		}
+		if s.Actions.RevealFile != nil {
+			_ = s.Actions.RevealFile(p)
+		}
+		return map[string]string{"path": p}, nil
+	}))
 	h("/api/config/defaults", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, index.DefaultConfig(s.M.DataDir)) })
 	h("/api/notices", func(w http.ResponseWriter, r *http.Request) {
 		after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
@@ -180,6 +213,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 		return map[string]bool{"ok": true, "hidden": hidden}, nil
 	}))
 	h("/api/quit", s.post(func(r *http.Request) (any, error) {
+		log.Printf("界面请求退出")
 		if s.Actions.Quit != nil {
 			go func() { time.Sleep(200 * time.Millisecond); s.Actions.Quit() }()
 		}

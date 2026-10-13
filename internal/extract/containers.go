@@ -473,6 +473,7 @@ func extractContainer(p, ext string, opt Options, depth int) doc.Result {
 
 	err := w.walk(p, kind, depth, "", func(inner string, e *entry) bool {
 		res.Children = append(res.Children, w.childFor(inner, e))
+		opt.Progress("第 %d 项", len(res.Children))
 		return false
 	})
 	switch {

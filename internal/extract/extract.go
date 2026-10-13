@@ -20,6 +20,20 @@ type Options struct {
 	ArchiveMaxBytes int64         // 单个压缩包解压总量上限
 	ArchiveMaxRatio int           // 单个内部文件压缩比上限
 	OCR             OCRConfig
+	Debug           bool // 记录详细日志（解析子进程据此设置自己的日志级别）
+
+	progress func(string) // 进度回调（不序列化：子进程里由 Serve 设置）
+}
+
+// SetProgress 设置进度回调。长时间的步骤（OCR 逐页、压缩包逐项）会报告进度，
+// 主程序据此显示「第几页」，并在有进展时延长超时。
+func (o *Options) SetProgress(f func(string)) { o.progress = f }
+
+// Progress 报告进度。
+func (o Options) Progress(format string, a ...any) {
+	if o.progress != nil {
+		o.progress(fmt.Sprintf(format, a...))
+	}
 }
 
 // DefaultOptions 返回默认选项。

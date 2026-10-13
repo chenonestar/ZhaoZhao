@@ -2,6 +2,7 @@ package index
 
 import (
 	"github.com/chenonestar/zhaozhao/internal/extract"
+	"github.com/chenonestar/zhaozhao/internal/logx"
 )
 
 // CheckComponents 在后台检测 LibreOffice 和 OCR 组件能否真正工作，结果显示在「索引」页。
@@ -18,7 +19,7 @@ func (m *Manager) CheckComponents() {
 	go func() {
 		res := []extract.ComponentStatus{extract.CheckSoffice(), extract.CheckOCR(ocr)}
 		for _, c := range res {
-			m.logf("组件自检：%s：%s %s", c.Name, c.Message, c.Path)
+			m.logf("组件自检：%s：%s %s", c.Name, c.Message, logx.P(c.Path))
 		}
 		m.compMu.Lock()
 		m.components, m.compChecking = res, false

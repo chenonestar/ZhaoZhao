@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"strings"
 	"syscall"
 	"time"
@@ -28,7 +29,7 @@ import (
 	"github.com/chenonestar/zhaozhao/internal/worker"
 )
 
-var version = "0.1.2"
+var version = "0.1.3"
 
 type instanceInfo struct {
 	Port  int    `json:"port"`
@@ -60,13 +61,12 @@ func main() {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		fatalf("无法创建数据目录 %s: %v", dataDir, err)
 	}
-	var logw *logx.Rotating
-	if lw, err := logx.New(filepath.Join(dataDir, "zhaozhao.log"), 5<<20, 3); err == nil {
-		log.SetOutput(lw)
-		logw = lw
+	lg, err := logx.Setup(dataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "无法打开日志文件:", err)
 	}
 	suppressErrorDialogs()
-	log.Printf("找找 %s 启动，数据目录 %s", version, dataDir)
+	log.Printf("找找启动：%s", environment(dataDir))
 
 	// 单实例：已有实例在运行则直接呼出它的窗口
 	if url, ok := existingInstance(dataDir); ok {
@@ -87,17 +87,17 @@ func main() {
 	if err != nil {
 		fatalf("%v", err)
 	}
-	nw := runtime.NumCPU()
-	pool := worker.NewPool(exe, nw)
+	// 进程池的实际大小由索引服务按设置调整（Start 时和设置修改后）
+	pool := worker.NewPool(exe, runtime.NumCPU())
 	mgr := index.New(db, volume.System(), pool, dataDir)
-	ow := mgr.Config().OCRWorkers
-	if ow < 1 {
-		ow = 1
-	}
-	mgr.OCRPool = worker.NewPool(exe, ow)
+	mgr.OCRPool = worker.NewPool(exe, 1)
+	mgr.OCRPool.Name = "OCR"
 	if err := mgr.Start(); err != nil {
 		fatalf("启动索引服务失败: %v", err)
 	}
+	cfg := mgr.Config()
+	log.Printf("设置：日志 %s，全局快捷键 %q，提取并发 %d（0 为自动），OCR 并发 %d（0 为自动），网络盘读取并发 %d，网络盘扫描间隔 %d 分钟",
+		cfg.LogLevel, cfg.Hotkey, cfg.Workers, cfg.OCRWorkers, cfg.NetworkReadConc, cfg.NetworkScanMin)
 	mgr.CheckComponents()
 
 	eng := &search.Engine{DB: db, Res: mgr, Norm: mgr.Norm}
@@ -116,7 +116,16 @@ func main() {
 			default:
 			}
 		},
-		OpenInner: func(container, inner string) (string, error) { return tmp.Open(container, inner, mgr.Config()) },
+		OpenInner:   func(container, inner string) (string, error) { return tmp.Open(container, inner, mgr.Config()) },
+		ApplyHotkey: applyHotkey,
+		Hotkey:      currentHotkey,
+		Diagnostics: func(anonymize bool) (string, error) {
+			p, err := exportDiagnostics(dataDir, lg, mgr, anonymize)
+			if err == nil {
+				log.Printf("已导出诊断信息 %s（隐藏路径 %v）", logx.P(p), anonymize)
+			}
+			return p, err
+		},
 	}
 	// 端口和令牌尽量保持不变：程序重启后，已经打开的界面窗口刷新一下就能继续用
 	srv, err = server.New(mgr, eng, pickPort(*port), loadSecret(dataDir), act)
@@ -149,30 +158,37 @@ func main() {
 		}
 		shutdownShell()
 	}()
-	runShell(&shellCtx{URL: srv.URL(), Mgr: mgr, Hotkey: mgr.Config().Hotkey, Quit: act.Quit})
+	runShell(&shellCtx{URL: srv.URL(), Mgr: mgr, Hotkey: cfg.Hotkey, Quit: act.Quit, OpenPanel: func(panel string) {
+		srv.RequestPanel(panel)
+		_ = showOrLaunchUI(srv.URL())
+	}})
 
 	// 退出：先让新实例可以启动、关掉界面窗口，再停止后台任务。
 	// 任何一步卡住（例如网络盘上的目录读取）都不能让程序退不出去：最多等 8 秒。
+	t0 := time.Now()
 	log.Printf("正在退出…")
 	_ = os.Remove(filepath.Join(dataDir, "instance.json"))
 	closeUI()
 	done := make(chan struct{})
 	go func() {
-		srv.Shutdown()
-		mgr.Stop() // 结束解析子进程（连同 LibreOffice、OCR）
-		tmp.Cleanup()
-		db.Close()
+		step := func(name string, f func()) {
+			t := time.Now()
+			f()
+			log.Printf("退出：%s 用时 %.1fs", name, time.Since(t).Seconds())
+		}
+		step("停止界面服务", srv.Shutdown)
+		step("停止后台任务和解析子进程", mgr.Stop) // 连同 LibreOffice、OCR
+		step("清理临时文件", tmp.Cleanup)
+		step("关闭索引库", func() { db.Close() })
 		close(done)
 	}()
 	select {
 	case <-done:
-		log.Printf("找找退出")
+		log.Printf("找找退出（共用时 %.1fs）", time.Since(t0).Seconds())
 	case <-time.After(8 * time.Second):
-		log.Printf("退出超时，强制结束（子进程随作业对象一并结束）")
+		log.Printf("退出超时，强制结束（子进程随作业对象一并结束）\n%s", goroutines())
 	}
-	if logw != nil {
-		logw.Close()
-	}
+	lg.Close()
 	os.Exit(0)
 }
 
@@ -225,6 +241,13 @@ type multiFlag []string
 
 func (m *multiFlag) String() string     { return fmt.Sprint(*m) }
 func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
+
+// goroutines 返回所有协程的调用栈（退出卡住时写进日志）。
+func goroutines() string {
+	var b strings.Builder
+	_ = pprof.Lookup("goroutine").WriteTo(&b, 1)
+	return b.String()
+}
 
 func fatalf(format string, a ...any) {
 	msg := fmt.Sprintf(format, a...)

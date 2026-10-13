@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/chenonestar/zhaozhao/internal/doc"
+	"github.com/chenonestar/zhaozhao/internal/logx"
 )
 
 // 老格式经 LibreOffice 无头模式转换为 OOXML 后再提取。
@@ -117,6 +118,7 @@ func convertLegacy(p, ext string, timeout time.Duration, profile string) doc.Res
 	cmd.Stderr = &output
 	setProcAttr(cmd)
 	start := time.Now()
+	logx.Debugf("启动 LibreOffice 转换 %s（时限 %s）", logx.P(p), timeout.Round(time.Second))
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
 			return doc.Result{Status: doc.StatusFailed, Err: fmt.Sprintf("格式转换超时（%s）", timeout.Round(time.Second))}
@@ -131,7 +133,7 @@ func convertLegacy(p, ext string, timeout time.Duration, profile string) doc.Res
 		}
 		return doc.Result{Status: doc.StatusFailed, Err: msg}
 	}
-	_ = start
+	logx.Debugf("格式转换 %s → %s 用时 %.1fs", logx.P(p), target, time.Since(start).Seconds())
 	var r doc.Result
 	switch target {
 	case "docx":

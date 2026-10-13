@@ -93,7 +93,7 @@ iscc packaging\zhaozhao.iss
 | `.github/workflows/bundle.yml` | 手动、改动打包文件、被 release 调用 | **完整版**：choco 安装 LibreOffice，下载 RapidOCR-json（简体中文 V4 模型），随包放入 VC++ 运行库，在真实 Windows 上冒烟测试（含组件自检、退出后无残留进程）通过后，产出完整版 zip（约 340 MB）和离线安装包 |
 | `.github/workflows/release.yml` | 推送 `v*` 标签；或提交信息里带 `[release vX.Y.Z]` | 调用完整版构建，并发布完整版 zip、安装包、精简版 zip 到 GitHub Release |
 
-发布版本：`git tag v0.1.2 && git push origin v0.1.2`，或在推送的提交信息里写 `[release v0.1.2]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice 和 OCR 组件**；精简版（只有主程序）需要按 `components\README.txt` 自行放入。
+发布版本：`git tag v0.1.3 && git push origin v0.1.3`，或在推送的提交信息里写 `[release v0.1.3]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice 和 OCR 组件**；精简版（只有主程序）需要按 `components\README.txt` 自行放入。
 
 ### 组件
 
@@ -102,7 +102,8 @@ iscc packaging\zhaozhao.iss
 - **OCR**：把 [RapidOCR-json](https://github.com/hiroi-sora/RapidOCR-json) 放到 `components\ocr\`；
   或用 `ZHAOZHAO_OCR="命令 参数…"` 指定任何兼容**管道协议**的程序（见 `tools/ocr_bridge.py`，它用 `rapidocr-onnxruntime` 实现了同一协议，开发测试用）。
   没有 OCR 组件时，图片只索引文件名，扫描 PDF 只索引文字层并标记「需要 OCR」。
-- 数据目录：`%LOCALAPPDATA%\ZhaoZhao`（便携版为程序旁的 `data`），含 `index.db`、`config.json`、`roots.json`（索引根备份）、`zhaozhao.log`（按 5 MB 滚动）。
+- 数据目录：`%LOCALAPPDATA%\ZhaoZhao`（便携版为程序旁的 `data`），含 `index.db`、`config.json`、`roots.json`（索引根备份）、`zhaozhao.log`（异步写入，按 10 MB 滚动，保留 5 个）、`crash.log`（程序崩溃报告）。
+  「设置 → 日志与诊断」可切换日志详细程度、导出诊断信息（可隐藏文件名和路径）。
 
 ### 命令行
 
@@ -211,7 +212,7 @@ ZHAOZHAO_SCALE=100000 go test ./internal/search -run TestScale -v -timeout 40m
 | F-RES-09 打开到命中位置 | ❌ | 未做（P1） |
 | F-RES-10 相同文件合并 | ✅ | 按内容哈希；快速路径下总数可能略多于实际（跨窗口的重复未合并） |
 | F-RES-11 导出 CSV（P2） | ❌ | |
-| 托盘、全局快捷键（默认 Ctrl+Alt+F，可改）、Esc 隐藏 | ⚠ | Windows 专有代码，已编译未运行 |
+| 托盘、全局快捷键（默认不开启，设置里录入、即时生效）、Esc 隐藏 | ⚠ | Windows 专有代码；托盘菜单需真人点击验证 |
 | 键盘操作、浅色/深色主题 | ✅ | |
 
 ### 移动硬盘与网络盘（第 7 节）

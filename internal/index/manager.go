@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/chenonestar/zhaozhao/internal/extract"
+	"github.com/chenonestar/zhaozhao/internal/logx"
 	"github.com/chenonestar/zhaozhao/internal/norm"
 	"github.com/chenonestar/zhaozhao/internal/store"
 	"github.com/chenonestar/zhaozhao/internal/volume"
@@ -117,6 +119,7 @@ func New(db *store.DB, prov volume.Provider, pool *worker.Pool, dataDir string) 
 		m.Pool = worker.NewPool("", 1)
 	}
 	m.cfg = m.loadConfig()
+	logx.SetVerbose(m.cfg.Verbose())
 	m.ocrCfg = extract.FindOCR()
 	return m
 }
@@ -126,7 +129,9 @@ func (m *Manager) configPath() string { return filepath.Join(m.DataDir, "config.
 func (m *Manager) loadConfig() Config {
 	c := DefaultConfig(m.DataDir)
 	if b, err := os.ReadFile(m.configPath()); err == nil {
+		c.Version = 0 // 文件里没有版本号的是旧版本保存的
 		_ = json.Unmarshal(b, &c)
+		c = c.migrate()
 	}
 	return c.normalized()
 }
@@ -141,6 +146,7 @@ func (m *Manager) Config() Config {
 // SetConfig 保存设置。繁简归一变化时在后台重建全文索引。
 func (m *Manager) SetConfig(c Config) error {
 	c = c.normalized()
+	c.Version = configVersion // 保存的总是当前格式，下次启动不会再按旧版本升级
 	old := m.Config()
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
@@ -152,13 +158,20 @@ func (m *Manager) SetConfig(c Config) error {
 	m.cfgMu.Lock()
 	m.cfg = c
 	m.cfgMu.Unlock()
+	logx.SetVerbose(c.Verbose())
+	if d := configDiff(old, c); d != "" {
+		m.logf("设置已修改：%s", d)
+	}
 	m.applyWorkers()
 	m.refreshRules()
 	if old.Simplify != c.Simplify {
 		go m.rebuildFTS()
 	}
-	if old.MaxTextMB != c.MaxTextMB || old.MaxOtherMB != c.MaxOtherMB || len(old.ExcludeDirNames) != len(c.ExcludeDirNames) ||
-		len(old.ExcludePrefixes) != len(c.ExcludePrefixes) || len(old.ExcludeGlobs) != len(c.ExcludeGlobs) || len(old.ExcludeExts) != len(c.ExcludeExts) {
+	// 排除规则按内容比较（只改了某条规则的内容、条数没变，也要重新扫描）
+	if old.MaxTextMB != c.MaxTextMB || old.MaxOtherMB != c.MaxOtherMB || !slices.Equal(old.ExcludeDirNames, c.ExcludeDirNames) ||
+		!slices.Equal(old.ExcludePrefixes, c.ExcludePrefixes) || !slices.Equal(old.ExcludeGlobs, c.ExcludeGlobs) ||
+		!slices.Equal(old.ExcludeExts, c.ExcludeExts) || old.FollowLinks != c.FollowLinks || old.SkipCloud != c.SkipCloud ||
+		old.SniffUnknown != c.SniffUnknown {
 		m.RescanAll()
 	}
 	return nil
@@ -196,12 +209,6 @@ func (m *Manager) Start() error {
 func (m *Manager) Stop() {
 	if m.cancel != nil {
 		m.cancel()
-	}
-	// 在锁内广播：等待并发令牌的协程要么已看到取消，要么正在 Wait，不会错过唤醒
-	if m.sched.cond != nil {
-		m.sched.mu.Lock()
-		m.sched.cond.Broadcast()
-		m.sched.mu.Unlock()
 	}
 	m.stopWatch()
 	m.wg.Wait()

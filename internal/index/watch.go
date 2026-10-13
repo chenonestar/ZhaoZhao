@@ -1,6 +1,7 @@
 package index
 
 import (
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"database/sql"
 	"github.com/chenonestar/zhaozhao/internal/extract"
+	"github.com/chenonestar/zhaozhao/internal/logx"
 	"github.com/chenonestar/zhaozhao/internal/store"
 	"github.com/chenonestar/zhaozhao/internal/volume"
 )
@@ -92,7 +93,7 @@ func (m *Manager) watchRoot(rt *rootRT) {
 	abs := joinMount(mount, rt.RelPath)
 	w, err := newRecursiveWatcher(abs, rt.rules.SkipDir)
 	if err != nil {
-		m.logf("无法监听 %s（将依靠定时对账）: %v", abs, err)
+		m.logf("无法监听 %s（将依靠定时对账）: %v", logx.P(abs), err)
 		return
 	}
 	m.watch.mu.Lock()

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/chenonestar/zhaozhao/internal/index"
@@ -33,6 +34,18 @@ type Server struct {
 
 	srv *http.Server
 	ln  net.Listener
+
+	pendingPanel atomic.Value // 托盘菜单要求界面打开的面板（如 "index"），界面取走后清空
+}
+
+// RequestPanel 让界面下次检查时打开指定面板（托盘菜单「索引与设置」）。
+func (s *Server) RequestPanel(panel string) { s.pendingPanel.Store(panel) }
+
+// HotkeyState 是全局快捷键的状态。
+type HotkeyState struct {
+	Hotkey  string `json:"hotkey"`
+	Active  bool   `json:"active"`
+	Message string `json:"message"`
 }
 
 // Actions 抽象与操作系统相关的动作。
@@ -45,6 +58,11 @@ type Actions struct {
 	Version    string
 	// OpenInner 把容器（压缩包、邮件）内的条目解出到临时目录并返回路径。
 	OpenInner func(containerPath, inner string) (string, error)
+	// ApplyHotkey 立即启用新的全局快捷键（空表示不使用），返回结果；Hotkey 返回当前状态。
+	ApplyHotkey func(spec string) HotkeyState
+	Hotkey      func() HotkeyState
+	// Diagnostics 导出诊断信息，返回生成的文件路径。
+	Diagnostics func(anonymize bool) (string, error)
 }
 
 func newToken() string {

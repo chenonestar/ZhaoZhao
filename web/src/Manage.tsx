@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
-import type { Config, FailedItem, RootStatus, Status } from "./types";
+import type { Config, FailedItem, HotkeyState, RootStatus, Status } from "./types";
 import { fmtDuration, fmtSize, fmtTime } from "./util";
 import { FolderPicker } from "./FolderPicker";
 import { Help } from "./Help";
@@ -13,11 +13,12 @@ interface Props {
   setTab: (t: Tab) => void;
   onClose: () => void;
   refresh: () => void;
+  onQuit: () => void;
 }
 
 const KIND: Record<string, string> = { local: "本地盘", removable: "移动硬盘", network: "网络盘" };
 
-export function Manage({ status, tab, setTab, onClose, refresh }: Props) {
+export function Manage({ status, tab, setTab, onClose, refresh, onQuit }: Props) {
   return (
     <div className="modal-back" onClick={onClose}>
       <div className="modal manage" onClick={(e) => e.stopPropagation()}>
@@ -29,6 +30,8 @@ export function Manage({ status, tab, setTab, onClose, refresh }: Props) {
             </button>
           ))}
           <span className="grow" />
+          <button className="danger" title="结束找找（包括后台索引）。下次启动后从中断处继续"
+            onClick={() => { if (confirm("退出找找？后台索引会停止，下次启动后从中断处继续。")) api.quit().finally(onQuit); }}>退出找找</button>
           <button onClick={onClose}>关闭</button>
         </div>
         <div className="manage-body">
@@ -58,13 +61,32 @@ function IndexTab({ status, refresh }: { status: Status | null; refresh: () => v
             {" "}文件 {t.Total} · 已提取 {t.Done} · 待处理 {t.Pending} · 仅文件名 {t.MetaOnly} · 失败 {t.Failed} · 已加密 {t.Encrypted}
           </span>
         </div>
+        {status.stalledSec > 0 && (
+          <div className="error">
+            已经 {fmtDuration(status.stalledSec)} 没有任何文件完成，可能卡住了。请到「设置」页底部点「导出诊断信息」，把生成的文件发给开发者；
+            也可以先暂停再恢复，或退出后重新启动。
+          </div>
+        )}
         {status.ocrQueue > 0 && (
-          <div className="dim">OCR 队列 {status.ocrQueue}{status.ocrEtaSec > 0 ? `，预计剩余 ${fmtDuration(status.ocrEtaSec)}` : ""}</div>
+          <div className="dim">OCR 队列 {status.ocrQueue}，{status.ocrEtaSec > 0 ? `按最近的速度预计还需 ${fmtDuration(status.ocrEtaSec)}` : "正在估算剩余时间"}</div>
         )}
         {status.legacyQueue > 0 && <div className="dim">老格式待转换 {status.legacyQueue}</div>}
         {status.onBattery && <div className="dim">正在使用电池：OCR 和格式转换已暂停</div>}
+        {status.legacy && !status.idle && (
+          <div className="dim small">
+            提取 {status.active}/{status.workers} · 老格式转换 {status.legacy.used}/{status.legacy.cap} · OCR {status.ocr.used}/{status.ocr.cap} · 网络盘读取 {status.net.used}/{status.net.cap}
+          </div>
+        )}
         {status.current.length > 0 && (
-          <div className="current dim">正在处理（{status.active}/{status.workers}）：{status.current.map((c) => <div key={c} title={c}>{c}</div>)}</div>
+          <div className="current dim">
+            正在处理：
+            {status.current.slice(0, 12).map((j) => (
+              <div key={j.path} title={j.path}>
+                <span className="badge">{j.kind}</span> {j.path.split(/[\\/]/).pop()} — {j.stage}{j.progress ? ` ${j.progress}` : ""} · {fmtDuration(j.seconds)}
+              </div>
+            ))}
+            {status.current.length > 12 && <div>…… 还有 {status.current.length - 12} 个</div>}
+          </div>
         )}
         <div className="components small">
           {status.componentsChecking && <div className="dim">正在检测格式转换和 OCR 组件…</div>}
@@ -207,7 +229,8 @@ const lines = (s: string) => s.split("\n").map((x) => x.trim()).filter(Boolean);
 function SettingsTab() {
   const [c, setC] = useState<Config | null>(null);
   const [msg, setMsg] = useState("");
-  useEffect(() => { api.config().then(setC); }, []);
+  const [hk, setHk] = useState<HotkeyState | null>(null);
+  useEffect(() => { api.config().then(setC); api.hotkey().then(setHk).catch(() => {}); }, []);
   if (!c) return <div className="dim pad">加载中…</div>;
   const num = (k: keyof Config, label: string, hint = "") => (
     <label className="field inline"><span>{label}</span>
@@ -238,21 +261,22 @@ function SettingsTab() {
       {chk("followLinks", "跟随符号链接和目录联接")}
 
       <h4>呼出窗口</h4>
-      <label className="field inline"><span>全局快捷键（修改后重启生效）</span>
-        <input value={c.hotkey} onChange={(e) => setC({ ...c, hotkey: e.target.value })} placeholder="Ctrl+Alt+F" /></label>
+      <HotkeyField value={c.hotkey} onChange={(v) => setC({ ...c, hotkey: v })} state={hk} />
 
       <h4>搜索</h4>
       {chk("simplify", "繁简体归一（搜「预算」也能找到「預算」）")}
 
-      <h4>后台任务</h4>
+      <h4>后台任务（修改后立即生效）</h4>
       {num("workers", "提取并发数", "0 表示 CPU 核心数的一半")}
       {num("timeoutSec", "单个文件提取超时（秒）")}
       {num("legacyWorkers", "老格式转换并发数")}
+      {chk("ocrEnabled", "识别图片和扫描 PDF 里的文字（OCR）")}
+      {num("ocrWorkers", "OCR 并发数", "0 表示自动：8 个以上逻辑处理器时 2 个，否则 1 个；每个约占几百 MB 内存")}
       {chk("pauseOnBattery", "使用电池时暂停 OCR 和格式转换")}
 
       <h4>移动硬盘与网络盘</h4>
       {num("networkScanMin", "网络盘定时扫描间隔（分钟）")}
-      {num("networkReadConc", "网络盘读取并发数")}
+      {num("networkReadConc", "网络盘读取并发数", "同时从网络盘读取的文件数；读完后在本机提取，不占用这个名额")}
       {num("autoDeleteDays", "超过 N 天未接入则自动删除该盘索引", "0 表示关闭")}
 
       <h4>压缩包与邮件</h4>
@@ -260,10 +284,72 @@ function SettingsTab() {
       {num("archiveMaxMB", "单个压缩包解压总量上限（MB）")}
       {num("archiveMaxRatio", "单个内部文件压缩比上限（倍）")}
 
+      <h4>日志与诊断</h4>
+      <label className="field inline"><span>日志详细程度</span>
+        <select value={c.logLevel || "detail"} onChange={(e) => setC({ ...c, logLevel: e.target.value })}>
+          <option value="detail">详细（记录每个文件的处理过程，便于排查问题）</option>
+          <option value="normal">普通（只记录错误和重要事件）</option>
+        </select></label>
+      <Diagnostics />
+
       <div className="modal-foot">
         {msg && <span className="flash">{msg}</span>}
-        <button className="primary" onClick={() => api.saveConfig(c).then((n) => { setC(n); setMsg("已保存"); setTimeout(() => setMsg(""), 1500); }).catch((e) => setMsg(e.message))}>保存设置</button>
+        <button className="primary" onClick={() => api.saveConfig(c).then((n) => {
+          setC(n); setMsg("已保存"); setTimeout(() => setMsg(""), 1500);
+          api.hotkey().then(setHk).catch(() => {});
+        }).catch((e) => setMsg(e.message))}>保存设置</button>
       </div>
+    </div>
+  );
+}
+
+// 快捷键录入：点一下输入框，直接按下想要的组合。
+function HotkeyField({ value, onChange, state }: { value: string; onChange: (v: string) => void; state: HotkeyState | null }) {
+  const on = value !== "";
+  const record = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    if (e.key === "Escape" || e.key === "Tab") return;
+    if (e.key === "Backspace" || e.key === "Delete") { onChange(""); return; }
+    let key = "";
+    if (e.code === "Space") key = "Space";
+    else if (/^Key[A-Z]$/.test(e.code)) key = e.code.slice(3);
+    else if (/^Digit[0-9]$/.test(e.code)) key = e.code.slice(5);
+    else if (/^F([1-9]|1[0-9]|2[0-4])$/.test(e.key)) key = e.key;
+    if (!key) return; // 只按了 Ctrl/Alt 等修饰键：等用户按完
+    const mods = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Win"].filter(Boolean);
+    onChange([...mods, key].join("+"));
+  };
+  return (
+    <div className="field">
+      <label className="check"><input type="checkbox" checked={on} onChange={(e) => onChange(e.target.checked ? "Ctrl+Alt+Space" : "")} />
+        用全局快捷键呼出找找（默认不开启）</label>
+      {on && (
+        <label className="field inline"><span>快捷键（点这里，然后按下组合键）</span>
+          <input readOnly value={value} onKeyDown={record} placeholder="例如 Ctrl+Alt+Space" /></label>
+      )}
+      {state && state.hotkey !== "" && state.hotkey === value && (
+        <div className={state.active ? "ok small" : "error small"}>{state.hotkey}：{state.message}</div>
+      )}
+      <div className="dim small">保存后立即生效。至少包含 Ctrl、Alt 或 Win 之一；与其他程序（如 QQ）冲突时会提示，请换一个组合。</div>
+    </div>
+  );
+}
+
+function Diagnostics() {
+  const [anon, setAnon] = useState(true);
+  const [out, setOut] = useState("");
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="field">
+      <div className="dim small">遇到问题时导出诊断信息（日志、当前状态、设置、运行环境），把生成的 zip 文件发给开发者。</div>
+      <label className="check"><input type="checkbox" checked={anon} onChange={(e) => setAnon(e.target.checked)} />隐藏文件名和路径（替换成代号，保留扩展名和目录层级）</label>
+      <div className="btns">
+        <button disabled={busy} onClick={() => {
+          setBusy(true); setOut("");
+          api.diagnostics(anon).then((r) => setOut("已生成：" + r.path)).catch((e) => setOut("导出失败：" + e.message)).finally(() => setBusy(false));
+        }}>{busy ? "正在导出…" : "导出诊断信息"}</button>
+      </div>
+      {out && <div className="small">{out}</div>}
     </div>
   );
 }

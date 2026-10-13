@@ -492,9 +492,17 @@ func (d *DB) GetFile(id int64) (*File, error) {
 
 // NextPending 取出待提取的文件，按优先级（数值小者优先）、id 排序。
 // 已暂停的索引根、skipVols 中的卷（离线）、exclude 中的文件（处理中）会被跳过。
-func (d *DB) NextPending(limit, maxPrio int, skipVols []string, exclude []int64) ([]File, error) {
-	q := `SELECT ` + fileCols + ` FROM files WHERE state=0 AND prio<=? AND root_id NOT IN (SELECT id FROM roots WHERE paused=1)`
-	args := []any{maxPrio}
+// NextPending 取出待处理的文件：只取 prios 列出的优先级（调度器只查询当前有名额的类别），
+// 按优先级、编号排序。
+func (d *DB) NextPending(limit int, prios []int, skipVols []string, exclude []int64) ([]File, error) {
+	if len(prios) == 0 {
+		return nil, nil
+	}
+	q := `SELECT ` + fileCols + ` FROM files WHERE state=0 AND prio IN (` + strings.TrimSuffix(strings.Repeat("?,", len(prios)), ",") + `) AND root_id NOT IN (SELECT id FROM roots WHERE paused=1)`
+	var args []any
+	for _, p := range prios {
+		args = append(args, p)
+	}
 	if len(skipVols) > 0 {
 		q += ` AND volume_id NOT IN (` + strings.TrimSuffix(strings.Repeat("?,", len(skipVols)), ",") + `)`
 		for _, v := range skipVols {

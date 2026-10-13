@@ -54,10 +54,12 @@ func extractPDF(p string, opt Options) (res doc.Result) {
 	}
 	usedOCR := false
 	var ocrErr error
+	ocrNote := ""
 	if len(blank) > 0 && opt.OCR.Enabled() {
-		var got map[int]string
+		var got pdfOCRResult
 		got, ocrErr = ocrPDFPages(p, blank, opt)
-		for pg, t := range got {
+		ocrNote = got.note()
+		for pg, t := range got.texts {
 			if strings.TrimSpace(t) != "" {
 				texts[pg] = strings.TrimSpace(t)
 				usedOCR = true
@@ -79,9 +81,12 @@ func extractPDF(p string, opt Options) (res doc.Result) {
 		if !opt.OCR.Enabled() {
 			return doc.Result{Status: doc.StatusNoContent, Err: "没有文字层，需要 OCR", NeedOCR: needOCR}
 		}
+		if ocrNote != "" {
+			return doc.Result{Status: doc.StatusNoContent, Err: "没有文字层，OCR 也没有识别到文字：" + ocrNote}
+		}
 		return doc.Result{Status: doc.StatusNoContent, Err: "没有文字层，OCR 也没有识别到文字"}
 	}
-	return doc.Result{Status: doc.StatusOK, Text: b.String(), Locs: b.Locs, OCR: usedOCR, NeedOCR: needOCR}
+	return doc.Result{Status: doc.StatusOK, Text: b.String(), Locs: b.Locs, OCR: usedOCR, NeedOCR: needOCR, Err: ocrNote}
 }
 
 func safePageText(p pdf.Page) (s string, err error) {

@@ -105,6 +105,16 @@ export function App() {
   // 状态与通知
   // 连续几次取不到状态，说明找找主程序已经退出或重启：提示用户，而不是留下一个不会动的界面
   const [lost, setLost] = useState(false);
+  const [quitted, setQuitted] = useState(false);
+  // 托盘菜单「索引与设置」：窗口被呼出时检查要打开哪个面板
+  useEffect(() => {
+    const check = () => api.uiPending().then((r) => { if (r.panel === "index") setPanel("index"); }).catch(() => {});
+    check();
+    const onVis = () => { if (document.visibilityState === "visible") check(); };
+    window.addEventListener("focus", check);
+    document.addEventListener("visibilitychange", onVis);
+    return () => { window.removeEventListener("focus", check); document.removeEventListener("visibilitychange", onVis); };
+  }, []);
   const fails = useRef(0);
   const refreshStatus = useCallback(() => api.status()
     .then((s) => { fails.current = 0; setLost(false); setStatus(s); })
@@ -270,7 +280,7 @@ export function App() {
         </section>
       </main>
 
-      {lost && (
+      {lost && !quitted && (
         <div className="lost">
           与找找主程序的连接已断开（程序可能已退出或正在重启）。
           <button className="primary" onClick={() => location.reload()}>重新连接</button>
@@ -284,7 +294,10 @@ export function App() {
         {status && <span className="dim">共 {status.totals.Total} 个文件</span>}
       </footer>
 
-      {panel && <Manage status={status} tab={panel} setTab={setPanel} onClose={() => setPanel(null)} refresh={refreshStatus} />}
+      {panel && <Manage status={status} tab={panel} setTab={setPanel} onClose={() => setPanel(null)} refresh={refreshStatus} onQuit={() => { setQuitted(true); window.close(); }} />}
+      {quitted && (
+        <div className="modal-back"><div className="modal"><h3>找找已退出</h3><div className="dim">可以关闭这个窗口了。再次使用时，重新运行 zhaozhao.exe。</div></div></div>
+      )}
       {adv && <AdvancedSearch initial={query} onClose={() => setAdv(false)} onApply={(q) => { setQuery(q); setAdv(false); }} />}
     </div>
   );

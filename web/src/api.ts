@@ -1,5 +1,5 @@
 import type {
-  Config, FailedItem, FsListing, Notice, Preview, Saved, SearchOpts, SearchResponse, Status,
+  Config, FailedItem, FsListing, HotkeyState, Notice, Preview, Saved, SearchOpts, SearchResponse, Status,
 } from "./types";
 
 export class ApiError extends Error {
@@ -45,6 +45,9 @@ export const api = {
   open: (id: number, action: "open" | "folder") => post<{ ok: boolean; readOnlyCopy?: boolean }>("/api/open", { id, action }),
   status: () => call<Status>("/api/status"),
   checkComponents: () => post("/api/components/check"),
+  hotkey: () => call<HotkeyState>("/api/hotkey"),
+  uiPending: () => call<{ panel: string }>("/api/ui/pending"),
+  diagnostics: (anonymize: boolean) => post<{ path: string }>("/api/diagnostics", { anonymize }),
   pause: (root?: number) => post("/api/pause", { root: root ?? 0 }),
   resume: (root?: number) => post("/api/resume", { root: root ?? 0 }),
   addRoot: (path: string) => post("/api/roots/add", { path }),

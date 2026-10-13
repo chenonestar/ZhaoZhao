@@ -95,16 +95,33 @@ export interface VolumeStatus {
   capacity: number;
 }
 
+export interface CurrentJob {
+  path: string;
+  kind: string;
+  stage: string;
+  progress: string;
+  seconds: number;
+}
+
+export interface SlotStatus {
+  used: number;
+  cap: number;
+}
+
 export interface Status {
   paused: boolean;
   idle: boolean;
   workers: number;
   active: number;
-  current: string[];
+  current: CurrentJob[];
   totals: Counts;
   ocrQueue: number;
   legacyQueue: number;
   ocrEtaSec: number;
+  legacy: SlotStatus;
+  ocr: SlotStatus;
+  net: SlotStatus;
+  stalledSec: number;
   rebuilding: boolean;
   corrupt: boolean;
   onBattery: boolean;
@@ -114,6 +131,12 @@ export interface Status {
   volumes: VolumeStatus[];
   components: ComponentStatus[] | null;
   componentsChecking: boolean;
+}
+
+export interface HotkeyState {
+  hotkey: string;
+  active: boolean;
+  message: string;
 }
 
 export interface ComponentStatus {
@@ -154,6 +177,10 @@ export interface Config {
   archiveMaxRatio: number;
   autoDeleteDays: number;
   hotkey: string;
+  ocrEnabled: boolean;
+  ocrWorkers: number;
+  logLevel: string;
+  configVersion: number;
 }
 
 export interface Notice {

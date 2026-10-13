@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/chenonestar/zhaozhao/internal/index"
+	"github.com/chenonestar/zhaozhao/internal/server"
 	"golang.org/x/sys/windows"
 )
 
@@ -25,6 +26,7 @@ var (
 	procDispatchMessage  = user32.NewProc("DispatchMessageW")
 	procPostQuitMessage  = user32.NewProc("PostQuitMessage")
 	procPostMessage      = user32.NewProc("PostMessageW")
+	procSendMessage      = user32.NewProc("SendMessageW")
 	procRegisterHotKey   = user32.NewProc("RegisterHotKey")
 	procUnregisterHotKey = user32.NewProc("UnregisterHotKey")
 	procLoadIcon         = user32.NewProc("LoadIconW")
@@ -48,6 +50,7 @@ const (
 	wmRButtonUp    = 0x0205
 	wmLDblClk      = 0x0203
 	wmQuitShell    = wmUser + 2
+	wmSetHotkey    = wmUser + 3
 
 	nimAdd     = 0
 	nimDelete  = 2
@@ -56,8 +59,9 @@ const (
 	nifTip     = 4
 
 	mfString    = 0
+	mfSeparator = 0x0800
 	tpmRightBtn = 0x0002
-	tpmReturn   = 0x0100
+	tpmReturn   = 0x0100 // TrackPopupMenu 直接返回所选菜单项的编号（不再发送 WM_COMMAND）
 
 	idOpen   = 1
 	idPause  = 2
@@ -112,10 +116,11 @@ type msg struct {
 }
 
 type shellCtx struct {
-	URL    string
-	Mgr    *index.Manager
-	Hotkey string
-	Quit   func()
+	URL       string
+	Mgr       *index.Manager
+	Hotkey    string
+	Quit      func()
+	OpenPanel func(panel string) // 呼出界面并打开指定面板（如「索引与设置」）
 }
 
 var (
@@ -148,6 +153,8 @@ func parseHotkey(s string) (mods uint32, key uint32, ok bool) {
 		default:
 			k := strings.ToUpper(strings.TrimSpace(p))
 			switch {
+			case k == "SPACE" || k == "空格":
+				key = 0x20
 			case len(k) == 1 && ((k[0] >= 'A' && k[0] <= 'Z') || (k[0] >= '0' && k[0] <= '9')):
 				key = uint32(k[0])
 			case len(k) >= 2 && k[0] == 'F':
@@ -167,7 +174,8 @@ func parseHotkey(s string) (mods uint32, key uint32, ok bool) {
 			}
 		}
 	}
-	return mods, key, key != 0
+	// 至少要有 Ctrl、Alt 或 Win 之一：否则会抢走普通打字用的按键
+	return mods, key, key != 0 && mods&(1|2|8) != 0
 }
 
 func wndProc(hwnd, m, wparam, lparam uintptr) uintptr {
@@ -189,24 +197,13 @@ func wndProc(hwnd, m, wparam, lparam uintptr) uintptr {
 		}
 		return 0
 	case wmCommand:
-		switch wparam & 0xFFFF {
-		case idOpen, idManage:
-			if c != nil {
-				_ = showOrLaunchUI(c.URL)
-			}
-		case idPause:
-			if c != nil && c.Mgr != nil {
-				if c.Mgr.IsPaused() {
-					c.Mgr.ResumeAll()
-				} else {
-					c.Mgr.PauseAll()
-				}
-			}
-		case idQuit:
-			if c != nil && c.Quit != nil {
-				c.Quit()
-			}
-		}
+		trayCommand(c, wparam&0xFFFF)
+		return 0
+	case wmSetHotkey:
+		hotkeyMu.Lock()
+		spec := hotkeyWant
+		hotkeyMu.Unlock()
+		registerHotkey(hwnd, spec)
 		return 0
 	case wmDeviceChange:
 		// 磁盘接入或移除：立即重新识别卷，而不是等下一次轮询
@@ -236,12 +233,102 @@ func showMenu(hwnd uintptr, c *shellCtx) {
 		pause = "恢复索引"
 	}
 	add(idPause, pause)
-	add(idQuit, "退出")
+	procAppendMenu.Call(menu, mfSeparator, 0, 0)
+	add(idQuit, "退出找找")
 	var pt point
 	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
 	procSetForegroundWindow.Call(hwnd) // 否则点击菜单外部时菜单不会消失
-	procTrackPopupMenu.Call(menu, tpmRightBtn|tpmReturn|0x0, uintptr(pt.x), uintptr(pt.y), 0, hwnd, 0)
+	// TPM_RETURNCMD：所选菜单项的编号作为返回值，必须在这里处理（v0.1.2 及以前忽略了返回值，菜单项全部无效）
+	cmd, _, _ := procTrackPopupMenu.Call(menu, tpmRightBtn|tpmReturn, uintptr(pt.x), uintptr(pt.y), 0, hwnd, 0)
 	procPostMessage.Call(hwnd, 0, 0, 0)
+	if cmd != 0 {
+		trayCommand(c, cmd)
+	}
+}
+
+// trayCommand 执行托盘菜单命令。
+func trayCommand(c *shellCtx, id uintptr) {
+	if c == nil {
+		return
+	}
+	names := map[uintptr]string{idOpen: "打开找找", idManage: "索引与设置", idPause: "暂停/恢复索引", idQuit: "退出找找"}
+	log.Printf("托盘菜单：%s", names[id])
+	switch id {
+	case idOpen:
+		_ = showOrLaunchUI(c.URL)
+	case idManage:
+		if c.OpenPanel != nil {
+			c.OpenPanel("index")
+		} else {
+			_ = showOrLaunchUI(c.URL)
+		}
+	case idPause:
+		if c.Mgr != nil {
+			if c.Mgr.IsPaused() {
+				c.Mgr.ResumeAll()
+			} else {
+				c.Mgr.PauseAll()
+			}
+		}
+	case idQuit:
+		if c.Quit != nil {
+			c.Quit()
+		}
+	}
+}
+
+// ---- 全局快捷键：在界面线程（托盘窗口所属线程）上注册，设置修改后立即生效 ----
+
+var (
+	hotkeyMu    sync.Mutex
+	hotkeyWant  string
+	hotkeyState = server.HotkeyState{Message: "未启用"}
+	hotkeyOn    bool
+)
+
+// registerHotkey 注销旧的快捷键并注册新的。只能在托盘窗口所属的线程调用。
+func registerHotkey(hwnd uintptr, spec string) {
+	hotkeyMu.Lock()
+	defer hotkeyMu.Unlock()
+	if hotkeyOn {
+		procUnregisterHotKey.Call(hwnd, hotkeyID)
+		hotkeyOn = false
+	}
+	spec = strings.TrimSpace(spec)
+	st := server.HotkeyState{Hotkey: spec}
+	switch mods, key, ok := parseHotkey(spec); {
+	case spec == "":
+		st.Message = "未启用"
+	case !ok:
+		st.Message = "无法识别这个组合，至少要包含 Ctrl、Alt 或 Win 之一，再加一个字母、数字、F1–F24 或空格"
+	default:
+		if r, _, err := procRegisterHotKey.Call(hwnd, hotkeyID, uintptr(mods|0x4000), uintptr(key)); r == 0 {
+			st.Message = "被其他程序占用，请换一个组合"
+			log.Printf("注册全局快捷键 %s 失败（被其他程序占用）: %v", spec, err)
+		} else {
+			hotkeyOn, st.Active, st.Message = true, true, "已生效"
+			log.Printf("全局快捷键 %s 已生效", spec)
+		}
+	}
+	hotkeyState = st
+}
+
+// applyHotkey 从其他线程修改全局快捷键，返回结果。
+func applyHotkey(spec string) server.HotkeyState {
+	if shellHwnd == 0 {
+		return server.HotkeyState{Hotkey: spec, Message: "托盘尚未就绪"}
+	}
+	hotkeyMu.Lock()
+	hotkeyWant = spec
+	hotkeyMu.Unlock()
+	procSendMessage.Call(shellHwnd, wmSetHotkey, 0, 0) // 同步：返回时已在界面线程上处理完
+	return currentHotkey()
+}
+
+func currentHotkey() server.HotkeyState {
+	hotkeyMu.Lock()
+	defer hotkeyMu.Unlock()
+	return hotkeyState
 }
 
 // runShell 创建隐藏窗口，提供托盘图标、全局快捷键和磁盘变化通知，并运行消息循环直到退出。
@@ -278,14 +365,8 @@ func runShell(c *shellCtx) {
 	procShellNotifyIcon.Call(nimAdd, uintptr(unsafe.Pointer(&nid)))
 	defer procShellNotifyIcon.Call(nimDelete, uintptr(unsafe.Pointer(&nid)))
 
-	if mods, key, ok := parseHotkey(c.Hotkey); ok {
-		if r, _, err := procRegisterHotKey.Call(hwnd, hotkeyID, uintptr(mods|0x4000), uintptr(key)); r == 0 {
-			log.Printf("注册全局快捷键 %s 失败（可能被其他程序占用）: %v", c.Hotkey, err)
-		}
-		defer procUnregisterHotKey.Call(hwnd, hotkeyID)
-	} else if c.Hotkey != "" {
-		log.Printf("无法识别的快捷键设置: %q", c.Hotkey)
-	}
+	registerHotkey(hwnd, c.Hotkey)
+	defer procUnregisterHotKey.Call(hwnd, hotkeyID)
 
 	var m msg
 	for {
