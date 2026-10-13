@@ -81,13 +81,14 @@ func TestSetupWritesThroughStdLog(t *testing.T) {
 	Debugf("shown")
 	l.Flush()
 	b, _ := os.ReadFile(filepath.Join(dir, "zhaozhao.log"))
+	logs := l.AllLogs()
 	l.Close()
 	s := string(b)
 	if !strings.Contains(s, "hello «Z:\\资料\\合同.pdf»") || strings.Contains(s, "hidden") || !strings.Contains(s, "shown") {
 		t.Fatalf("%q", s)
 	}
-	if got := l.AllLogs(); len(got) != 1 {
-		t.Fatalf("AllLogs: %v", got)
+	if len(logs) != 1 {
+		t.Fatalf("AllLogs: %v", logs)
 	}
 }
 

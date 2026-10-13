@@ -55,6 +55,7 @@ func (l *Logger) Close() {
 	l.async.Close()
 	log.SetOutput(os.Stderr)
 	l.rot.Close()
+	_ = debug.SetCrashOutput(nil, debug.CrashOptions{}) // 释放 crash.log（Windows 上打开的文件不能删除）
 }
 
 // AllLogs 返回现有的日志文件（最新的在前）。

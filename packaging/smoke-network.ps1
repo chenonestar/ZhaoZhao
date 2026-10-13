@@ -105,7 +105,8 @@ try {
     Expect "压缩包" "zipnet" "*归档.zip*"
 
     Write-Host "== 失败列表"
-    Invoke-RestMethod "$api/api/failed" -WebSession $sess | ForEach-Object { Write-Host "  $($_.path)  $($_.reason)"; $fail.Add("失败: $($_.path) $($_.reason)") }
+    # 空数组时 Invoke-RestMethod 仍会输出一个空元素：只统计有路径的条目
+    @(Invoke-RestMethod "$api/api/failed" -WebSession $sess) | Where-Object { $_ -and $_.path } | ForEach-Object { Write-Host "  $($_.path)  $($_.reason)"; $fail.Add("失败: $($_.path) $($_.reason)") }
 
     Write-Host "== 导出诊断信息（隐藏路径）"
     $d = Invoke-RestMethod "$api/api/diagnostics" -Method Post -WebSession $sess -Headers @{ "X-ZhaoZhao" = "1" } -ContentType "application/json" -Body '{"anonymize":true}'
