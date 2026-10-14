@@ -23,6 +23,7 @@ var (
 	pdfiumOnce sync.Once
 	pdfiumErr  error
 	pdfiumPath string
+	pdfiumLib  uintptr
 	pdfiumMu   sync.Mutex
 )
 
@@ -91,6 +92,7 @@ func loadPDFium() error {
 			}
 			return
 		}
+		pdfiumLib = lib
 		pdfiumErr = registerPDFium(lib)
 		if pdfiumErr == nil {
 			fpdf.InitLibrary()
@@ -164,15 +166,15 @@ func openPDFium(p string) (*pdfDoc, error) {
 	if len(data) == 0 {
 		return nil, errors.New("空文件")
 	}
-	h := fpdf.LoadMemDocument64(unsafe.Pointer(&data[0]), uintptr(len(data)), nil)
+	h, code := loadMemDocument(data)
 	if h == 0 {
-		switch fpdf.GetLastError() & 0xFFFFFFFF {
+		switch code {
 		case fpdfErrPassword, fpdfErrSecurity:
 			return nil, errPDFPassword
 		case fpdfErrFormat:
 			return nil, errors.New("不是有效的 PDF 文件")
 		default:
-			return nil, fmt.Errorf("PDFium 无法打开（错误 %d）", fpdf.GetLastError()&0xFFFFFFFF)
+			return nil, fmt.Errorf("PDFium 无法打开（错误 %d）", code)
 		}
 	}
 	return &pdfDoc{h: h, data: data}, nil
