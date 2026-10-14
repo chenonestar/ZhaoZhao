@@ -58,11 +58,11 @@ func (l *Logger) Close() {
 	_ = debug.SetCrashOutput(nil, debug.CrashOptions{}) // 释放 crash.log（Windows 上打开的文件不能删除）
 }
 
-// AllLogs 返回现有的日志文件（最新的在前）。
+// AllLogs 返回现有的日志文件（最新的在前）。旧日志是 gzip 压缩的，用 ReadLog 读取。
 func (f Files) AllLogs() []string {
 	out := []string{f.Log}
 	for i := 1; i <= f.Keep; i++ {
-		out = append(out, f.Log+"."+itoa(i))
+		out = append(out, f.Log+"."+itoa(i)+".gz", f.Log+"."+itoa(i))
 	}
 	out = append(out, f.Crash)
 	var exist []string

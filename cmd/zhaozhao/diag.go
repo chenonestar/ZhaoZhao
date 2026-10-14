@@ -112,11 +112,11 @@ func exportDiagnostics(dataDir string, lg *logx.Logger, mgr *index.Manager, anon
 	}
 
 	for _, lp := range lg.AllLogs() {
-		data, err := os.ReadFile(lp)
+		data, err := logx.ReadLog(lp) // 旧日志是压缩的：解压后才能隐藏路径
 		if err != nil {
 			continue
 		}
-		if err := add("日志/"+filepath.Base(lp), string(data)); err != nil {
+		if err := add("日志/"+strings.TrimSuffix(filepath.Base(lp), ".gz"), string(data)); err != nil {
 			f.Close()
 			return "", err
 		}

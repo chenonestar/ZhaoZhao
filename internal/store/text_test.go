@@ -137,6 +137,7 @@ func TestUpgradeFromV1AndMigrate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer db.Close() // Windows 上打开着的文件删不掉：临时目录清理前必须关闭
 	if !db.HasDict() {
 		t.Error("重新打开后应读到词典")
 	}

@@ -32,8 +32,10 @@ Windows 单机全文检索工具：对本机硬盘、移动硬盘和网络映射
        │ 派发文件、取回文本（JSON 行协议）           ┌── SQLite（WAL）
        ▼                                             │  元数据 / 压缩文本 / FTS5
   解析子进程池（同一个 exe，--extract-worker；崩溃或超时只影响单个文件）
-   ├ 文本/Office/PDF/ODF/HTML/压缩包/邮件 提取
-   ├ LibreOffice 无头转换（老格式、WPS）
+   ├ 文本/Office/ODF/HTML/压缩包/邮件 提取
+   ├ 老格式内置解析（doc/xls/ppt/rtf 与 WPS 的 wps/et/dps，按 MS-DOC/XLS/PPT 规范）
+   ├ PDF：PDFium（运行时加载 DLL，扫描页渲染后 OCR），没有时用纯 Go 解析器
+   ├ 常驻 LibreOffice（Python-UNO 桥，只处理内置解析不了的老格式文件）
    └ OCR 常驻子进程（RapidOCR-json 管道协议）
 ```
 
@@ -91,19 +93,25 @@ iscc packaging\zhaozhao.iss
 | 工作流 | 触发 | 内容 |
 |---|---|---|
 | `.github/workflows/ci.yml` | push、PR | 界面类型检查与构建；Linux：`gofmt`、`go vet`、Windows 交叉编译检查、`go test -race`；Linux 集成测试（装 LibreOffice，真实样本 + OCR + 7z）；**Windows：`go vet` 与 `go test`**；通过后打包精简版便携 zip，可在 Actions 页面的 Artifacts 里下载 |
-| `.github/workflows/bundle.yml` | 手动、改动打包文件、被 release 调用 | **完整版**：choco 安装 LibreOffice，下载 RapidOCR-json（简体中文 V4 模型），随包放入 VC++ 运行库，在真实 Windows 上冒烟测试（含组件自检、退出后无残留进程）通过后，产出完整版 zip（约 340 MB）和离线安装包 |
+| `.github/workflows/bundle.yml` | 手动、改动打包文件、被 release 调用 | **完整版**：choco 安装 LibreOffice，下载 RapidOCR-json（简体中文 V4 模型）和 PDFium，随包放入 VC++ 运行库，在真实 Windows 上冒烟测试（含组件自检、退出后无残留进程）通过后，产出完整版 zip（约 340 MB）和离线安装包 |
 | `.github/workflows/release.yml` | 推送 `v*` 标签；或提交信息里带 `[release vX.Y.Z]` | 调用完整版构建，并发布完整版 zip、安装包、精简版 zip 到 GitHub Release |
 
-发布版本：`git tag v0.1.3 && git push origin v0.1.3`，或在推送的提交信息里写 `[release v0.1.3]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice 和 OCR 组件**；精简版（只有主程序）需要按 `components\README.txt` 自行放入。
+发布版本：`git tag v0.2.0 && git push origin v0.2.0`，或在推送的提交信息里写 `[release v0.2.0]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice、OCR 和 PDFium 组件**；精简版（主程序 + PDFium）需要按 `components\README.txt` 自行放入 LibreOffice 和 OCR。
 
 ### 组件
 
-- **LibreOffice**（老格式与 WPS 转换）：放到 `components\libreoffice\program\soffice.exe`，或直接安装 LibreOffice（自动查找）。
-  环境变量 `ZHAOZHAO_SOFFICE` 可指定路径。没有它时老格式文件进入「失败列表」，装好后可一键重试。
+- **老格式**：doc/xls/ppt/rtf 和 WPS 的 wps/et/dps 由程序自己解析（不需要任何组件，每个文件几毫秒）；
+  内置解析不了的（Word 95 等更老的版本、个别特殊文件）自动排到「老格式转换」队列交给 LibreOffice。
+  「设置 → 日志与诊断 → 老格式测试」可抽样比较内置解析和 LibreOffice 的结果。
+- **LibreOffice**：放到 `components\libreoffice\program\soffice.exe`，或直接安装 LibreOffice（自动查找）；
+  环境变量 `ZHAOZHAO_SOFFICE` 可指定路径。每个转换子进程常驻一个 LibreOffice，经 Python-UNO 桥逐个转换
+  （用 LibreOffice 自带的 Python；Linux 需要 `python3-uno`），没有 Python-UNO 时退回每个文件单独启动。
+- **PDFium**：`components\pdfium\pdfium.dll`（完整版和精简版都随包附带）；环境变量 `ZHAOZHAO_PDFIUM` 可指定路径。
+  用它提取 PDF 文字层，并把扫描页渲染成图片做 OCR（JBIG2、JPEG 2000 等格式都能识别）；没有它时用纯 Go 解析器。
 - **OCR**：把 [RapidOCR-json](https://github.com/hiroi-sora/RapidOCR-json) 放到 `components\ocr\`；
   或用 `ZHAOZHAO_OCR="命令 参数…"` 指定任何兼容**管道协议**的程序（见 `tools/ocr_bridge.py`，它用 `rapidocr-onnxruntime` 实现了同一协议，开发测试用）。
   没有 OCR 组件时，图片只索引文件名，扫描 PDF 只索引文字层并标记「需要 OCR」。
-- 数据目录：`%LOCALAPPDATA%\ZhaoZhao`（便携版为程序旁的 `data`），含 `index.db`、`config.json`、`roots.json`（索引根备份）、`zhaozhao.log`（异步写入，按 10 MB 滚动，保留 5 个）、`crash.log`（程序崩溃报告）。
+- 数据目录：`%LOCALAPPDATA%\ZhaoZhao`（便携版为程序旁的 `data`），含 `index.db`、`config.json`、`roots.json`（索引根备份）、`zhaozhao.log`（异步写入，按 10 MB 滚动，旧日志压缩为 `.gz`，保留 5 个）、`crash.log`（程序崩溃报告）。
   「设置 → 日志与诊断」可切换日志详细程度、导出诊断信息（可隐藏文件名和路径）。
 
 ### 命令行
@@ -151,9 +159,9 @@ ZHAOZHAO_SCALE=100000 go test ./internal/search -run TestScale -v -timeout 40m
 
 | 验证项 | 结论 |
 |---|---|
-| 老格式转换 | LibreOffice 无头模式可靠转出 doc/xls/ppt（含批注、页眉、备注）；`.wps/.et/.dps` 只用「改扩展名的 doc/xls/ppt」验证过，**没有真实 WPS 样本，也没有每种 100 份的成功率统计**。每个文件约 1～2 秒（含启动）；已限制并发（默认 2），尚未做常驻进程池。 |
+| 老格式 | 0.2.0 起内置解析：doc（片段表、页眉页脚、脚注尾注、批注、文本框，去掉域代码）、xls（BIFF8：共享字符串跨 CONTINUE、数字/日期格式、公式结果、批注、隐藏工作表）、ppt（只读当前有效的幻灯片和备注，不读母版占位文字）、rtf（按字体字符集解码 GBK 等，`\uN`）。样本上与 LibreOffice 转换结果的文字覆盖率 100%，每个文件几毫秒；模糊测试 15 万次无崩溃、无卡死。`.wps/.et/.dps` 只用「改扩展名的 doc/xls/ppt」验证过，**没有真实 WPS 样本**（可用「老格式测试」在用户电脑上抽样统计）。内置解析不了的交给常驻 LibreOffice，每个文件约 0.05～1 秒。 |
 | OCR | RapidOCR（PaddleOCR 模型，CPU）经管道协议接入：简体中文 + 英文识别正确，包括 jpg/png/bmp/webp、多页 LZW TIFF、扫描 PDF（逐页）。每张约 1 秒量级（Linux 云主机，含常驻进程摊销），**未做大样本准确率评测**。 |
-| PDF 文字层 | `ledongthuc/pdf`（纯 Go）可提取 Word/WPS/LibreOffice 导出的 PDF（内嵌字体带 ToUnicode）。**局限**：未内嵌字体且无 ToUnicode 的 PDF（例如部分 reportlab 生成的 CID 字体）取不出文字，需要换成 PDFium（需求建议的方案，涉及 cgo/DLL，未采用）。 |
+| PDF | 0.2.0 起用 PDFium（运行时加载 DLL，不需要 cgo）提取文字层；扫描页整页渲染成 200 dpi 灰度图再 OCR，JBIG2、JPEG 2000、CCITT 等格式都能识别（已用 JPEG 2000 扫描页验证）。没有 PDFium 时退回 `ledongthuc/pdf` + `pdfcpu`。 |
 | 压缩包 | zip（含 GBK 文件名）、7z（含加密头检测）、tar/gz/tgz 已验证；rar（`nwaples/rardecode`）因没有样本**未验证**。内部文件逐个读取、用完即删，不会整体解压到磁盘。 |
 | 邮件 | eml（RFC2047 主题、GB2312+base64 正文、附件）、mbox 已验证；`.msg`（`mscfb`）按文件格式实现但**没有真实样本，未验证**；pst/ost（P2）未实现。 |
 
@@ -179,8 +187,8 @@ ZHAOZHAO_SCALE=100000 go test ./internal/search -run TestScale -v -timeout 40m
 |---|---|---|
 | 文本/代码/配置、HTML | ✅ | 自动识别 UTF-8/UTF-16/GBK/GB18030/Big5，位置为行号 |
 | docx/xlsx/pptx 及变体 | ✅ | 正文、表格、页眉页脚、脚注、批注、文本框；Excel 全部工作表+批注；PPT 备注。位置：段落 / 工作表!单元格 / 幻灯片 |
-| doc/xls/ppt/rtf、wps/et/dps（P0） | 🟡 | 依赖 LibreOffice 组件（见上）；位置尽力而为 |
-| PDF 文字层 / 扫描页 | 🟡 | 逐页判断，扫描页送 OCR；CID 字体局限见上 |
+| doc/xls/ppt/rtf、wps/et/dps（P0） | ✅ | 内置解析（位置：段落、单元格、幻灯片）；解析不了的交给常驻 LibreOffice；WPS 缺真实样本 |
+| PDF 文字层 / 扫描页 | ✅ | PDFium 提取文字层；没有文字层的页渲染后 OCR（任何图片格式） |
 | 图片 OCR | ✅ | 默认跳过短边 < 200 px；多页 TIFF 记页码；识别结果按内容哈希复用 |
 | OpenDocument（P2） | ✅ | |
 | 加密文件 | ✅ | OLE 加密 Office、加密 PDF、加密 zip 条目/7z 标记「已加密」，文件名仍可搜 |
@@ -242,7 +250,7 @@ ZHAOZHAO_SCALE=100000 go test ./internal/search -run TestScale -v -timeout 40m
 | F-BG-09、10 状态面板、OCR 队列预计时间 | ✅ | |
 | F-BG-11 失败列表 | ✅ | 重试、批量重试、加入排除规则 |
 | F-BG-12 重建、损坏检测 | ✅ | 启动自检，损坏时旧库改名保留并自动重建，索引根从 `roots.json` 恢复 |
-| F-BG-13 索引格式迁移（P1） | ❌ | 只记录了版本号，没有迁移逻辑 |
+| F-BG-13 索引格式迁移（P1） | ✅ | 0.2.0 起：打开旧索引库时只改表结构（几秒），重新压缩、合并重复文本在后台分批进行，进度记在索引库里 |
 
 ### 非功能与部署
 
@@ -256,14 +264,15 @@ ZHAOZHAO_SCALE=100000 go test ./internal/search -run TestScale -v -timeout 40m
 | 需求第 10 节的建议 | 实际做法 | 原因 |
 |---|---|---|
 | Wails v2 + WebView2 | 本机 HTTP 服务（127.0.0.1 + 随机令牌）+ 内嵌 React，用 Edge/Chrome 的「应用窗口」显示 | 开发环境无法构建/运行 Wails；Windows 10 22H2 与 11 自带 Edge，反而省去离线安装 WebView2。后端接口与界面相互独立，之后可原样套进 Wails。代价：窗口由浏览器提供，托盘/热键靠自己的隐藏窗口实现。 |
-| PDF：PDFium | `ledongthuc/pdf`（文字层）+ `pdfcpu`（取扫描页图片） | PDFium 需要 cgo 或随带 DLL；纯 Go 方案可直接交叉编译。局限见上。 |
-| LibreOffice 常驻进程池 | 每个文件启动一次 `soffice`（并发受限） | 先保证正确；常驻池是后续优化。 |
+| PDF：PDFium | 0.2.0 起采用：随带 `pdfium.dll`，用 purego 在运行时加载（仍可直接交叉编译）；找不到时退回纯 Go 解析器 | — |
+| 老格式：LibreOffice 转换 | 0.2.0 起内置解析为主，LibreOffice（常驻）只处理内置解析不了的文件 | 每个文件启动一次 LibreOffice 要 1～3 秒，整盘几万个老格式文件要十几个小时 |
 
 ## 已知问题与后续工作
 
 1. **在真实 Windows 上做一轮验收**：托盘、快捷键、监听、卷识别、安装包都还没有运行过。
-2. 补充真实样本验证：WPS 三种格式、rar、msg，以及老格式每种 100 份的成功率统计。
-3. PDF：评估换用 PDFium，解决无 ToUnicode 的 CID 字体问题。
-4. F-RES-09（打开到命中位置）、F-BG-13（索引格式迁移）、F-VOL-05 的逐条「同步中」标记。
+2. 补充真实样本验证：WPS 三种格式、rar、msg；用「老格式测试」在真实电脑上统计老格式的成功率。
+3. 内容相同的文件目前共用提取文本，但全文索引仍每个文件一行（搜索语义不变）；全文索引也共用需要改搜索引擎，
+   等看到用户电脑上的空间统计再决定。
+4. F-RES-09（打开到命中位置）、F-VOL-05 的逐条「同步中」标记。
 5. 可移动盘实时监听（需要 `RegisterDeviceNotification` 配合 `DBT_DEVICEQUERYREMOVE` 释放句柄）。
 6. 文件名的 FTS 与内容的 FTS 共用一张表；若以后要支持「只重建内容、保留文件名」，可拆表。

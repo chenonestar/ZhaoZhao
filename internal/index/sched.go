@@ -518,7 +518,9 @@ func (m *Manager) runJob(j *job) {
 		logx.Debugf("暂缓 %s：所在磁盘离线，接入后继续", logx.P(abs))
 		return // 卷离线：保持待处理，接入后继续
 	}
+	s.mu.Lock() // 状态页在锁里读 j.path
 	j.path = abs
+	s.mu.Unlock()
 	info, _, _, _ := m.volSnapshot(f.VolumeID)
 	isNet := info.Kind == volume.KindNetwork
 	start := time.Now()
