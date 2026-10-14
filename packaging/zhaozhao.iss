@@ -5,7 +5,7 @@
 #endif
 #define AppVer GetEnv("ZZ_VERSION")
 #if AppVer == ""
-  #define AppVer "0.1.3"
+  #define AppVer "0.2.0"
 #endif
 
 [Setup]
