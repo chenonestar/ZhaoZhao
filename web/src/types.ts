@@ -120,6 +120,9 @@ export interface Status {
   ocrQueue: number;
   legacyQueue: number;
   ocrEtaSec: number;
+  legacyEtaSec: number;
+  fastEtaSec: number;
+  fastQueue: number;
   legacy: SlotStatus;
   ocr: SlotStatus;
   net: SlotStatus;

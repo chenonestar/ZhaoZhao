@@ -66,6 +66,8 @@ type Manager struct {
 	Prov    volume.Provider
 	Pool    *worker.Pool
 	OCRPool *worker.Pool // OCR 专用进程池（并发数小，避免多个 OCR 引擎同时占用内存）；为空时使用 Pool
+	// LegacyPool 是老格式转换专用进程池（每个子进程常驻一个 LibreOffice）；为空时使用 Pool
+	LegacyPool *worker.Pool
 	ocrCfg  extract.OCRConfig
 	DataDir string
 
@@ -267,11 +269,14 @@ func (m *Manager) getRoot(id int64) *rootRT {
 	return m.roots[id]
 }
 
+// kick 唤醒各通道的派发器（有新文件、有名额空出来了）。
 func (m *Manager) kick() {
-	select {
-	case m.kickCh <- struct{}{}:
-	default:
-	}
+	m.sched.eachLane(func(l *lane) {
+		select {
+		case l.kick <- struct{}{}:
+		default:
+		}
+	})
 }
 
 // ---- 路径 ----

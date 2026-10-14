@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
-import type { Config, FailedItem, HotkeyState, RootStatus, Status } from "./types";
+import type { Config, FailedItem, HotkeyState, RootStatus, SlotStatus, Status } from "./types";
 import { fmtDuration, fmtSize, fmtTime } from "./util";
 import { FolderPicker } from "./FolderPicker";
 import { Help } from "./Help";
@@ -45,6 +45,19 @@ export function Manage({ status, tab, setTab, onClose, refresh, onQuit }: Props)
   );
 }
 
+// QueueLine 显示一条处理通道：待处理数量、正在处理的线程数、预计剩余时间。三条通道同时进行。
+function QueueLine({ label, n, eta, lane, paused }: { label: string; n: number; eta: number; lane?: SlotStatus; paused?: boolean }) {
+  if (!n) return null;
+  let when = "正在估算剩余时间";
+  if (paused) when = "已暂停";
+  else if (eta > 0) when = `按最近的速度预计还需 ${fmtDuration(eta)}`;
+  return (
+    <div className="dim">
+      {label} {n}{lane ? `（同时处理 ${lane.used}/${lane.cap}）` : ""}，{when}
+    </div>
+  );
+}
+
 function IndexTab({ status, refresh }: { status: Status | null; refresh: () => void }) {
   const [picker, setPicker] = useState(false);
   const [err, setErr] = useState("");
@@ -67,16 +80,11 @@ function IndexTab({ status, refresh }: { status: Status | null; refresh: () => v
             也可以先暂停再恢复，或退出后重新启动。
           </div>
         )}
-        {status.ocrQueue > 0 && (
-          <div className="dim">OCR 队列 {status.ocrQueue}，{status.ocrEtaSec > 0 ? `按最近的速度预计还需 ${fmtDuration(status.ocrEtaSec)}` : "正在估算剩余时间"}</div>
-        )}
-        {status.legacyQueue > 0 && <div className="dim">老格式待转换 {status.legacyQueue}</div>}
+        <QueueLine label="普通文件待处理" n={status.fastQueue} eta={status.fastEtaSec} lane={{ used: status.active, cap: status.workers }} />
+        <QueueLine label="老格式待转换" n={status.legacyQueue} eta={status.legacyEtaSec} lane={status.legacy} paused={status.onBattery} />
+        <QueueLine label="OCR 待识别" n={status.ocrQueue} eta={status.ocrEtaSec} lane={status.ocr} paused={status.onBattery} />
         {status.onBattery && <div className="dim">正在使用电池：OCR 和格式转换已暂停</div>}
-        {status.legacy && !status.idle && (
-          <div className="dim small">
-            提取 {status.active}/{status.workers} · 老格式转换 {status.legacy.used}/{status.legacy.cap} · OCR {status.ocr.used}/{status.ocr.cap} · 网络盘读取 {status.net.used}/{status.net.cap}
-          </div>
-        )}
+        {status.net && status.net.used > 0 && <div className="dim small">网络盘读取 {status.net.used}/{status.net.cap}</div>}
         {status.current.length > 0 && (
           <div className="current dim">
             正在处理：

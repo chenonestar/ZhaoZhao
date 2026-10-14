@@ -64,7 +64,11 @@ type Status struct {
 	Totals      store.Counts   `json:"totals"`
 	OCRQueue    int64          `json:"ocrQueue"`
 	LegacyQueue int64          `json:"legacyQueue"`
-	OCREtaSec   int64          `json:"ocrEtaSec"` // 0 表示还无法估算
+	FastQueue   int64          `json:"fastQueue"`
+	// 各通道的预计剩余时间（秒）：按最近单个文件的平均耗时和并发数估算；0 表示还无法估算
+	OCREtaSec    int64 `json:"ocrEtaSec"`
+	LegacyEtaSec int64 `json:"legacyEtaSec"`
+	FastEtaSec   int64 `json:"fastEtaSec"`
 	Legacy      SlotStatus     `json:"legacy"`
 	OCR         SlotStatus     `json:"ocr"`
 	Net         SlotStatus     `json:"net"`
@@ -104,33 +108,6 @@ func (m *Manager) currentJobs() []CurrentJob {
 	return out
 }
 
-// ocrEta 按最近的完成速度估算 OCR 队列还要多久：只看最近 1 小时内完成的（最多 30 个），
-// 处理慢下来或停住时估算会跟着变长，而不是沿用开始时的速度。不足 2 个时无法估算，返回 0。
-func (m *Manager) ocrEta(queue int64) int64 {
-	s := &m.sched
-	if queue <= 0 {
-		return 0
-	}
-	now := time.Now()
-	s.mu.Lock()
-	var recent []time.Time
-	for _, t := range s.ocrDone {
-		if now.Sub(t) <= time.Hour {
-			recent = append(recent, t)
-		}
-	}
-	s.mu.Unlock()
-	if len(recent) < 2 {
-		return 0
-	}
-	span := now.Sub(recent[0]).Seconds() // 到现在为止：停住时速度自然下降
-	if span <= 0 {
-		return 0
-	}
-	rate := float64(len(recent)-1) / span
-	return int64(float64(queue) / rate)
-}
-
 // stalled 返回疑似卡住的时长：有文件在处理或等待处理，却超过 stallAfter 没有任何进展。
 func (m *Manager) stalled() time.Duration {
 	s := &m.sched
@@ -140,7 +117,8 @@ func (m *Manager) stalled() time.Duration {
 	s.mu.Lock()
 	busy := len(s.inflight) > 0
 	s.mu.Unlock()
-	if !busy && !s.wantWork.Load() {
+	s.eachLane(func(l *lane) { busy = busy || l.wantWork.Load() })
+	if !busy {
 		return 0
 	}
 	d := time.Since(time.Unix(0, s.lastActivity.Load()))
@@ -156,12 +134,10 @@ func (m *Manager) Status() Status {
 	st := Status{Paused: m.pausedAll.Load(), Rebuilding: m.rebuilding.Load(), Corrupt: m.corrupt.Load(),
 		Workers: m.Config().workers(), OnBattery: onBattery(), Roots: []RootStatus{}, Volumes: []VolumeStatus{}}
 	st.Current = m.currentJobs()
-	if s.legacy != nil {
-		s.mu.Lock()
-		st.Active = s.running
-		s.mu.Unlock()
-		st.Legacy.Used, st.Legacy.Cap = s.legacy.Stats()
-		st.OCR.Used, st.OCR.Cap = s.ocr.Stats()
+	if s.net != nil {
+		fast := m.laneStat(prioFast)
+		st.Active, st.Workers = fast.Used, fast.Cap
+		st.Legacy, st.OCR = m.laneStat(prioLegacy), m.laneStat(prioOCR)
 		st.Net.Used, st.Net.Cap = s.net.Stats()
 		st.Processed = s.done.Load()
 	}
@@ -173,7 +149,10 @@ func (m *Manager) Status() Status {
 		st.OCRQueue += x.OCRPending
 		st.LegacyQueue += x.LegacyPending
 	}
-	st.OCREtaSec = m.ocrEta(st.OCRQueue)
+	st.FastQueue = st.Totals.Pending - st.LegacyQueue - st.OCRQueue
+	st.FastEtaSec = m.laneEta(prioFast, st.FastQueue)
+	st.LegacyEtaSec = m.laneEta(prioLegacy, st.LegacyQueue)
+	st.OCREtaSec = m.laneEta(prioOCR, st.OCRQueue)
 	st.StalledSec = int64(m.stalled().Seconds())
 
 	roots, _ := m.DB.ListRoots()

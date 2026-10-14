@@ -45,44 +45,60 @@ var (
 type job struct {
 	f        store.File
 	path     string
-	class    int  // prioFast / prioLegacy / prioOCR
-	slot     *sem // 派发时预占的老格式转换或 OCR 名额（快速任务为 nil）
+	class    int   // prioFast / prioLegacy / prioOCR：决定提取方式和时限
+	lane     *lane // 所在通道
 	since    time.Time
 	stage    string
 	progress string
 	sent     bool // 结果已交给写入协程：写入完成后才从「处理中」移除，避免同一文件被再次派发
 }
 
+// lane 是一条处理通道。普通文件、老格式转换、OCR 各一条，各有自己的派发器和提取协程，三条同时进行：
+// 老格式和 OCR 不用等全部普通文件处理完才开始。每条通道里先处理最近修改的文件。
+type lane struct {
+	prio   int
+	name   string
+	jobs   chan *job
+	kick   chan struct{}
+	resize chan struct{} // 并发数变化时关闭并换新，唤醒空闲协程检查是否该退出
+
+	// 以下由 schedState.mu 保护
+	n, target, running int
+	durs               []time.Duration // 最近完成的单个文件耗时，估算剩余时间用
+
+	wantWork atomic.Bool // 派发器手里有可处理的文件
+}
+
 // schedState 是提取调度的运行时状态。
 //
 // 并发控制（不会死锁的关键）：
-//   - 提取协程的数量就是并发上限：派发器只在有协程空闲时才交出任务，交出的任务立即开始处理；
-//   - 老格式转换、OCR 的名额由派发器在交出任务前「不等待地」预占，占不到就先派发别的文件；
+//   - 每条通道的提取协程数就是它的并发上限：派发器只在有协程空闲时才交出任务，交出的任务立即开始处理；
 //   - 网络盘读取名额只在把文件复制到本机期间占用，持有它时不再等待任何别的资源。
 //
 // 任何协程都不会持有一种资源去等待另一种被别人反向持有的资源，因此不会出现循环等待。
 type schedState struct {
 	mu       sync.Mutex
 	inflight map[int64]*job
-	jobs     chan *job
+	lanes    [4]*lane // 下标是 prioFast、prioLegacy、prioOCR
 	write    chan *prepared
-	legacy   *sem
-	ocr      *sem
 	net      *sem
-
-	nworkers int           // 现有提取协程数
-	target   int           // 目标并发数
-	resize   chan struct{} // 并发数变化时关闭并换新，唤醒空闲协程检查是否该退出
-	running  int
 
 	done         atomic.Int64
 	doneByPri    [4]atomic.Int64
 	startedAt    time.Time
 	idle         atomic.Bool
-	wantWork     atomic.Bool  // 派发器手里有可处理的文件
 	lastActivity atomic.Int64 // 最近一次进展的时间（UnixNano）
-	ocrDone      []time.Time  // 最近完成的 OCR 文件的时间，估算剩余时间用
 	stallLogged  time.Time
+}
+
+var lanePrios = []int{prioFast, prioLegacy, prioOCR}
+
+func (s *schedState) eachLane(f func(l *lane)) {
+	for _, p := range lanePrios {
+		if l := s.lanes[p]; l != nil {
+			f(l)
+		}
+	}
 }
 
 // prepared 是已提取完毕、等待写入数据库的结果。
@@ -113,47 +129,63 @@ func (m *Manager) startScheduler() {
 	s := &m.sched
 	cfg := m.Config()
 	s.inflight = map[int64]*job{}
-	s.jobs = make(chan *job)
 	s.write = make(chan *prepared, 256)
-	s.legacy = newSem(cfg.legacyWorkers())
-	s.ocr = newSem(cfg.ocrWorkers())
 	s.net = newSem(cfg.netConc())
-	s.resize = make(chan struct{})
+	for _, p := range lanePrios {
+		s.lanes[p] = &lane{prio: p, name: classNames[p], jobs: make(chan *job), kick: make(chan struct{}, 1), resize: make(chan struct{})}
+	}
 	s.startedAt = time.Now()
 	s.lastActivity.Store(time.Now().UnixNano())
 	m.applyWorkers()
-	m.wg.Add(3)
-	go m.dispatcher()
+	m.wg.Add(2)
 	go m.writer()
 	go m.watchdog()
+	s.eachLane(func(l *lane) {
+		m.wg.Add(1)
+		go m.laneDispatcher(l)
+	})
 }
 
-// applyWorkers 按当前设置调整并发数和各类名额（设置修改后立即生效，不用重启）。
+// laneSizes 返回三条通道各自的并发数。
+func (c Config) laneSizes() map[int]int {
+	return map[int]int{prioFast: c.workers(), prioLegacy: c.legacyWorkers(), prioOCR: c.ocrWorkers()}
+}
+
+// applyWorkers 按当前设置调整各通道并发数、进程池大小和网络盘读取名额（设置修改后立即生效，不用重启）。
 func (m *Manager) applyWorkers() {
 	s := &m.sched
-	if s.jobs == nil {
+	if s.lanes[prioFast] == nil {
 		return
 	}
 	cfg := m.Config()
-	n := cfg.workers()
-	s.legacy.SetCap(cfg.legacyWorkers())
-	s.ocr.SetCap(cfg.ocrWorkers())
+	sizes := cfg.laneSizes()
 	s.net.SetCap(cfg.netConc())
-	m.Pool.SetSize(n)
+	// 每条通道用自己的进程池；没有单独的池（测试）时共用主池
+	main := sizes[prioFast]
+	if m.LegacyPool != nil {
+		m.LegacyPool.SetSize(sizes[prioLegacy])
+	} else {
+		main += sizes[prioLegacy]
+	}
 	if m.OCRPool != nil {
-		m.OCRPool.SetSize(cfg.ocrWorkers())
+		m.OCRPool.SetSize(sizes[prioOCR])
+	} else {
+		main += sizes[prioOCR]
 	}
+	m.Pool.SetSize(main)
 	s.mu.Lock()
-	s.target = n
-	for s.nworkers < n && m.ctx.Err() == nil {
-		s.nworkers++
-		m.wg.Add(1)
-		go m.worker()
-	}
-	close(s.resize)
-	s.resize = make(chan struct{})
+	s.eachLane(func(l *lane) {
+		l.target = sizes[l.prio]
+		for l.n < l.target && m.ctx.Err() == nil {
+			l.n++
+			m.wg.Add(1)
+			go m.laneWorker(l)
+		}
+		close(l.resize)
+		l.resize = make(chan struct{})
+	})
 	s.mu.Unlock()
-	logx.Debugf("并发设置：提取 %d，老格式转换 %d，OCR %d，网络盘读取 %d", n, cfg.legacyWorkers(), cfg.ocrWorkers(), cfg.netConc())
+	logx.Debugf("并发设置：普通文件 %d，老格式转换 %d，OCR %d，网络盘读取 %d（三类同时进行）", sizes[prioFast], sizes[prioLegacy], sizes[prioOCR], cfg.netConc())
 	m.kick()
 }
 
@@ -180,7 +212,7 @@ func (m *Manager) inflightIDs() []int64 {
 	return ids
 }
 
-// classOf 决定文件属于哪类任务：OCR、老格式转换，或快速提取。
+// classOf 决定文件的提取方式：OCR、老格式转换，或普通提取。
 func classOf(f store.File) int {
 	switch {
 	case f.Prio == prioOCR:
@@ -191,7 +223,19 @@ func classOf(f store.File) int {
 	return prioFast
 }
 
-func (m *Manager) dispatcher() {
+// updateIdle 在没有任何通道有活、也没有文件在处理时标记空闲。
+func (m *Manager) updateIdle() {
+	s := &m.sched
+	busy := false
+	s.eachLane(func(l *lane) { busy = busy || l.wantWork.Load() })
+	s.mu.Lock()
+	busy = busy || len(s.inflight) > 0
+	s.mu.Unlock()
+	s.idle.Store(!busy)
+}
+
+// laneDispatcher 为一条通道取出待处理的文件（最近修改的在前），交给该通道空闲的提取协程。
+func (m *Manager) laneDispatcher(l *lane) {
 	defer m.wg.Done()
 	s := &m.sched
 	for {
@@ -199,114 +243,129 @@ func (m *Manager) dispatcher() {
 			return
 		}
 		if m.pausedAll.Load() {
+			l.wantWork.Store(false)
 			s.idle.Store(false)
-			s.wantWork.Store(false)
-			m.waitKick(time.Second)
+			m.waitLane(l, time.Second)
 			continue
 		}
-		// 只查询当前有名额的类别：名额已满的类别留在队列里，不占派发机会
-		prios := []int{prioFast}
-		if !(m.Config().PauseOnBattery && onBattery()) {
-			if s.legacy.Free() {
-				prios = append(prios, prioLegacy)
-			}
-			if s.ocr.Free() {
-				prios = append(prios, prioOCR)
-			}
+		if l.prio != prioFast && m.Config().PauseOnBattery && onBattery() {
+			l.wantWork.Store(false) // 使用电池时暂停 OCR 和格式转换（F-BG-06）
+			m.updateIdle()
+			m.waitLane(l, 5*time.Second)
+			continue
 		}
-		files, err := m.DB.NextPending(8, prios, m.offlineVolumes(), m.inflightIDs())
+		files, err := m.DB.NextPending(8, []int{l.prio}, m.offlineVolumes(), m.inflightIDs())
 		if err != nil {
 			m.logf("读取待处理队列失败: %v", err)
-			m.waitKick(2 * time.Second)
+			m.waitLane(l, 2*time.Second)
 			continue
 		}
 		if len(files) == 0 {
-			s.wantWork.Store(false)
-			s.idle.Store(len(m.inflightIDs()) == 0)
-			m.waitKick(3 * time.Second)
+			l.wantWork.Store(false)
+			m.updateIdle()
+			m.waitLane(l, 3*time.Second)
 			continue
 		}
+		l.wantWork.Store(true)
 		s.idle.Store(false)
-		s.wantWork.Store(true)
-		sent := 0
 		for _, f := range files {
-			j := &job{f: f, class: classOf(f)}
-			switch j.class {
-			case prioLegacy:
-				j.slot = s.legacy
-			case prioOCR:
-				j.slot = s.ocr
-			}
-			if j.slot != nil && !j.slot.TryAcquire() {
-				continue // 这一类的名额刚被占满：先派发别的
-			}
+			j := &job{f: f, class: classOf(f), lane: l, stage: "等待空闲的提取线程", since: time.Now()}
 			j.path, _ = m.AbsPath(f.VolumeID, f.RelPath)
-			j.stage = "等待空闲的提取线程"
-			j.since = time.Now()
 			s.mu.Lock()
 			s.inflight[f.ID] = j
 			s.mu.Unlock()
 			select {
-			case s.jobs <- j:
-				sent++
+			case l.jobs <- j:
 			case <-m.ctx.Done():
 				return
 			}
 		}
-		if sent == 0 {
-			m.waitKick(time.Second)
-		}
 	}
 }
 
-func (m *Manager) waitKick(d time.Duration) {
+func (m *Manager) waitLane(l *lane, d time.Duration) {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
-	case <-m.kickCh:
+	case <-l.kick:
 	case <-t.C:
 	case <-m.ctx.Done():
 	}
 }
 
-func (m *Manager) worker() {
+func (m *Manager) laneWorker(l *lane) {
 	defer m.wg.Done()
 	s := &m.sched
 	for {
 		s.mu.Lock()
-		if s.nworkers > s.target {
-			s.nworkers--
+		if l.n > l.target {
+			l.n--
 			s.mu.Unlock()
 			return
 		}
-		rs := s.resize
+		rs := l.resize
 		s.mu.Unlock()
 		var j *job
 		select {
-		case j = <-s.jobs:
+		case j = <-l.jobs:
 		case <-rs:
 			continue
 		case <-m.ctx.Done():
 			return
 		}
 		s.mu.Lock()
-		s.running++
+		l.running++
 		j.since = time.Now()
 		s.mu.Unlock()
 		m.activity()
 		m.runJob(j)
+		d := time.Since(j.since)
 		s.mu.Lock()
-		s.running--
-		if !j.sent {
+		l.running--
+		if j.sent {
+			l.durs = append(l.durs, d)
+			if len(l.durs) > 50 {
+				l.durs = l.durs[len(l.durs)-50:]
+			}
+		} else {
 			delete(s.inflight, j.f.ID)
 		}
 		s.mu.Unlock()
-		if j.slot != nil {
-			j.slot.Release()
-		}
 		m.kick()
 		throttleForUser(m.ctx)
 	}
+}
+
+// laneEta 估算一条通道把 queue 个文件处理完还要多久：最近单个文件的平均耗时 × 数量 ÷ 并发数。
+// 还没有处理过文件时无法估算，返回 0。
+func (m *Manager) laneEta(p int, queue int64) int64 {
+	s := &m.sched
+	l := s.lanes[p]
+	if l == nil || queue <= 0 {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(l.durs) < 3 || l.target < 1 {
+		return 0
+	}
+	var sum time.Duration
+	for _, d := range l.durs {
+		sum += d
+	}
+	avg := sum.Seconds() / float64(len(l.durs))
+	return int64(avg * float64(queue) / float64(l.target))
+}
+
+func (m *Manager) laneStat(p int) SlotStatus {
+	s := &m.sched
+	l := s.lanes[p]
+	if l == nil {
+		return SlotStatus{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return SlotStatus{Used: l.running, Cap: l.target}
 }
 
 func (m *Manager) activity() { m.sched.lastActivity.Store(time.Now().UnixNano()) }
@@ -557,6 +616,9 @@ func (m *Manager) runJob(j *job) {
 	case j.class == prioLegacy:
 		stage = "格式转换"
 		t.Total = extract.LegacyTimeout(opts.Timeout) + 30*time.Second
+		if m.LegacyPool != nil {
+			pool = m.LegacyPool
+		}
 	case container:
 		// 压缩包、邮箱逐项报告进度
 		stage = "解开压缩包/邮件"
@@ -758,19 +820,12 @@ func (m *Manager) writer() {
 				}
 			}
 		}
-		now := time.Now()
 		s.mu.Lock()
 		for _, p := range batch {
 			delete(s.inflight, p.file.ID) // 已写入：之后才允许再次派发同一文件
 			s.done.Add(1)
 			if p.file.Prio >= 1 && p.file.Prio <= 3 {
 				s.doneByPri[p.file.Prio].Add(1)
-			}
-			if p.file.Prio == prioOCR {
-				s.ocrDone = append(s.ocrDone, now)
-				if len(s.ocrDone) > 30 {
-					s.ocrDone = s.ocrDone[len(s.ocrDone)-30:]
-				}
 			}
 		}
 		s.mu.Unlock()

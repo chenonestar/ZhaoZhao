@@ -100,6 +100,8 @@ func main() {
 	mgr := index.New(db, volume.System(), pool, dataDir)
 	mgr.OCRPool = worker.NewPool(exe, 1)
 	mgr.OCRPool.Name = "OCR"
+	mgr.LegacyPool = worker.NewPool(exe, 1)
+	mgr.LegacyPool.Name = "转换"
 	if err := mgr.Start(); err != nil {
 		fatalf("启动索引服务失败: %v", err)
 	}

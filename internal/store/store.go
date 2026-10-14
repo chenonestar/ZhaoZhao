@@ -59,6 +59,7 @@ CREATE INDEX IF NOT EXISTS files_root ON files(root_id);
 CREATE INDEX IF NOT EXISTS files_state ON files(state, prio, id);
 CREATE INDEX IF NOT EXISTS files_hash ON files(hash) WHERE hash <> '';
 CREATE INDEX IF NOT EXISTS files_stats ON files(root_id, state, prio, ocr);
+CREATE INDEX IF NOT EXISTS files_queue ON files(prio, mtime) WHERE state=0;
 CREATE TABLE IF NOT EXISTS texts(file_id INTEGER PRIMARY KEY, flags INTEGER NOT NULL DEFAULT 0, data BLOB NOT NULL, locs BLOB);
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(c, n, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 0');
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_v USING fts5vocab(fts, 'row');
@@ -493,8 +494,8 @@ func (d *DB) GetFile(id int64) (*File, error) {
 
 // NextPending 取出待提取的文件，按优先级（数值小者优先）、id 排序。
 // 已暂停的索引根、skipVols 中的卷（离线）、exclude 中的文件（处理中）会被跳过。
-// NextPending 取出待处理的文件：只取 prios 列出的优先级（调度器只查询当前有名额的类别），
-// 按优先级、编号排序。
+// NextPending 取出待处理的文件：只取 prios 列出的优先级，同一优先级里最近修改的在前
+// （用户最常找的是近期的文件，它们最先可以按内容搜到）。
 func (d *DB) NextPending(limit int, prios []int, skipVols []string, exclude []int64) ([]File, error) {
 	if len(prios) == 0 {
 		return nil, nil
@@ -516,7 +517,7 @@ func (d *DB) NextPending(limit int, prios []int, skipVols []string, exclude []in
 			args = append(args, v)
 		}
 	}
-	q += ` ORDER BY prio, id LIMIT ?`
+	q += ` ORDER BY prio, mtime DESC LIMIT ?`
 	args = append(args, limit)
 	rows, err := d.R.Query(q, args...)
 	if err != nil {

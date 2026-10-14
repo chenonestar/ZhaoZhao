@@ -46,7 +46,7 @@ func (m *Manager) watchdog() {
 
 // Snapshot 返回调度状态的文字描述（导出诊断信息用）。
 func (m *Manager) Snapshot() string {
-	if m.sched.legacy == nil {
+	if m.sched.net == nil {
 		return "索引服务未启动"
 	}
 	return m.snapshot()
@@ -56,16 +56,16 @@ func (m *Manager) Snapshot() string {
 func (m *Manager) snapshot() string {
 	s := &m.sched
 	var b strings.Builder
-	s.mu.Lock()
-	running, target := s.running, s.target
-	s.mu.Unlock()
-	lu, lc := s.legacy.Stats()
-	ou, oc := s.ocr.Stats()
+	f, l, o := m.laneStat(prioFast), m.laneStat(prioLegacy), m.laneStat(prioOCR)
 	nu, nc := s.net.Stats()
-	fmt.Fprintf(&b, "提取线程 %d/%d，老格式转换 %d/%d，OCR %d/%d，网络盘读取 %d/%d", running, target, lu, lc, ou, oc, nu, nc)
+	fmt.Fprintf(&b, "普通文件 %d/%d，老格式转换 %d/%d，OCR %d/%d，网络盘读取 %d/%d", f.Used, f.Cap, l.Used, l.Cap, o.Used, o.Cap, nu, nc)
 	if m.Pool != nil {
 		busy, live, size := m.Pool.Stats()
 		fmt.Fprintf(&b, "，解析进程 %d 个在用/%d 个已启动/上限 %d", busy, live, size)
+	}
+	if m.LegacyPool != nil {
+		busy, live, size := m.LegacyPool.Stats()
+		fmt.Fprintf(&b, "，转换进程 %d/%d/%d", busy, live, size)
 	}
 	if m.OCRPool != nil {
 		busy, live, size := m.OCRPool.Stats()
