@@ -188,6 +188,18 @@ func (s *Server) routes(mux *http.ServeMux) {
 		p, _ := s.pendingPanel.Swap("").(string)
 		writeJSON(w, map[string]string{"panel": p})
 	})
+	h("/api/legacytest", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.M.LegacyTest()) })
+	h("/api/legacytest/start", s.post(func(r *http.Request) (any, error) {
+		var b struct {
+			PerExt int `json:"perExt"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		return ok(), s.M.StartLegacyTest(b.PerExt)
+	}))
+	h("/api/legacytest/cancel", s.post(func(r *http.Request) (any, error) {
+		s.M.CancelLegacyTest()
+		return ok(), nil
+	}))
 	h("/api/diagnostics", s.post(func(r *http.Request) (any, error) {
 		var b struct {
 			Anonymize bool `json:"anonymize"`

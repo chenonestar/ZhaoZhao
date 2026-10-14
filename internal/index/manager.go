@@ -68,8 +68,10 @@ type Manager struct {
 	OCRPool *worker.Pool // OCR 专用进程池（并发数小，避免多个 OCR 引擎同时占用内存）；为空时使用 Pool
 	// LegacyPool 是老格式转换专用进程池（每个子进程常驻一个 LibreOffice）；为空时使用 Pool
 	LegacyPool *worker.Pool
-	ocrCfg     extract.OCRConfig
-	DataDir    string
+
+	ltest   legacyTester // 老格式测试
+	ocrCfg  extract.OCRConfig
+	DataDir string
 
 	cfgMu sync.RWMutex
 	cfg   Config

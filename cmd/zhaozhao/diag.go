@@ -98,6 +98,13 @@ func exportDiagnostics(dataDir string, lg *logx.Logger, mgr *index.Manager, anon
 		return "", err
 	}
 
+	if lt := mgr.LegacyTest(); lt.Report != nil {
+		if err := add("老格式测试.txt", index.LegacyTestText(lt.Report, false)); err != nil {
+			f.Close()
+			return "", err
+		}
+	}
+
 	for _, lp := range lg.AllLogs() {
 		data, err := os.ReadFile(lp)
 		if err != nil {

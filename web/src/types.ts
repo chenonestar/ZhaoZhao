@@ -174,6 +174,7 @@ export interface Config {
   workers: number;
   timeoutSec: number;
   legacyWorkers: number;
+  legacyLOOnly: boolean;
   networkScanMin: number;
   networkReadConc: number;
   pauseOnBattery: boolean;
@@ -186,6 +187,51 @@ export interface Config {
   ocrWorkers: number;
   logLevel: string;
   configVersion: number;
+}
+
+export interface LegacyTestRow {
+  ext: string;
+  files: number;
+  nativeOk: number;
+  needLo: number;
+  loOk: number;
+  bothOk: number;
+  onlyLo: number;
+  onlyNative: number;
+  avgCoverage: number;
+  minCoverage: number;
+  lowCoverage: number;
+  nativeMs: number;
+  loMs: number;
+}
+
+export interface LegacyTestCase {
+  id: number;
+  path: string;
+  ext: string;
+  size: number;
+  native: string;
+  nativeErr?: string;
+  nativeChars: number;
+  lo: string;
+  loErr?: string;
+  loChars: number;
+  coverage: number;
+}
+
+export interface LegacyTestState {
+  running: boolean;
+  done: number;
+  total: number;
+  err?: string;
+  report?: {
+    startedAt: string;
+    finishedAt: string;
+    sampled: number;
+    canceled?: boolean;
+    rows: LegacyTestRow[] | null;
+    problems: LegacyTestCase[] | null;
+  };
 }
 
 export interface Notice {

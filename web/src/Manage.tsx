@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
-import type { Config, FailedItem, HotkeyState, RootStatus, SlotStatus, Status } from "./types";
+import type { Config, FailedItem, HotkeyState, LegacyTestState, RootStatus, SlotStatus, Status } from "./types";
 import { fmtDuration, fmtSize, fmtTime } from "./util";
 import { FolderPicker } from "./FolderPicker";
 import { Help } from "./Help";
@@ -281,7 +281,8 @@ function SettingsTab() {
       <h4>后台任务（修改后立即生效）</h4>
       {num("workers", "提取并发数", "0 表示 CPU 核心数的一半")}
       {num("timeoutSec", "单个文件提取超时（秒）")}
-      {num("legacyWorkers", "老格式转换并发数")}
+      {num("legacyWorkers", "老格式转换并发数", "只用于内置解析读不了的老格式文件（LibreOffice 转换）")}
+      {chk("legacyLOOnly", "老格式只用 LibreOffice 转换，不用内置解析（较慢；仅在内置解析结果有问题时使用）")}
       {chk("ocrEnabled", "识别图片和扫描 PDF 里的文字（OCR）")}
       {num("ocrWorkers", "OCR 并发数", "0 表示自动：8 个以上逻辑处理器时 2 个，否则 1 个；每个约占几百 MB 内存")}
       {chk("pauseOnBattery", "使用电池时暂停 OCR 和格式转换")}
@@ -303,6 +304,7 @@ function SettingsTab() {
           <option value="normal">普通（只记录错误和重要事件）</option>
         </select></label>
       <Diagnostics />
+      <LegacyTest />
 
       <div className="modal-foot">
         {msg && <span className="flash">{msg}</span>}
@@ -343,6 +345,81 @@ function HotkeyField({ value, onChange, state }: { value: string; onChange: (v: 
         <div className={state.active ? "ok small" : "error small"}>{state.hotkey}：{state.message}</div>
       )}
       <div className="dim small">保存后立即生效。至少包含 Ctrl、Alt 或 Win 之一；与其他程序（如 QQ）冲突时会提示，请换一个组合。</div>
+    </div>
+  );
+}
+
+// 老格式测试：抽样比较内置解析和 LibreOffice 的结果。
+function LegacyTest() {
+  const [st, setSt] = useState<LegacyTestState | null>(null);
+  const [err, setErr] = useState("");
+  const [perExt, setPerExt] = useState(20);
+  const load = () => api.legacyTest().then(setSt).catch(() => {});
+  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (!st?.running) return;
+    const t = setInterval(load, 1000);
+    return () => clearInterval(t);
+  }, [st?.running]);
+  const r = st?.report;
+  const pct = (x: number) => (x * 100).toFixed(1) + "%";
+  return (
+    <div className="field">
+      <div className="dim small">老格式测试：从已索引的老格式文件（doc、xls、ppt、wps、et、dps、rtf 等）中每种随机抽取若干个，
+        分别用内置解析和 LibreOffice 提取，比较成功率、用时和文字覆盖率。只统计数字，不改动索引；结果会包含在诊断信息里。</div>
+      <div className="btns">
+        {st?.running ? (
+          <>
+            <span>正在测试 {st.done} / {st.total}…</span>
+            <button onClick={() => api.cancelLegacyTest().then(load)}>停止</button>
+          </>
+        ) : (
+          <>
+            <label className="field inline"><span>每种抽取</span>
+              <input type="number" min={1} max={500} value={perExt} onChange={(e) => setPerExt(Number(e.target.value))} /></label>
+            <button onClick={() => { setErr(""); api.startLegacyTest(perExt).then(load).catch((e) => setErr(e.message)); }}>开始老格式测试</button>
+          </>
+        )}
+      </div>
+      {err && <div className="error small">{err}</div>}
+      {r && (
+        <>
+          <div className="small">{r.canceled ? "上次测试（中途停止）" : "上次测试"}：{new Date(r.startedAt).toLocaleString()}，抽样 {r.sampled} 个文件</div>
+          <table className="grid">
+            <thead><tr><th>类型</th><th>抽样</th><th>内置成功</th><th>内置不支持</th><th>LibreOffice 成功</th>
+              <th>文字覆盖率（平均/最低）</th><th>只有 LibreOffice 成功</th><th>平均用时（内置/LibreOffice）</th></tr></thead>
+            <tbody>
+              {(r.rows ?? []).map((w) => (
+                <tr key={w.ext}>
+                  <td>{w.ext}</td><td className="num">{w.files}</td><td className="num">{w.nativeOk}</td><td className="num">{w.needLo}</td>
+                  <td className="num">{w.loOk}</td>
+                  <td className="num">{w.bothOk > 0 ? `${pct(w.avgCoverage)} / ${pct(w.minCoverage)}` : "—"}{w.lowCoverage > 0 && <span className="error">（{w.lowCoverage} 个低于 90%）</span>}</td>
+                  <td className="num">{w.onlyLo}</td>
+                  <td className="num">{w.nativeMs.toFixed(0)} ms / {w.loMs.toFixed(0)} ms</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {(r.problems ?? []).length > 0 && (
+            <details>
+              <summary className="small">需要关注的文件（{r.problems!.length} 个）</summary>
+              <table className="grid">
+                <thead><tr><th>文件</th><th>内置</th><th>LibreOffice</th><th>覆盖率</th></tr></thead>
+                <tbody>
+                  {r.problems!.map((c) => (
+                    <tr key={c.id}>
+                      <td className="small">{c.path}</td>
+                      <td className="small">{c.native}，{c.nativeChars} 字{c.nativeErr ? "：" + c.nativeErr : ""}</td>
+                      <td className="small">{c.lo}，{c.loChars} 字{c.loErr ? "：" + c.loErr : ""}</td>
+                      <td className="num">{c.native === "成功" && c.lo === "成功" ? pct(c.coverage) : "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          )}
+        </>
+      )}
     </div>
   );
 }
