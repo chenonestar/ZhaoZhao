@@ -34,6 +34,9 @@ func (m *Manager) watchdog() {
 			s.stallLogged = time.Time{}
 			m.logf("已恢复：重新有文件完成")
 		}
+		if s.idle.Load() {
+			m.maybeCheckIntegrity()
+		}
 		if logx.Verbose() && !s.idle.Load() && time.Since(lastBeat) >= time.Minute {
 			lastBeat = time.Now()
 			logx.Debugf("状态：%s", m.snapshot())
@@ -110,4 +113,37 @@ func fmtDuration(d time.Duration) string {
 		return fmt.Sprintf("%d 分 %d 秒", int(d.Minutes()), int(d.Seconds())%60)
 	}
 	return fmt.Sprintf("%d 秒", int(d.Seconds()))
+}
+
+// integrityEvery 是后台完整性检查的间隔。
+const integrityEvery = 7 * 24 * time.Hour
+
+// maybeCheckIntegrity 空闲时在后台做完整性检查（距上次超过 7 天）。启动时不再检查，
+// 避免索引库大了以后启动变慢；上次异常退出时由启动流程检查。
+func (m *Manager) maybeCheckIntegrity() {
+	if !m.checking.CompareAndSwap(false, true) {
+		return
+	}
+	last, _ := m.DB.GetMeta("last_integrity_check")
+	var t int64
+	fmt.Sscan(last, &t)
+	if time.Since(time.Unix(t, 0)) < integrityEvery {
+		m.checking.Store(false)
+		return
+	}
+	go func() {
+		defer m.checking.Store(false)
+		start := time.Now()
+		err := m.DB.Check()
+		if m.ctx.Err() != nil {
+			return
+		}
+		m.logf("后台检查索引库完整性：%v，用时 %s", map[bool]string{true: "正常", false: fmt.Sprint(err)}[err == nil], fmtDuration(time.Since(start)))
+		if err != nil {
+			m.corrupt.Store(true)
+			m.addNotice(Notice{Kind: "corrupt", Message: err.Error() + "。请在设置中重建索引。"})
+			return
+		}
+		_ = m.DB.SetMeta("last_integrity_check", fmt.Sprint(time.Now().Unix()))
+	}()
 }

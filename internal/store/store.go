@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS files(
 CREATE INDEX IF NOT EXISTS files_root ON files(root_id);
 CREATE INDEX IF NOT EXISTS files_state ON files(state, prio, id);
 CREATE INDEX IF NOT EXISTS files_hash ON files(hash) WHERE hash <> '';
+CREATE INDEX IF NOT EXISTS files_stats ON files(root_id, state, prio, ocr);
 CREATE TABLE IF NOT EXISTS texts(file_id INTEGER PRIMARY KEY, flags INTEGER NOT NULL DEFAULT 0, data BLOB NOT NULL, locs BLOB);
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(c, n, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 0');
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_v USING fts5vocab(fts, 'row');
@@ -698,6 +699,56 @@ func (d *DB) VolumeCounts(volID string) (Counts, error) {
 }
 
 func (d *DB) AllCounts() (Counts, error) { return d.counts(`WHERE ?`, 1) }
+
+// RootStat 是一个索引根的统计：各状态的文件数，以及待处理里老格式、OCR 各有多少。
+type RootStat struct {
+	Counts
+	LegacyPending int64
+	OCRPending    int64
+}
+
+// StatsByRoot 一次查询（只读覆盖索引）得到全部索引根的统计，代替逐个索引根、逐个卷的多次全表扫描。
+func (d *DB) StatsByRoot(prioLegacy, prioOCR int) (map[int64]*RootStat, error) {
+	rows, err := d.R.Query(`SELECT root_id, state, prio, COUNT(*), COALESCE(SUM(ocr),0) FROM files GROUP BY root_id, state, prio`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]*RootStat{}
+	for rows.Next() {
+		var root, n, ocr int64
+		var state, prio int
+		if err := rows.Scan(&root, &state, &prio, &n, &ocr); err != nil {
+			return nil, err
+		}
+		st := out[root]
+		if st == nil {
+			st = &RootStat{}
+			out[root] = st
+		}
+		st.Total += n
+		st.OCR += ocr
+		switch state {
+		case StatePending:
+			st.Pending += n
+			switch prio {
+			case prioLegacy:
+				st.LegacyPending += n
+			case prioOCR:
+				st.OCRPending += n
+			}
+		case StateDone:
+			st.Done += n
+		case StateFailed:
+			st.Failed += n
+		case StateEncrypted:
+			st.Encrypted += n
+		case StateMetaOnly:
+			st.MetaOnly += n
+		}
+	}
+	return out, rows.Err()
+}
 
 func (d *DB) counts(where string, arg any) (Counts, error) {
 	var c Counts

@@ -616,6 +616,21 @@ func fmtBytes(n int64) string {
 	return fmt.Sprintf("%d B", n)
 }
 
+// textSize 估算写入这个结果要处理的文字量（字节）。
+func (p *prepared) textSize() int {
+	n := len(p.fts)
+	if p.text != nil {
+		n += len(p.text.Text)
+	}
+	for _, c := range p.children {
+		n += len(c.fts)
+		if c.text != nil {
+			n += len(c.text.Text)
+		}
+	}
+	return n
+}
+
 // sendJob 把任务结果交给写入协程。写入完成后才把文件从「处理中」移除。
 func (m *Manager) sendJob(j *job, p *prepared) {
 	m.setStage(j, "写入索引")
@@ -711,13 +726,16 @@ func (m *Manager) writer() {
 		case <-m.ctx.Done():
 			return
 		}
+		// 一批最多 64 个文件、约 8 MB 文字：事务短，其他写操作（加入索引根、扫描）最多等一秒左右
 		batch := []*prepared{first}
+		size := first.textSize()
 		timeout := time.After(150 * time.Millisecond)
 	collect:
-		for len(batch) < 64 {
+		for len(batch) < 64 && size < 8<<20 {
 			select {
 			case p := <-s.write:
 				batch = append(batch, p)
+				size += p.textSize()
 			case <-timeout:
 				break collect
 			case <-m.ctx.Done():

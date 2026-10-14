@@ -106,6 +106,8 @@ export function App() {
   // 连续几次取不到状态，说明找找主程序已经退出或重启：提示用户，而不是留下一个不会动的界面
   const [lost, setLost] = useState(false);
   const [quitted, setQuitted] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [noticeErr, setNoticeErr] = useState("");
   // 托盘菜单「索引与设置」：窗口被呼出时检查要打开哪个面板
   useEffect(() => {
     const check = () => api.uiPending().then((r) => { if (r.panel === "index") setPanel("index"); }).catch(() => {});
@@ -252,9 +254,16 @@ export function App() {
         <div className="notice" key={n.id}>
           <span>{n.message}</span>
           {n.kind === "new-volume" && n.path && (
-            <button className="primary" onClick={() => { api.addRoot(n.path!).then(() => { setNotices([]); refreshStatus(); }).catch((e) => setMsg(e.message)); }}>加入索引</button>
+            <button className="primary" disabled={adding} onClick={() => {
+              setAdding(true); setNoticeErr("");
+              api.addRoot(n.path!)
+                .then(() => { setNotices([]); refreshStatus(); setPanel("index"); })
+                .catch((e) => setNoticeErr("没能加入：" + e.message))
+                .finally(() => setAdding(false));
+            }}>{adding ? "正在加入…" : "加入索引"}</button>
           )}
-          <button onClick={() => setNotices([])}>忽略</button>
+          <button onClick={() => { setNotices([]); setNoticeErr(""); }}>忽略</button>
+          {noticeErr && <span className="error">{noticeErr}</span>}
         </div>
       ))}
 

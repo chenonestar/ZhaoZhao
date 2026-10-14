@@ -79,6 +79,8 @@ export interface RootStatus {
   counts: Counts;
   lastScan: number;
   opts?: { includeExts?: string[]; excludeGlobs?: string[]; followLinks?: boolean; ocr?: boolean };
+  legacyPending: number;
+  ocrPending: number;
 }
 
 export interface VolumeStatus {

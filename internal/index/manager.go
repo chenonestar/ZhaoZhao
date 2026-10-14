@@ -98,6 +98,12 @@ type Manager struct {
 	noticed   map[string]bool
 
 	corrupt    atomic.Bool
+	checking   atomic.Bool // 后台完整性检查进行中
+
+	ibMu    sync.Mutex // 卷的索引占用（后台计算的缓存）
+	ibCache map[string]int64
+	ibAt    time.Time
+	ibBusy  bool
 	rebuilding atomic.Bool
 	startedAt  time.Time
 	baseline   atomic.Bool // 首次卷扫描完成后才通知「新卷」
@@ -184,10 +190,6 @@ func (m *Manager) Norm() norm.Options { return m.Config().NormOptions() }
 func (m *Manager) Start() error {
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.startedAt = time.Now()
-	if err := m.DB.Check(); err != nil {
-		m.corrupt.Store(true)
-		m.addNotice(Notice{Kind: "corrupt", Message: err.Error() + "。请在设置中重建索引。"})
-	}
 	if err := m.loadState(); err != nil {
 		return err
 	}

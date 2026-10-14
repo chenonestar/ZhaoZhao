@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/chenonestar/zhaozhao/internal/index"
+	"github.com/chenonestar/zhaozhao/internal/logx"
 )
 
 func (s *Server) routes(mux *http.ServeMux) {
@@ -58,7 +59,11 @@ func (s *Server) routes(mux *http.ServeMux) {
 		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
 			return nil, err
 		}
-		return s.M.AddRoot(b.Path)
+		root, err := s.M.AddRoot(b.Path)
+		if err == nil {
+			log.Printf("加入索引根 %s", logx.P(b.Path))
+		}
+		return root, err
 	}))
 	h("/api/roots/remove", s.post(func(r *http.Request) (any, error) {
 		var b struct {
@@ -230,10 +235,15 @@ func (s *Server) post(f func(r *http.Request) (any, error)) http.HandlerFunc {
 			writeErr(w, http.StatusMethodNotAllowed, fmt.Errorf("需要 POST"))
 			return
 		}
+		t := time.Now()
 		v, err := f(r)
 		if err != nil {
+			log.Printf("操作失败 %s（用时 %.1fs）：%v", r.URL.Path, time.Since(t).Seconds(), err)
 			writeErr(w, 400, err)
 			return
+		}
+		if d := time.Since(t); d > 2*time.Second {
+			log.Printf("操作 %s 用时 %.1fs", r.URL.Path, d.Seconds())
 		}
 		writeJSON(w, v)
 	}

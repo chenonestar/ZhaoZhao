@@ -19,6 +19,9 @@ type RootStatus struct {
 	Scanning bool         `json:"scanning"`
 	Scanned  int64        `json:"scanned"`
 	Counts   store.Counts `json:"counts"`
+	// 待处理里老格式转换、OCR 各有多少
+	LegacyPending int64 `json:"legacyPending"`
+	OCRPending    int64 `json:"ocrPending"`
 }
 
 // VolumeStatus 是单个卷的信息（F-VOL-08）。
@@ -162,9 +165,14 @@ func (m *Manager) Status() Status {
 		st.Net.Used, st.Net.Cap = s.net.Stats()
 		st.Processed = s.done.Load()
 	}
-	st.Totals, _ = m.DB.AllCounts()
-	st.OCRQueue, _ = m.DB.PendingByPrio(prioOCR)
-	st.LegacyQueue, _ = m.DB.PendingByPrio(prioLegacy)
+	// 一次分组查询得到全部统计（只读覆盖索引）：合计、每个索引根、每个卷都由它汇总
+	stats, _ := m.DB.StatsByRoot(prioLegacy, prioOCR)
+	rootVol := map[int64]string{}
+	for _, x := range stats {
+		st.Totals = addCounts(st.Totals, x.Counts)
+		st.OCRQueue += x.OCRPending
+		st.LegacyQueue += x.LegacyPending
+	}
 	st.OCREtaSec = m.ocrEta(st.OCRQueue)
 	st.StalledSec = int64(m.stalled().Seconds())
 
@@ -184,7 +192,10 @@ func (m *Manager) Status() Status {
 			st.Scanning = true
 			volSync[r.VolumeID] = true
 		}
-		rs.Counts, _ = m.DB.RootCounts(r.ID)
+		if x := stats[r.ID]; x != nil {
+			rs.Counts, rs.LegacyPending, rs.OCRPending = x.Counts, x.LegacyPending, x.OCRPending
+		}
+		rootVol[r.ID] = r.VolumeID
 		st.Roots = append(st.Roots, rs)
 	}
 	vols, _ := m.DB.ListVolumes()
@@ -198,12 +209,46 @@ func (m *Manager) Status() Status {
 			}
 			m.mu.RUnlock()
 		}
-		c, _ := m.DB.VolumeCounts(v.ID)
-		vs.Files = c.Total
-		vs.IndexBytes, _ = m.DB.VolumeIndexBytes(v.ID)
+		for id, x := range stats {
+			if rootVol[id] == v.ID {
+				vs.Files += x.Total
+			}
+		}
+		vs.IndexBytes = m.indexBytes(v.ID)
 		st.Volumes = append(st.Volumes, vs)
 	}
 	st.Components, st.ComponentsChecking = m.Components()
 	st.Idle = s.idle.Load() && !st.Scanning && st.Totals.Pending == 0
 	return st
+}
+
+func addCounts(a, b store.Counts) store.Counts {
+	a.Total += b.Total
+	a.Pending += b.Pending
+	a.Done += b.Done
+	a.Failed += b.Failed
+	a.Encrypted += b.Encrypted
+	a.MetaOnly += b.MetaOnly
+	a.OCR += b.OCR
+	return a
+}
+
+// indexBytes 返回卷的索引占用（提取文本的大小）。要读遍文本表，所以在后台计算、最多每分钟更新一次。
+func (m *Manager) indexBytes(volID string) int64 {
+	m.ibMu.Lock()
+	defer m.ibMu.Unlock()
+	if time.Since(m.ibAt) > time.Minute && !m.ibBusy {
+		m.ibBusy = true
+		go func() {
+			vols, _ := m.DB.ListVolumes()
+			res := map[string]int64{}
+			for _, v := range vols {
+				res[v.ID], _ = m.DB.VolumeIndexBytes(v.ID)
+			}
+			m.ibMu.Lock()
+			m.ibCache, m.ibAt, m.ibBusy = res, time.Now(), false
+			m.ibMu.Unlock()
+		}()
+	}
+	return m.ibCache[volID]
 }

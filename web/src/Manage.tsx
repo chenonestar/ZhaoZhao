@@ -58,7 +58,7 @@ function IndexTab({ status, refresh }: { status: Status | null; refresh: () => v
         <div>
           <b>{status.paused ? "已暂停" : status.rebuilding ? "正在重建全文索引…" : status.idle ? "索引已是最新" : "正在建立索引"}</b>
           <span className="dim">
-            {" "}文件 {t.Total} · 已提取 {t.Done} · 待处理 {t.Pending} · 仅文件名 {t.MetaOnly} · 失败 {t.Failed} · 已加密 {t.Encrypted}
+            {" "}{status.roots.length > 1 ? `全部 ${status.roots.length} 个索引根合计：` : ""}文件 {t.Total} · 已提取 {t.Done} · 待处理 {t.Pending} · 仅文件名 {t.MetaOnly} · 失败 {t.Failed} · 已加密 {t.Encrypted}
           </span>
         </div>
         {status.stalledSec > 0 && (
@@ -122,8 +122,12 @@ function IndexTab({ status, refresh }: { status: Status | null; refresh: () => v
                 </div>
               </td>
               <td className="num small">
-                <div>文件 {r.counts.Total}</div>
-                <div className="dim">待处理 {r.counts.Pending} · 失败 {r.counts.Failed}</div>
+                <div>文件 {r.counts.Total} · 已提取 {r.counts.Done}</div>
+                <div className="dim">
+                  待处理 {r.counts.Pending}
+                  {r.legacyPending + r.ocrPending > 0 && `（老格式 ${r.legacyPending} · OCR ${r.ocrPending}）`}
+                </div>
+                <div className="dim">仅文件名 {r.counts.MetaOnly} · 失败 {r.counts.Failed} · 已加密 {r.counts.Encrypted}</div>
               </td>
               <td className="actions">
                 {r.paused ? <button onClick={() => run(api.resume(r.id))}>恢复</button> : <button onClick={() => run(api.pause(r.id))}>暂停</button>}

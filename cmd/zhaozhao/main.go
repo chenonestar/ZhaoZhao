@@ -61,27 +61,35 @@ func main() {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		fatalf("无法创建数据目录 %s: %v", dataDir, err)
 	}
+	// 单实例：第一步就用系统锁判断。已有实例（正在运行或正在启动）时，等它就绪后呼出它的窗口
+	if !acquireInstanceLock(dataDir) {
+		if !*noUI {
+			for i := 0; i < 300; i++ { // 最多等 60 秒（已有实例可能正在启动）
+				if url, ok := existingInstance(dataDir); ok {
+					_ = showOrLaunchUI(url)
+					break
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+		}
+		return
+	}
 	lg, err := logx.Setup(dataDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "无法打开日志文件:", err)
 	}
 	suppressErrorDialogs()
+	start := time.Now()
 	log.Printf("找找启动：%s", environment(dataDir))
-
-	// 单实例：已有实例在运行则直接呼出它的窗口
-	if url, ok := existingInstance(dataDir); ok {
-		log.Printf("已有实例在运行，呼出窗口")
-		if !*noUI {
-			_ = showOrLaunchUI(url)
-		}
-		return
-	}
 
 	cleanStaleTemp()
 	db, err := openDB(dataDir)
 	if err != nil {
 		fatalf("无法打开索引库: %v", err)
 	}
+	// 运行标记：正常退出时删除。下次启动时还在，说明上次是异常退出（崩溃、断电、被强制结束）
+	marker := filepath.Join(dataDir, "running.marker")
+	_ = os.WriteFile(marker, []byte(fmt.Sprint(os.Getpid())), 0o600)
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -144,6 +152,7 @@ func main() {
 			log.Printf("添加索引根 %s 失败: %v", p, err)
 		}
 	}
+	log.Printf("启动完成，用时 %.1fs，可以搜索", time.Since(start).Seconds())
 	fmt.Println("找找已启动：", srv.URL())
 	if !*noUI {
 		_ = launchUI(srv.URL())
@@ -180,6 +189,7 @@ func main() {
 		step("停止后台任务和解析子进程", mgr.Stop) // 连同 LibreOffice、OCR
 		step("清理临时文件", tmp.Cleanup)
 		step("关闭索引库", func() { db.Close() })
+		_ = os.Remove(marker)
 		close(done)
 	}()
 	select {
@@ -282,13 +292,19 @@ func resolveDataDir(flagVal string) string {
 }
 
 // openDB 打开索引库；检测到损坏时把旧库改名保留，建立新库并恢复索引根列表（F-BG-12）。
+// 完整性检查要读遍整个索引库（索引库大了要好几秒），只在上次异常退出后才在启动时做；
+// 平时由索引服务在空闲时于后台定期检查。
 func openDB(dataDir string) (*store.DB, error) {
 	db, err := store.Open(dataDir)
 	if err == nil {
-		if cerr := db.Check(); cerr == nil {
+		if _, e := os.Stat(filepath.Join(dataDir, "running.marker")); e != nil {
 			return db, nil
-		} else {
-			log.Printf("索引库自检失败: %v", cerr)
+		}
+		t := time.Now()
+		cerr := db.Check()
+		log.Printf("上次没有正常退出，检查索引库完整性：%v，用时 %.1fs", errOrOK(cerr), time.Since(t).Seconds())
+		if cerr == nil {
+			return db, nil
 		}
 		db.Close()
 	} else {
@@ -305,6 +321,13 @@ func openDB(dataDir string) (*store.DB, error) {
 	n := index.RestoreRoots(db, dataDir)
 	log.Printf("已重建索引库，恢复了 %d 个索引根，将重新建立索引", n)
 	return db, nil
+}
+
+func errOrOK(err error) string {
+	if err == nil {
+		return "正常"
+	}
+	return err.Error()
 }
 
 func writeInstance(dataDir string, srv *server.Server) {
