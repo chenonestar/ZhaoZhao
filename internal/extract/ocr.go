@@ -533,7 +533,86 @@ func (r pdfOCRResult) note() string {
 	return strings.Join(parts, "，")
 }
 
-// ocrPDFPages 对没有文字层的页逐页取出内嵌图片并做 OCR：PDF 结构只读一次，
+// ocrPDFiumPages 用 PDFium 把没有文字层的页逐页渲染成图片并做 OCR：不管页面里是什么格式的图片
+// （JPEG、JBIG2、JPEG 2000、CCITT），也不管是一张图还是多张拼成，都按整页识别。
+// 几乎全白的页（空白页）不送去识别。调用方持有 pdfiumMu。
+func ocrPDFiumPages(d *pdfDoc, p string, pages []int, opt Options) (pdfOCRResult, error) {
+	res := pdfOCRResult{texts: map[int]string{}, skipped: map[string]int{}}
+	tmp, err := os.MkdirTemp("", "zhaozhao-pdfocr-")
+	if err != nil {
+		return res, err
+	}
+	defer os.RemoveAll(tmp)
+	skip := func(pg int, why string) {
+		res.skipped[why]++
+		logx.Debugf("PDF %s 第 %d 页%s，跳过", logx.P(p), pg, why)
+	}
+	logx.Debugf("PDF %s：共 %d 页，其中 %d 页没有文字层，渲染后 OCR", logx.P(p), d.pages(), len(pages))
+	for i, pg := range pages {
+		opt.Progress("第 %d/%d 页", i+1, len(pages))
+		t0 := time.Now()
+		img, err := d.render(pg-1, 200, 3500)
+		if err != nil {
+			skip(pg, "无法渲染（"+truncate(err.Error(), 80)+"）")
+			continue
+		}
+		if blankImage(img) {
+			continue // 空白页
+		}
+		path := filepath.Join(tmp, "p"+strconv.Itoa(pg)+".png")
+		if err := writePNG(path, img); err != nil {
+			return res, err
+		}
+		sz := img.Rect.Size()
+		img = nil
+		t1 := time.Now()
+		text, err := ocrImage(opt.OCR, path)
+		os.Remove(path)
+		if errors.Is(err, errOCRTimeout) {
+			skip(pg, "识别超时")
+			continue
+		}
+		if err != nil {
+			return res, err
+		}
+		logx.Debugf("OCR %s 第 %d 页（%d/%d）渲染 %.1fs、识别 %.1fs，图片 %dx%d，识别出 %d 字", logx.P(p), pg, i+1, len(pages),
+			t1.Sub(t0).Seconds(), time.Since(t1).Seconds(), sz.X, sz.Y, len([]rune(text)))
+		res.texts[pg] = text
+	}
+	if n := res.note(); n != "" {
+		log.Printf("PDF %s：%s", logx.P(p), n)
+	}
+	return res, nil
+}
+
+// blankImage 判断渲染出的页面是否几乎全白（深色像素不到万分之五）。
+func blankImage(g *image.Gray) bool {
+	dark, total := 0, len(g.Pix)
+	limit := total / 2000
+	for _, v := range g.Pix {
+		if v < 160 {
+			if dark++; dark > limit {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func writePNG(path string, img image.Image) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	enc := png.Encoder{CompressionLevel: png.BestSpeed}
+	if err := enc.Encode(f, img); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// ocrPDFPages 对没有文字层的页逐页取出内嵌图片并做 OCR（没有 PDFium 时）：PDF 结构只读一次，
 // 每页取图、识别、删除临时文件后再处理下一页，内存里同时只有一页的图片。
 // 某一页识别超时只跳过这一页；OCR 组件无法启动等错误才让整份文件失败。
 func ocrPDFPages(p string, pages []int, opt Options) (pdfOCRResult, error) {

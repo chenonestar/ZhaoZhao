@@ -131,6 +131,17 @@ func TestOCR(t *testing.T) {
 	if r.Status != doc.StatusOK || !r.OCR || !strings.Contains(r.Text, "违约金") || !strings.Contains(r.Text, "差旅费") || len(r.Locs) != 2 {
 		t.Errorf("scanned.pdf: %+v", r)
 	}
+	// JPEG 2000 的扫描页：有 PDFium 时整页渲染后识别（纯 Go 路径取不出这种图片）
+	if _, err := os.Stat(filepath.Join(dir, "jpx.pdf")); err == nil {
+		r = get("jpx.pdf")
+		if _, perr := PDFiumPath(); perr == nil {
+			if r.Status != doc.StatusOK || !r.OCR || !strings.Contains(r.Text, "穿山甲") {
+				t.Errorf("jpx.pdf: %+v", r)
+			}
+		} else if !strings.Contains(r.Err, "JPEG 2000") {
+			t.Errorf("没有 PDFium 时 jpx.pdf 应注明 JPEG 2000 无法识别: %+v", r)
+		}
+	}
 	// 未配置 OCR 时：扫描 PDF 标记需要 OCR
 	off := DefaultOptions()
 	r2 := Extract(filepath.Join(dir, "scanned.pdf"), "pdf", off)

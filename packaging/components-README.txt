@@ -15,4 +15,9 @@
    - 没有该组件时，图片只索引文件名，扫描 PDF 只索引文字层。
    - 也可以用环境变量 ZHAOZHAO_OCR 指定其他兼容命令（管道协议见 tools\ocr_bridge.py）。
 
+3. components\pdfium\        PDF 引擎 PDFium（随包附带）
+   - pdfium.dll：提取 PDF 文字层更准确；扫描版 PDF 整页渲染后识别，
+     JBIG2、JPEG 2000 等格式的扫描页也能识别。
+   - 没有它时改用内置的 PDF 解析器，大多数 PDF 照常可用。
+
 所有组件都在本机离线运行，找找不联网。

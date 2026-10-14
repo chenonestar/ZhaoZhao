@@ -77,6 +77,8 @@ jobs:
       - name: 生成样本
         run: |
           python tools/make_fixtures.py "$RUNNER_TEMP/fx"
+      - name: 下载 PDFium
+        run: packaging/fetch-pdfium.sh linux "$RUNNER_TEMP/pdfium"
       - name: 生成 OCR 样本
         run: |
           mkdir -p "$RUNNER_TEMP/ocr"
@@ -102,6 +104,24 @@ jobs:
           c.drawImage(ImageReader(f"{out}/scan.jpg"), 0, 0, 612, 176); c.showPage()
           c.drawImage(ImageReader(f"{out}/p2.jpg"), 0, 0, 612, 176); c.showPage()
           c.save()
+          # JPEG 2000 的扫描页（没有 PDFium 时无法识别）：手写 PDF，图片用 /JPXDecode
+          import io
+          j = Image.new("L", (1200, 400), 255)
+          ImageDraw.Draw(j).text((40, 60), "JPEG2000扫描页：穿山甲合同", font=ImageFont.truetype("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", 60), fill=0)
+          b = io.BytesIO(); j.save(b, "JPEG2000"); data = b.getvalue()
+          content = b"q 600 0 0 200 0 0 cm /Im0 Do Q"
+          objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                  b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 200] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>",
+                  b"<< /Type /XObject /Subtype /Image /Width 1200 /Height 400 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /JPXDecode /Length %d >>\nstream\n" % len(data) + data + b"\nendstream",
+                  b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream"]
+          pdf = io.BytesIO(); pdf.write(b"%PDF-1.5\n"); offs = []
+          for i, o in enumerate(objs, 1):
+              offs.append(pdf.tell()); pdf.write(b"%d 0 obj\n" % i + o + b"\nendobj\n")
+          x = pdf.tell()
+          pdf.write(b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1))
+          for o in offs: pdf.write(b"%010d 00000 n \n" % o)
+          pdf.write(b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, x))
+          open(f"{out}/jpx.pdf", "wb").write(pdf.getvalue())
           PY
       - name: 测试
         env:
@@ -109,7 +129,10 @@ jobs:
         run: |
           export ZHAOZHAO_FIXTURES="$RUNNER_TEMP/fx"
           export ZHAOZHAO_OCR="python3 $PWD/tools/ocr_bridge.py"
+          export ZHAOZHAO_PDFIUM="$RUNNER_TEMP/pdfium/libpdfium.so"
           go test -count=1 ./internal/extract ./internal/index ./internal/worker
+          # 没有 PDFium 时的纯 Go 路径也要能用
+          ZHAOZHAO_PDFIUM= go test -count=1 -run 'PDF|OCR' ./internal/extract
 
   # Windows：真正在 Windows 上运行测试，验证卷识别、目录监听等平台相关代码
   test-windows:
@@ -126,8 +149,13 @@ jobs:
           name: web-dist
           path: internal/web/dist
       - run: go vet ./...
+      - name: 下载 PDFium（测试 Windows 上的动态加载）
+        shell: bash
+        run: packaging/fetch-pdfium.sh win "$RUNNER_TEMP/pdfium"
       - name: go test
         shell: bash
+        env:
+          ZHAOZHAO_PDFIUM: ${{ runner.temp }}/pdfium/pdfium.dll
         run: go test -count=1 -timeout 5m -v ./... 2>&1 | tee test.log | grep -E '^(=== RUN|--- (PASS|FAIL|SKIP)|PASS|FAIL|ok|panic)|^\s+\S+\.go:[0-9]+:' ; test ${PIPESTATUS[0]} -eq 0
 
   # Windows 便携版：交叉编译并打包，作为构建产物下载

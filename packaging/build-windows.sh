@@ -7,6 +7,7 @@
 #   zhaozhao.exe            主程序（同时兼作解析子进程）
 #   components/libreoffice  格式转换组件（需要自行放入，见 components/README.txt）
 #   components/ocr          OCR 组件 RapidOCR-json（需要自行放入）
+#   components/pdfium       PDF 引擎 PDFium（随包附带，约 7 MB）
 #   README.txt
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -23,6 +24,9 @@ mkdir -p "$PKG/components/libreoffice" "$PKG/components/ocr"
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
   -ldflags "-s -w -H=windowsgui -X main.version=$VER" \
   -o "$PKG/zhaozhao.exe" ./cmd/zhaozhao
+
+echo "==> 放入 PDFium"
+packaging/fetch-pdfium.sh win "$PKG/components/pdfium"
 
 cp packaging/components-README.txt "$PKG/components/README.txt"
 cp packaging/portable-README.txt "$PKG/README.txt"

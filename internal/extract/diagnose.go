@@ -1,6 +1,7 @@
 package extract
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"image"
@@ -99,6 +100,64 @@ func CheckSoffice() ComponentStatus {
 	}
 	st.Message = "不可用：" + r.Err
 	return st
+}
+
+// CheckPDFium 加载 PDFium 并读取一个小 PDF，验证它真能用。
+func CheckPDFium() ComponentStatus {
+	st := ComponentStatus{Name: "PDF 引擎（PDFium）"}
+	p, err := PDFiumPath()
+	st.Path = p
+	if err != nil {
+		st.Message = "不可用（" + err.Error() + "）：PDF 改用内置解析器，JBIG2、JPEG 2000 格式的扫描页无法识别"
+		return st
+	}
+	dir, err := os.MkdirTemp("", "zhaozhao-check-")
+	if err != nil {
+		st.Message = err.Error()
+		return st
+	}
+	defer os.RemoveAll(dir)
+	f := filepath.Join(dir, "check.pdf")
+	_ = os.WriteFile(f, simplePDF("zhaozhaocheck"), 0o600)
+	start := time.Now()
+	r, ok := extractPDFium(f, DefaultOptions())
+	st.Seconds = time.Since(start).Seconds()
+	if !ok || r.Status != "ok" || !strings.Contains(r.Text, "zhaozhaocheck") {
+		st.Message = "不可用：试读取 PDF 失败 " + r.Err
+		return st
+	}
+	st.OK, st.Message = true, "可用"
+	return st
+}
+
+// simplePDF 生成一个最简单的 PDF：每页一行英文（标准 14 字体，不需要嵌入字体）。
+func simplePDF(lines ...string) []byte {
+	var buf bytes.Buffer
+	var offs []int
+	obj := func(s string) {
+		offs = append(offs, buf.Len())
+		fmt.Fprintf(&buf, "%d 0 obj\n%s\nendobj\n", len(offs), s)
+	}
+	buf.WriteString("%PDF-1.4\n")
+	obj("<< /Type /Catalog /Pages 2 0 R >>")
+	kids := ""
+	for i := range lines {
+		kids += fmt.Sprintf("%d 0 R ", 4+2*i)
+	}
+	obj(fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", kids, len(lines)))
+	obj("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+	for i, l := range lines {
+		content := fmt.Sprintf("BT /F1 24 Tf 72 700 Td (%s) Tj ET", l)
+		obj(fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>", 5+2*i))
+		obj(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content))
+	}
+	xref := buf.Len()
+	fmt.Fprintf(&buf, "xref\n0 %d\n0000000000 65535 f \n", len(offs)+1)
+	for _, o := range offs {
+		fmt.Fprintf(&buf, "%010d 00000 n \n", o)
+	}
+	fmt.Fprintf(&buf, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(offs)+1, xref)
+	return buf.Bytes()
 }
 
 // CheckOCR 启动 OCR 组件并识别一张空白图片，验证它真能用。

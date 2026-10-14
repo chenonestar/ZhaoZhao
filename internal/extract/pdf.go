@@ -6,12 +6,62 @@ import (
 	"strings"
 
 	"github.com/chenonestar/zhaozhao/internal/doc"
+	"github.com/chenonestar/zhaozhao/internal/logx"
 	"github.com/ledongthuc/pdf"
 )
 
-// extractPDF 按页提取文字层。没有文字的页视为扫描页：整份文件都没有文字时
-// 返回 StatusNoContent，交给 OCR 处理。
-func extractPDF(p string, opt Options) (res doc.Result) {
+// extractPDF 按页提取文字层。没有文字的页视为扫描页：开启 OCR 时逐页识别；
+// 整份文件都没有文字时返回 StatusNoContent，交给 OCR 处理。
+// 有 PDFium 时用它（文字提取更准确，扫描页直接渲染成图片，任何图片格式都能识别），否则用纯 Go 解析器。
+func extractPDF(p string, opt Options) doc.Result {
+	if _, err := PDFiumPath(); err == nil {
+		if r, ok := extractPDFium(p, opt); ok {
+			return r
+		}
+	}
+	return extractPDFGo(p, opt)
+}
+
+// extractPDFium 用 PDFium 提取。ok 为 false 表示 PDFium 打不开这个文件，应改用纯 Go 解析器。
+func extractPDFium(p string, opt Options) (res doc.Result, ok bool) {
+	pdfiumMu.Lock()
+	defer pdfiumMu.Unlock()
+	d, err := openPDFium(p)
+	if err == errPDFPassword {
+		return doc.Result{Status: doc.StatusEncrypted, Err: "文件已加密"}, true
+	}
+	if err != nil {
+		logx.Debugf("PDFium 无法打开 %s（%v），改用内置解析器", logx.P(p), err)
+		return doc.Result{}, false
+	}
+	defer d.close()
+	n := d.pages()
+	texts := make(map[int]string, n)
+	var blank []int
+	for i := 0; i < n; i++ {
+		if n > 50 && i%50 == 0 {
+			opt.Progress("读取文字 %d/%d 页", i+1, n)
+		}
+		txt, err := d.text(i)
+		if txt = strings.TrimSpace(txt); err != nil || txt == "" {
+			blank = append(blank, i+1)
+			continue
+		}
+		texts[i+1] = plainText(txt)
+	}
+	if n == 0 {
+		return doc.Result{Status: doc.StatusFailed, Err: "PDF 没有页面"}, true
+	}
+	var got pdfOCRResult
+	var ocrErr error
+	if len(blank) > 0 && opt.OCR.Enabled() {
+		got, ocrErr = ocrPDFiumPages(d, p, blank, opt)
+	}
+	return pdfResult(n, texts, blank, got, ocrErr, opt), true
+}
+
+// extractPDFGo 用纯 Go 解析器提取（没有 PDFium，或 PDFium 打不开时）。
+func extractPDFGo(p string, opt Options) (res doc.Result) {
 	defer func() {
 		if r := recover(); r != nil {
 			res = doc.Result{Status: doc.StatusFailed, Err: fmt.Sprintf("PDF 解析异常: %v", r)}
@@ -52,18 +102,22 @@ func extractPDF(p string, opt Options) (res doc.Result) {
 	if n == 0 {
 		return doc.Result{Status: doc.StatusFailed, Err: "PDF 没有页面"}
 	}
-	usedOCR := false
+	var got pdfOCRResult
 	var ocrErr error
-	ocrNote := ""
 	if len(blank) > 0 && opt.OCR.Enabled() {
-		var got pdfOCRResult
 		got, ocrErr = ocrPDFPages(p, blank, opt)
-		ocrNote = got.note()
-		for pg, t := range got.texts {
-			if strings.TrimSpace(t) != "" {
-				texts[pg] = strings.TrimSpace(t)
-				usedOCR = true
-			}
+	}
+	return pdfResult(n, texts, blank, got, ocrErr, opt)
+}
+
+// pdfResult 把各页文字（含 OCR 结果）按页码拼成提取结果。
+func pdfResult(n int, texts map[int]string, blank []int, got pdfOCRResult, ocrErr error, opt Options) doc.Result {
+	usedOCR := false
+	ocrNote := got.note()
+	for pg, t := range got.texts {
+		if strings.TrimSpace(t) != "" {
+			texts[pg] = strings.TrimSpace(t)
+			usedOCR = true
 		}
 	}
 	var b doc.Builder

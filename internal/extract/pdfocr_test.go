@@ -38,11 +38,19 @@ func grayPage(seed int) image.Image {
 	for i := range img.Pix {
 		img.Pix[i] = 255
 	}
-	img.Set(seed, seed, color.Gray{0})
+	// 几行「文字」（深色横条），渲染后不会被当作空白页
+	for y := 40 + seed; y < 260; y += 30 {
+		for x := 30; x < 370; x++ {
+			for k := 0; k < 8; k++ {
+				img.Set(x, y+k, color.Gray{0})
+			}
+		}
+	}
 	return img
 }
 
-// 扫描版 PDF 逐页识别：页码对应正确、逐页报告进度；JBIG2 页跳过并注明原因。
+// 扫描版 PDF 逐页识别：页码对应正确、逐页报告进度。没有 PDFium 时 JBIG2 页跳过并注明原因；
+// 有 PDFium 时整页渲染后识别（这里的 JBIG2 数据是无法解码的假数据，渲染出空白页，不送去识别）。
 func TestScannedPDFPageByPage(t *testing.T) {
 	t.Setenv("ZZ_FAKE_OCR", "1")
 	defer ShutdownOCR()
@@ -67,8 +75,9 @@ func TestScannedPDFPageByPage(t *testing.T) {
 			t.Fatalf("缺少 %s: %q", want, r.Text)
 		}
 	}
-	if strings.Contains(r.Text, "fakepage-p3") || !strings.Contains(r.Err, "JBIG2") {
-		t.Fatalf("JBIG2 页应跳过并注明: text=%q err=%q", r.Text, r.Err)
+	_, noPDFium := PDFiumPath()
+	if strings.Contains(r.Text, "fakepage-p3") || (noPDFium != nil && !strings.Contains(r.Err, "JBIG2")) {
+		t.Fatalf("JBIG2 页应跳过: text=%q err=%q", r.Text, r.Err)
 	}
 	if len(r.Locs) != 3 || r.Locs[2].Label != "第4页" {
 		t.Fatalf("页码定位: %+v", r.Locs)

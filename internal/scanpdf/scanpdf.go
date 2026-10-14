@@ -47,6 +47,9 @@ func Write(w io.Writer, pages []Page) error {
 		} else {
 			b := p.Image.Bounds()
 			w, h = b.Dx(), b.Dy()
+			if _, gray := p.Image.(*image.Gray); gray {
+				cs = "/DeviceGray" // 灰度图编码出的 JPEG 只有一个分量
+			}
 			var jb bytes.Buffer
 			if err := jpeg.Encode(&jb, p.Image, &jpeg.Options{Quality: 90}); err != nil {
 				return err

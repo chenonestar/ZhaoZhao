@@ -1,6 +1,6 @@
 name: Bundle
 
-# 构建「完整版」：主程序 + LibreOffice（老格式转换）+ RapidOCR-json（OCR），全部离线可用。
+# 构建「完整版」：主程序 + LibreOffice（老格式转换）+ RapidOCR-json（OCR）+ PDFium（PDF 引擎），全部离线可用。
 # 在真实 Windows 上做冒烟测试：老格式转换和 OCR 真正跑一遍，通过后才产出压缩包。
 # 触发：手动、修改打包相关文件、被 release.yml 调用。
 
@@ -44,6 +44,10 @@ jobs:
           Copy-Item packaging/components-README.txt ZhaoZhao/components/README.txt
           Copy-Item packaging/portable-README.txt ZhaoZhao/README.txt
           New-Item ZhaoZhao/portable.flag -ItemType File | Out-Null
+
+      - name: 放入 PDFium
+        shell: bash
+        run: packaging/fetch-pdfium.sh win ZhaoZhao/components/pdfium
 
       - name: 安装 LibreOffice 并放入 components
         shell: pwsh
