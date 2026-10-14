@@ -547,7 +547,8 @@ func (w *walkState) leafResult(e *entry) doc.Result {
 	}
 	defer os.Remove(tmp)
 	inner := w.opt
-	inner.OCR = OCRConfig{} // 容器内部不做 OCR
+	inner.OCR = OCRConfig{}       // 容器内部不做 OCR
+	inner.LegacyMode = LegacyAuto // 容器内部的老格式文件不能单独排队转换：内置解析不了就当场转换
 	r := extractLeaf(tmp, ext, inner)
 	if r.Status == doc.StatusSkipped && r.Err == "" {
 		r.Err = "不支持的文件类型"

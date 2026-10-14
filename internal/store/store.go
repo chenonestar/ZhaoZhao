@@ -778,6 +778,35 @@ func (d *DB) ListFailed(limit int) ([]File, error) {
 }
 
 // RetryFailed 把指定的失败文件重新置为待提取；ids 为空时重试所有失败文件。
+// MoveLegacy 把待处理的老格式文件（exts）移到 prio 队列。retryFailed 时把以前提取失败的也重新排队。
+// 只处理磁盘上的文件本身，压缩包里的文件随压缩包一起提取。
+func (d *DB) MoveLegacy(exts []string, prio int, retryFailed bool) (moved, retried int64, err error) {
+	if len(exts) == 0 {
+		return 0, 0, nil
+	}
+	in := strings.TrimSuffix(strings.Repeat("?,", len(exts)), ",")
+	args := []any{prio}
+	for _, e := range exts {
+		args = append(args, e)
+	}
+	err = d.Tx(func(tx *sql.Tx) error {
+		r, err := tx.Exec(`UPDATE files SET prio=? WHERE state=0 AND inner='' AND prio IN (1,2) AND ext IN (`+in+`)`, args...)
+		if err != nil {
+			return err
+		}
+		moved, _ = r.RowsAffected()
+		if retryFailed {
+			r, err := tx.Exec(`UPDATE files SET state=0, err='', prio=? WHERE state=2 AND inner='' AND ext IN (`+in+`)`, args...)
+			if err != nil {
+				return err
+			}
+			retried, _ = r.RowsAffected()
+		}
+		return nil
+	})
+	return moved, retried, err
+}
+
 func (d *DB) RetryFailed(ids []int64) error {
 	return d.Tx(func(tx *sql.Tx) error {
 		if len(ids) == 0 {

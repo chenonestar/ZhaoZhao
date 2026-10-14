@@ -95,7 +95,7 @@ func (m *Manager) decide(rt *rootRT, cfg Config, abs, ext string, size int64, in
 			return store.StateMetaOnly, why, prioOCR, kind
 		}
 		return state, "", prioOCR, kind
-	case extract.IsLegacy(ext):
+	case extract.IsLegacy(ext) && cfg.LegacyLOOnly:
 		return state, "", prioLegacy, kind
 	case extract.Supported(ext):
 		return state, "", prio, kind

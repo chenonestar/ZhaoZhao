@@ -68,8 +68,8 @@ type Manager struct {
 	OCRPool *worker.Pool // OCR 专用进程池（并发数小，避免多个 OCR 引擎同时占用内存）；为空时使用 Pool
 	// LegacyPool 是老格式转换专用进程池（每个子进程常驻一个 LibreOffice）；为空时使用 Pool
 	LegacyPool *worker.Pool
-	ocrCfg  extract.OCRConfig
-	DataDir string
+	ocrCfg     extract.OCRConfig
+	DataDir    string
 
 	cfgMu sync.RWMutex
 	cfg   Config
@@ -99,13 +99,13 @@ type Manager struct {
 	noticeSeq int64
 	noticed   map[string]bool
 
-	corrupt    atomic.Bool
-	checking   atomic.Bool // 后台完整性检查进行中
+	corrupt  atomic.Bool
+	checking atomic.Bool // 后台完整性检查进行中
 
-	ibMu    sync.Mutex // 卷的索引占用（后台计算的缓存）
-	ibCache map[string]int64
-	ibAt    time.Time
-	ibBusy  bool
+	ibMu       sync.Mutex // 卷的索引占用（后台计算的缓存）
+	ibCache    map[string]int64
+	ibAt       time.Time
+	ibBusy     bool
 	rebuilding atomic.Bool
 	startedAt  time.Time
 	baseline   atomic.Bool // 首次卷扫描完成后才通知「新卷」
@@ -175,6 +175,9 @@ func (m *Manager) SetConfig(c Config) error {
 	if old.Simplify != c.Simplify {
 		go m.rebuildFTS()
 	}
+	if old.LegacyLOOnly != c.LegacyLOOnly && m.ctx != nil {
+		m.syncLegacyQueue(c.LegacyLOOnly)
+	}
 	// 排除规则按内容比较（只改了某条规则的内容、条数没变，也要重新扫描）
 	if old.MaxTextMB != c.MaxTextMB || old.MaxOtherMB != c.MaxOtherMB || !slices.Equal(old.ExcludeDirNames, c.ExcludeDirNames) ||
 		!slices.Equal(old.ExcludePrefixes, c.ExcludePrefixes) || !slices.Equal(old.ExcludeGlobs, c.ExcludeGlobs) ||
@@ -198,6 +201,7 @@ func (m *Manager) Start() error {
 	if n, err := m.DB.DeleteOrphans(); err == nil && n > 0 {
 		m.logf("清理了 %d 条不属于任何索引根的残留记录", n)
 	}
+	m.syncLegacyQueue(m.Config().LegacyLOOnly)
 	m.refreshVolumes(true)
 	m.initWatch()
 	m.startScanners(2)
@@ -207,6 +211,32 @@ func (m *Manager) Start() error {
 	// 启动对账：处理未运行期间发生的变化（F-BG-02）
 	m.RescanAll()
 	return nil
+}
+
+// syncLegacyQueue 让待处理的老格式文件排在与设置相符的队列：使用内置解析时排在普通队列
+// （先用内置解析器读取，读不了的再排到老格式转换队列），只用 LibreOffice 时排在老格式转换队列。
+// 从 0.1.x 升级时，以前转换失败（多为超时）的老格式文件也重新排队，用内置解析器再试一次。
+func (m *Manager) syncLegacyQueue(loOnly bool) {
+	want, prio := "native", prioFast
+	if loOnly {
+		want, prio = "lo", prioLegacy
+	}
+	cur, _ := m.DB.GetMeta("legacy_mode")
+	if cur == want {
+		return
+	}
+	moved, retried, err := m.DB.MoveLegacy(extract.LegacyExts(), prio, cur == "" && !loOnly)
+	if err != nil {
+		m.logf("调整老格式文件队列失败: %v", err)
+		return
+	}
+	_ = m.DB.SetMeta("legacy_mode", want)
+	if cur == "" && moved+retried == 0 {
+		return // 新建的索引库
+	}
+	m.logf("老格式处理方式：%s；%d 个待处理的老格式文件已调整队列，%d 个以前失败的重新排队",
+		map[bool]string{true: "只用 LibreOffice 转换", false: "内置解析优先，解析不了的再用 LibreOffice"}[loOnly], moved, retried)
+	m.kick()
 }
 
 // Stop 停止全部后台任务。
@@ -219,6 +249,9 @@ func (m *Manager) Stop() {
 	m.Pool.Close()
 	if m.OCRPool != nil {
 		m.OCRPool.Close()
+	}
+	if m.LegacyPool != nil {
+		m.LegacyPool.Close()
 	}
 }
 

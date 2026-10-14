@@ -20,7 +20,8 @@ type Options struct {
 	ArchiveMaxBytes int64         // 单个压缩包解压总量上限
 	ArchiveMaxRatio int           // 单个内部文件压缩比上限
 	OCR             OCRConfig
-	Debug           bool // 记录详细日志（解析子进程据此设置自己的日志级别）
+	Debug           bool   // 记录详细日志（解析子进程据此设置自己的日志级别）
+	LegacyMode      string `json:"legacyMode,omitempty"` // 老格式的处理方式：LegacyAuto、LegacyNative、LegacyLO
 
 	progress func(string) // 进度回调（不序列化：子进程里由 Serve 设置）
 }
@@ -78,6 +79,14 @@ func Extract(p, ext string, opt Options) (res doc.Result) {
 		}
 		return doc.Result{Status: doc.StatusSkipped, Err: "不支持的文件类型"}
 	}
+	if (f.h == hDocx || f.h == hXlsx || f.h == hPptx) && isOLE(p) {
+		// OLE 格式的 docx/xlsx/pptx 通常是加密的；也可能是改了扩展名的 doc/xls/ppt
+		names, _ := oleRootNames(p)
+		if !names["WordDocument"] && !names["Workbook"] && !names["Book"] && !names["PowerPoint Document"] {
+			return doc.Result{Status: doc.StatusEncrypted, Err: "文件已加密"}
+		}
+		return extractLegacyAny(p, legacyFamily[ext], opt)
+	}
 	switch f.h {
 	case hText:
 		return extractText(p, opt)
@@ -98,7 +107,7 @@ func Extract(p, ext string, opt Options) (res doc.Result) {
 	case hPDF:
 		return extractPDF(p, opt)
 	case hLegacy:
-		return extractLegacy(p, ext, opt.Timeout)
+		return extractLegacyAny(p, ext, opt)
 	case hImage:
 		return extractImage(p, ext, opt)
 	case hZip, hEML, hMbox, hMSG:

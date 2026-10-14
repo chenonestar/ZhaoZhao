@@ -110,7 +110,7 @@ type prepared struct {
 	fts      string
 	nameFTS  string
 	reuse    int64 // 复用该文件的提取结果（内容相同）
-	requeue  bool  // 先保存文字层结果，再排到 OCR 队列
+	requeue  int   // 非 0 时保存结果后把文件重新排到这个队列（OCR、老格式转换）
 	children []*preparedChild
 }
 
@@ -212,12 +212,13 @@ func (m *Manager) inflightIDs() []int64 {
 	return ids
 }
 
-// classOf 决定文件的提取方式：OCR、老格式转换，或普通提取。
-func classOf(f store.File) int {
+// classOf 决定文件的提取方式：OCR、老格式转换（LibreOffice），或普通提取。
+// 老格式文件先在普通通道用内置解析器读取，处理不了的才排到老格式转换队列（prio=prioLegacy）。
+func classOf(f store.File, loOnly bool) int {
 	switch {
 	case f.Prio == prioOCR:
 		return prioOCR
-	case extract.IsLegacy(f.Ext):
+	case f.Prio == prioLegacy, loOnly && extract.IsLegacy(f.Ext):
 		return prioLegacy
 	}
 	return prioFast
@@ -268,8 +269,9 @@ func (m *Manager) laneDispatcher(l *lane) {
 		}
 		l.wantWork.Store(true)
 		s.idle.Store(false)
+		loOnly := m.Config().LegacyLOOnly
 		for _, f := range files {
-			j := &job{f: f, class: classOf(f), lane: l, stage: "等待空闲的提取线程", since: time.Now()}
+			j := &job{f: f, class: classOf(f, loOnly), lane: l, stage: "等待空闲的提取线程", since: time.Now()}
 			j.path, _ = m.AbsPath(f.VolumeID, f.RelPath)
 			s.mu.Lock()
 			s.inflight[f.ID] = j
@@ -602,6 +604,7 @@ func (m *Manager) runJob(j *job) {
 
 	useOCR := j.class == prioOCR
 	opts := m.extractOptions(cfg, useOCR)
+	opts.LegacyMode = extract.LegacyNative // 内置解析不了的老格式文件返回 NeedConvert，排到老格式转换队列
 	pool := m.Pool
 	t := worker.Timeouts{Total: opts.Timeout + 15*time.Second}
 	stage := "提取内容"
@@ -615,6 +618,7 @@ func (m *Manager) runJob(j *job) {
 		}
 	case j.class == prioLegacy:
 		stage = "格式转换"
+		opts.LegacyMode = extract.LegacyLO
 		t.Total = extract.LegacyTimeout(opts.Timeout) + 30*time.Second
 		if m.LegacyPool != nil {
 			pool = m.LegacyPool
@@ -641,6 +645,10 @@ func (m *Manager) runJob(j *job) {
 
 // logJob 记录一个文件的处理结果：失败总是记录，成功只在详细日志里记录。
 func (m *Manager) logJob(j *job, res doc.Result, start time.Time, netWait, readDur time.Duration) {
+	if res.NeedConvert {
+		logx.Debugf("%s：%s，排到老格式转换队列（LibreOffice）", logx.P(j.path), res.Err)
+		return
+	}
 	failed := res.Status == doc.StatusFailed
 	if !failed && !logx.Verbose() {
 		return
@@ -727,7 +735,11 @@ func (m *Manager) prepare(f store.File, res doc.Result) *prepared {
 	o := m.Norm()
 	p := &prepared{file: f, res: res, state: stateOf(res), nameFTS: ftsOf(o, f.Name)}
 	if res.NeedOCR && f.Prio != prioOCR && m.ocrEnabled(m.getRoot(f.RootID)) {
-		p.requeue = true // 有页面没有文字层：先保存已有文字，再排到 OCR 队列
+		p.requeue = prioOCR // 有页面没有文字层：先保存已有文字，再排到 OCR 队列
+	}
+	if res.NeedConvert && f.Prio != prioLegacy {
+		p.requeue = prioLegacy // 内置解析器处理不了的老格式文件：排到老格式转换队列
+		return p
 	}
 	if res.Status == doc.StatusOK || len(res.Children) > 0 {
 		p.text = &store.Text{Text: res.Text, LineBased: res.LineBased, Locs: res.Locs}
@@ -862,8 +874,8 @@ func (m *Manager) writeOne(tx *sql.Tx, p *prepared) error {
 	if err := store.PutResult(tx, f.ID, p.state, p.res.Err, p.res.Hash, p.res.OCR, p.text, p.fts, p.nameFTS); err != nil {
 		return err
 	}
-	if p.requeue {
-		if _, err := tx.Exec(`UPDATE files SET state=?, err='', prio=? WHERE id=?`, store.StatePending, prioOCR, f.ID); err != nil {
+	if p.requeue != 0 {
+		if _, err := tx.Exec(`UPDATE files SET state=?, err='', prio=? WHERE id=?`, store.StatePending, p.requeue, f.ID); err != nil {
 			return err
 		}
 	}

@@ -3,6 +3,7 @@ package extract
 
 import (
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -99,6 +100,18 @@ func Supported(ext string) bool {
 
 // IsLegacy 是否为需要转换组件的老格式（优先级较低）。
 func IsLegacy(ext string) bool { return formats[ext].h == hLegacy }
+
+// LegacyExts 返回全部老格式扩展名。
+func LegacyExts() []string {
+	var out []string
+	for e, f := range formats {
+		if f.h == hLegacy {
+			out = append(out, e)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
 
 // IsImage 是否为图片（需要 OCR）。
 func IsImage(ext string) bool { return formats[ext].h == hImage }

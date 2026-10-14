@@ -32,6 +32,7 @@ type Config struct {
 	Workers           int  `json:"workers"`         // 提取并发数，0 表示 CPU 核心数的一半
 	TimeoutSec        int  `json:"timeoutSec"`      // 单文件提取超时
 	LegacyWorkers     int  `json:"legacyWorkers"`   // 老格式转换并发数
+	LegacyLOOnly      bool `json:"legacyLOOnly"`    // 老格式只用 LibreOffice 转换，不用内置解析（排查问题用）
 	OCREnabled        bool `json:"ocrEnabled"`      // OCR 总开关
 	OCRWorkers        int  `json:"ocrWorkers"`      // OCR 并发数（每个占用较多内存），0 表示自动
 	NetworkScanMin    int  `json:"networkScanMin"`  // 网络盘定时扫描间隔（分钟）

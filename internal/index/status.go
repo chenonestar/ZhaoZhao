@@ -56,30 +56,30 @@ type SlotStatus struct {
 
 // Status 是整体状态。
 type Status struct {
-	Paused      bool           `json:"paused"`
-	Idle        bool           `json:"idle"`
-	Workers     int            `json:"workers"`
-	Active      int            `json:"active"`
-	Current     []CurrentJob   `json:"current"`
-	Totals      store.Counts   `json:"totals"`
-	OCRQueue    int64          `json:"ocrQueue"`
-	LegacyQueue int64          `json:"legacyQueue"`
-	FastQueue   int64          `json:"fastQueue"`
+	Paused      bool         `json:"paused"`
+	Idle        bool         `json:"idle"`
+	Workers     int          `json:"workers"`
+	Active      int          `json:"active"`
+	Current     []CurrentJob `json:"current"`
+	Totals      store.Counts `json:"totals"`
+	OCRQueue    int64        `json:"ocrQueue"`
+	LegacyQueue int64        `json:"legacyQueue"`
+	FastQueue   int64        `json:"fastQueue"`
 	// 各通道的预计剩余时间（秒）：按最近单个文件的平均耗时和并发数估算；0 表示还无法估算
-	OCREtaSec    int64 `json:"ocrEtaSec"`
-	LegacyEtaSec int64 `json:"legacyEtaSec"`
-	FastEtaSec   int64 `json:"fastEtaSec"`
-	Legacy      SlotStatus     `json:"legacy"`
-	OCR         SlotStatus     `json:"ocr"`
-	Net         SlotStatus     `json:"net"`
-	StalledSec  int64          `json:"stalledSec"` // >0：疑似卡住，这么多秒没有任何进展
-	Rebuilding  bool           `json:"rebuilding"`
-	Corrupt     bool           `json:"corrupt"`
-	OnBattery   bool           `json:"onBattery"`
-	Scanning    bool           `json:"scanning"`
-	Processed   int64          `json:"processed"`
-	Roots       []RootStatus   `json:"roots"`
-	Volumes     []VolumeStatus `json:"volumes"`
+	OCREtaSec    int64          `json:"ocrEtaSec"`
+	LegacyEtaSec int64          `json:"legacyEtaSec"`
+	FastEtaSec   int64          `json:"fastEtaSec"`
+	Legacy       SlotStatus     `json:"legacy"`
+	OCR          SlotStatus     `json:"ocr"`
+	Net          SlotStatus     `json:"net"`
+	StalledSec   int64          `json:"stalledSec"` // >0：疑似卡住，这么多秒没有任何进展
+	Rebuilding   bool           `json:"rebuilding"`
+	Corrupt      bool           `json:"corrupt"`
+	OnBattery    bool           `json:"onBattery"`
+	Scanning     bool           `json:"scanning"`
+	Processed    int64          `json:"processed"`
+	Roots        []RootStatus   `json:"roots"`
+	Volumes      []VolumeStatus `json:"volumes"`
 	// Components 是外部组件（LibreOffice、OCR）的自检结果
 	Components         []extract.ComponentStatus `json:"components"`
 	ComponentsChecking bool                      `json:"componentsChecking"`
