@@ -188,6 +188,17 @@ func (s *Server) routes(mux *http.ServeMux) {
 		p, _ := s.pendingPanel.Swap("").(string)
 		writeJSON(w, map[string]string{"panel": p})
 	})
+	h("/api/space/stats", func(w http.ResponseWriter, r *http.Request) {
+		st, err := s.M.SpaceStats()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, st)
+	})
+	h("/api/space/compact", s.post(func(r *http.Request) (any, error) {
+		return ok(), s.M.StartCompact()
+	}))
 	h("/api/legacytest", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.M.LegacyTest()) })
 	h("/api/legacytest/start", s.post(func(r *http.Request) (any, error) {
 		var b struct {

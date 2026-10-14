@@ -80,7 +80,7 @@ func TestScale(t *testing.T) {
 					return err
 				}
 				fts := norm.FTSText(norm.Tokenize(o.Runes(text)))
-				if err := store.PutResult(tx, f.ID, store.StateDone, "", "", false, &store.Text{Text: text, LineBased: true}, fts, nf); err != nil {
+				if err := db.PutResult(tx, f.ID, store.StateDone, "", "", false, &store.Text{Text: text, LineBased: true}, fts, nf); err != nil {
 					return err
 				}
 			}

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
-import type { Config, FailedItem, HotkeyState, LegacyTestState, RootStatus, SlotStatus, Status } from "./types";
+import type { Config, FailedItem, HotkeyState, LegacyTestState, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
 import { fmtDuration, fmtSize, fmtTime } from "./util";
 import { FolderPicker } from "./FolderPicker";
 import { Help } from "./Help";
@@ -149,6 +149,8 @@ function IndexTab({ status, refresh }: { status: Status | null; refresh: () => v
         </tbody>
       </table>
 
+      <SpaceSection status={status} run={run} />
+
       <div className="section-head"><h4>磁盘</h4></div>
       <table className="grid">
         <thead><tr><th>卷标</th><th>状态</th><th>文件数</th><th>索引占用</th><th /></tr></thead>
@@ -170,6 +172,79 @@ function IndexTab({ status, refresh }: { status: Status | null; refresh: () => v
       {picker && <FolderPicker onClose={() => setPicker(false)} onPick={(p) => { setPicker(false); run(api.addRoot(p)); }} />}
       {optsFor && <RootOptsDialog root={optsFor} onClose={() => setOptsFor(null)} onSave={(o) => { setOptsFor(null); run(api.rootOpts(optsFor.id, o)); }} />}
     </div>
+  );
+}
+
+// 索引库占用的空间：概况、后台整理进度、详细统计、压缩。
+function SpaceSection({ status, run }: { status: Status; run: (p: Promise<unknown>) => void }) {
+  const sp = status.space;
+  const [detail, setDetail] = useState<SpaceDetail | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  if (!sp) return null;
+  const pct = (a: number, b: number) => (b > 0 ? Math.round((a * 100) / b) + "%" : "");
+  return (
+    <>
+      <div className="section-head"><h4>索引库占用空间</h4></div>
+      <div className="small">
+        <div>
+          索引库 {fmtSize(sp.dbBytes)}{sp.walBytes > 0 && `，临时日志 ${fmtSize(sp.walBytes)}`}
+          {sp.freeBytes > 0 && <>，其中空闲 {fmtSize(sp.freeBytes)}（{sp.incremental ? "空闲时自动归还磁盘" : "点「压缩索引库」归还磁盘"}）</>}
+        </div>
+        {status.maintenance && <div className="dim">{status.maintenance}</div>}
+        {sp.compacting && <div className="dim">正在压缩索引库…（期间可以搜索，新的提取结果稍后写入）</div>}
+        {sp.lastCompact && !sp.compacting && <div className="dim">{sp.lastCompact}</div>}
+        <div className="btns">
+          <button disabled={busy} onClick={() => {
+            setBusy(true); setErr("");
+            api.spaceStats().then(setDetail).catch((e) => setErr(e.message)).finally(() => setBusy(false));
+          }}>{busy ? "正在统计…" : "统计详情"}</button>
+          <button disabled={sp.compacting} onClick={() => {
+            if (confirm("压缩索引库会重写整个索引库，把空闲空间还给磁盘，并改为以后空闲时自动归还。\n" +
+              "需要与索引库差不多大的临时磁盘空间，可能需要几分钟；期间可以搜索，新的提取结果稍后写入。继续吗？")) run(api.compact());
+          }}>压缩索引库</button>
+        </div>
+        {err && <div className="error">{err}</div>}
+        {detail && (
+          <div className="space-detail">
+            <table className="grid">
+              <thead><tr><th>组成</th><th>大小</th><th>占比</th></tr></thead>
+              <tbody>
+                {(detail.parts ?? []).map((p) => (
+                  <tr key={p.name}><td>{p.name}</td><td className="num">{fmtSize(p.bytes)}</td><td className="num">{pct(p.bytes, detail.dbBytes)}</td></tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="dim">
+              提取文本 {detail.texts} 份，{detail.textFiles} 个文件引用（{detail.textFiles - detail.texts} 个与其他内容相同的文件共用），共 {detail.rawChars.toLocaleString()} 字
+              {detail.legacy > 0 && `；${detail.legacy} 份还是旧格式，后台正在重新压缩`}
+            </div>
+            <table className="grid">
+              <thead><tr><th>扩展名</th><th>提取文本份数</th><th>大小（压缩后）</th></tr></thead>
+              <tbody>
+                {(detail.byExt ?? []).map((x) => (
+                  <tr key={x.name}><td>{x.name}</td><td className="num">{x.count}</td><td className="num">{fmtSize(x.bytes)}</td></tr>
+                ))}
+              </tbody>
+            </table>
+            <details>
+              <summary>最大的 {detail.biggest?.length ?? 0} 份提取文本</summary>
+              <table className="grid">
+                <tbody>
+                  {(detail.biggest ?? []).map((b, i) => (
+                    <tr key={b.fileId}>
+                      <td className="small">{detail.biggestPaths?.[i]}</td>
+                      <td className="num">{fmtSize(b.bytes)}</td>
+                      <td className="num">{b.chars.toLocaleString()} 字{b.sharers > 1 ? `，${b.sharers} 个文件共用` : ""}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 

@@ -1,5 +1,5 @@
 import type {
-  Config, FailedItem, FsListing, HotkeyState, LegacyTestState, Notice, Preview, Saved, SearchOpts, SearchResponse, Status,
+  Config, FailedItem, FsListing, HotkeyState, LegacyTestState, Notice, SpaceDetail, Preview, Saved, SearchOpts, SearchResponse, Status,
 } from "./types";
 
 export class ApiError extends Error {
@@ -47,6 +47,8 @@ export const api = {
   checkComponents: () => post("/api/components/check"),
   hotkey: () => call<HotkeyState>("/api/hotkey"),
   uiPending: () => call<{ panel: string }>("/api/ui/pending"),
+  spaceStats: () => call<SpaceDetail>("/api/space/stats"),
+  compact: () => post("/api/space/compact"),
   legacyTest: () => call<LegacyTestState>("/api/legacytest"),
   startLegacyTest: (perExt: number) => post("/api/legacytest/start", { perExt }),
   cancelLegacyTest: () => post("/api/legacytest/cancel"),

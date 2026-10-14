@@ -47,7 +47,7 @@ func newEngine(t *testing.T, docs []doc) *Engine {
 				return err
 			}
 			fts := norm.FTSText(norm.Tokenize(o.Runes(d.text)))
-			return store.PutResult(tx, f.ID, store.StateDone, "", "", false, &store.Text{Text: d.text, LineBased: true}, fts, nameFTS)
+			return db.PutResult(tx, f.ID, store.StateDone, "", "", false, &store.Text{Text: d.text, LineBased: true}, fts, nameFTS)
 		})
 		if err != nil {
 			t.Fatal(err)

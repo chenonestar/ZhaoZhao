@@ -743,6 +743,7 @@ func (m *Manager) prepare(f store.File, res doc.Result) *prepared {
 	}
 	if res.Status == doc.StatusOK || len(res.Children) > 0 {
 		p.text = &store.Text{Text: res.Text, LineBased: res.LineBased, Locs: res.Locs}
+		m.DB.Encode(p.text) // 在提取线程里压缩（可并行），写入线程只管写
 		p.fts = ftsOf(o, res.Text)
 		if len(res.Children) > 0 && (res.Status == doc.StatusNoContent || res.Status == doc.StatusSkipped) {
 			p.state = store.StateDone
@@ -767,6 +768,7 @@ func (m *Manager) prepare(f store.File, res doc.Result) *prepared {
 		}
 		if c.Status == doc.StatusOK {
 			pc.text = &store.Text{Text: c.Text, LineBased: c.LineBased, Locs: c.Locs}
+			m.DB.Encode(pc.text)
 			pc.fts = ftsOf(o, c.Text)
 		}
 		p.children = append(p.children, pc)
@@ -871,7 +873,7 @@ func (m *Manager) writeOne(tx *sql.Tx, p *prepared) error {
 			return err
 		}
 	}
-	if err := store.PutResult(tx, f.ID, p.state, p.res.Err, p.res.Hash, p.res.OCR, p.text, p.fts, p.nameFTS); err != nil {
+	if err := m.DB.PutResult(tx, f.ID, p.state, p.res.Err, p.res.Hash, p.res.OCR, p.text, p.fts, p.nameFTS); err != nil {
 		return err
 	}
 	if p.requeue != 0 {
@@ -892,7 +894,7 @@ func (m *Manager) writeOne(tx *sql.Tx, p *prepared) error {
 		} else if err != nil {
 			return err
 		}
-		if err := store.PutResult(tx, cf.ID, c.state, c.err, "", c.ocr, c.text, c.fts, c.nameFTS); err != nil {
+		if err := m.DB.PutResult(tx, cf.ID, c.state, c.err, "", c.ocr, c.text, c.fts, c.nameFTS); err != nil {
 			return err
 		}
 		if c.meta != "" {

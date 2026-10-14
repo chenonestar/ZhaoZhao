@@ -1,0 +1,316 @@
+package index
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/chenonestar/zhaozhao/internal/logx"
+	"github.com/chenonestar/zhaozhao/internal/store"
+)
+
+// 后台整理索引库（F-BG-13）：
+//   - 用已提取的文本训练压缩词典；把旧格式（0.1.x 的 zlib）或没用词典的文本重新压缩；
+//     把内容相同的文件各存的一份文本合并成一份；
+//   - 空闲时把 WAL 写回主文件并截短，把空闲页还给磁盘（增量回收模式的索引库）。
+// 进度记在索引库里，退出后下次启动接着做；索引繁忙时放慢，不和提取抢资源。
+
+// maintainDelay 是启动后开始整理前的等待（避开启动时的扫描高峰）；测试里调短。
+var maintainDelay = 20 * time.Second
+
+// dedupeEvery：空闲时每隔这么久再检查一次有没有内容相同却各存一份的文本
+// （同时提取两个相同的文件时会各存一份）。
+const dedupeEvery = 24 * time.Hour
+
+type maintState struct {
+	mu           sync.Mutex
+	stage        string // 正在做的事，空表示没有
+	recompressed int
+	deduped      int
+	saved        int64
+	compacting   bool
+	lastCompact  string
+}
+
+// Maintenance 返回后台整理的进度说明（没有在整理时为空）。
+func (m *Manager) Maintenance() string {
+	t := &m.maint
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stage == "" {
+		return ""
+	}
+	s := t.stage
+	var parts []string
+	if t.recompressed > 0 {
+		parts = append(parts, fmt.Sprintf("已重新压缩 %d 份文本", t.recompressed))
+	}
+	if t.deduped > 0 {
+		parts = append(parts, fmt.Sprintf("%d 个内容相同的文件改为共用一份文本", t.deduped))
+	}
+	if t.saved > 1<<20 {
+		parts = append(parts, "节省约 "+fmtBytes(t.saved))
+	}
+	if len(parts) > 0 {
+		s += "：" + strings.Join(parts, "，")
+	}
+	return s
+}
+
+func (m *Manager) setMaint(stage string) {
+	m.maint.mu.Lock()
+	m.maint.stage = stage
+	m.maint.mu.Unlock()
+}
+
+func (m *Manager) addMaint(st store.MigrateStats) {
+	m.maint.mu.Lock()
+	m.maint.recompressed += st.Recompressed
+	m.maint.deduped += st.Deduped
+	m.maint.saved += st.SavedBytes
+	m.maint.mu.Unlock()
+}
+
+func (m *Manager) sleep(d time.Duration) bool {
+	select {
+	case <-m.ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
+// throttle 在两批之间稍作停顿：索引繁忙时停得久一些。
+func (m *Manager) throttle() bool {
+	if m.sched.idle.Load() {
+		return m.sleep(5 * time.Millisecond)
+	}
+	return m.sleep(300 * time.Millisecond)
+}
+
+func (m *Manager) maintainLoop() {
+	defer m.wg.Done()
+	if !m.sleep(maintainDelay) {
+		return
+	}
+	for {
+		m.migrateTexts()
+		if m.sched.idle.Load() {
+			m.housekeeping()
+		}
+		if !m.sleep(time.Minute) {
+			return
+		}
+	}
+}
+
+// migrateTexts 训练词典、合并重复文本、重新压缩旧格式文本。每一步都可以中途退出，下次接着做。
+func (m *Manager) migrateTexts() {
+	db := m.DB
+	if !db.HasDict() {
+		if ok, err := db.TrainDict(); err != nil {
+			m.logf("训练压缩词典失败: %v", err)
+		} else if ok {
+			m.logf("已用本机已提取的文本训练出压缩词典，之后的文本都用它压缩")
+		}
+	}
+	defer m.setMaint("")
+	start := time.Now()
+	var total store.MigrateStats
+	add := func(st store.MigrateStats) {
+		m.addMaint(st)
+		total.Recompressed += st.Recompressed
+		total.Deduped += st.Deduped
+		total.SavedBytes += st.SavedBytes
+	}
+
+	last, _ := db.GetMeta("texts_deduped_at")
+	t, _ := strconv.ParseInt(last, 10, 64)
+	if t == 0 || (time.Since(time.Unix(t, 0)) > dedupeEvery && m.sched.idle.Load()) {
+		m.setMaint("正在整理索引库")
+		for m.ctx.Err() == nil {
+			g, st, err := db.DedupeBatch(200)
+			if err != nil {
+				m.logf("合并重复文本失败: %v", err)
+				return
+			}
+			add(st)
+			if g == 0 {
+				_ = db.SetMeta("texts_deduped_at", strconv.FormatInt(time.Now().Unix(), 10))
+				break
+			}
+			if !m.throttle() {
+				return
+			}
+		}
+	}
+
+	if db.HasDict() {
+		if done, _ := db.GetMeta("texts_recompressed"); done != "1" {
+			m.setMaint("正在整理索引库（升级为新的压缩格式）")
+			v, _ := db.GetMeta("recompress_after")
+			after, _ := strconv.ParseInt(v, 10, 64)
+			for m.ctx.Err() == nil {
+				next, st, err := db.RecompressBatch(after, 100)
+				if err != nil {
+					m.logf("重新压缩文本失败: %v", err)
+					return
+				}
+				add(st)
+				if next == 0 {
+					_ = db.SetMeta("texts_recompressed", "1")
+					break
+				}
+				after = next
+				_ = db.SetMeta("recompress_after", strconv.FormatInt(after, 10))
+				if !m.throttle() {
+					return
+				}
+			}
+		}
+	}
+	if total.Recompressed+total.Deduped > 0 {
+		sp := db.Space()
+		m.logf("索引库整理完成：重新压缩 %d 份文本，%d 个内容相同的文件改为共用一份文本，节省约 %s，用时 %s；目前可回收 %s%s",
+			total.Recompressed, total.Deduped, fmtBytes(total.SavedBytes), fmtDuration(time.Since(start)), fmtBytes(sp.FreeBytes),
+			map[bool]string{true: "（空闲时自动归还磁盘）", false: "（可在「索引」页点「压缩索引库」归还磁盘）"}[sp.Incremental])
+	}
+}
+
+// housekeeping 空闲时：WAL 写回主文件并截短；增量回收模式下把空闲页还给磁盘。
+func (m *Manager) housekeeping() {
+	db := m.DB
+	sp := db.Space()
+	if sp.WALBytes > 0 {
+		if err := db.Checkpoint(); err != nil {
+			logx.Debugf("WAL 检查点失败: %v", err)
+		}
+	}
+	if !sp.Incremental || sp.FreeBytes < 32<<20 {
+		return
+	}
+	start := sp.FreeBytes
+	for m.ctx.Err() == nil && m.sched.idle.Load() {
+		if err := db.IncrementalVacuum(4096); err != nil {
+			m.logf("归还磁盘空间失败: %v", err)
+			return
+		}
+		sp = db.Space()
+		if sp.FreeBytes == 0 || !m.sleep(50*time.Millisecond) {
+			break
+		}
+	}
+	_ = db.Checkpoint()
+	if freed := start - sp.FreeBytes; freed > 0 {
+		m.logf("空闲时归还了 %s 磁盘空间", fmtBytes(freed))
+	}
+}
+
+// StartCompact 在后台压缩索引库（VACUUM）：把空闲空间全部还给磁盘，并改为增量回收模式。
+// 期间可以搜索，新的提取结果等压缩完成后再写入。
+func (m *Manager) StartCompact() error {
+	t := &m.maint
+	t.mu.Lock()
+	if t.compacting {
+		t.mu.Unlock()
+		return fmt.Errorf("正在压缩索引库")
+	}
+	t.compacting = true
+	t.mu.Unlock()
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		before := m.DB.Space()
+		m.logf("开始压缩索引库：%s，其中空闲 %s", fmtBytes(before.DBBytes+before.WALBytes), fmtBytes(before.FreeBytes))
+		start := time.Now()
+		err := m.DB.Vacuum()
+		after := m.DB.Space()
+		var msg string
+		if err != nil {
+			msg = "压缩索引库失败：" + err.Error()
+			if strings.Contains(strings.ToLower(err.Error()), "full") {
+				msg += "（磁盘空间不足：压缩时需要与索引库差不多大的临时空间）"
+			}
+		} else {
+			msg = fmt.Sprintf("压缩完成：%s → %s，用时 %s", fmtBytes(before.DBBytes+before.WALBytes), fmtBytes(after.DBBytes+after.WALBytes), fmtDuration(time.Since(start)))
+		}
+		m.logf("%s", msg)
+		t.mu.Lock()
+		t.compacting = false
+		t.lastCompact = msg
+		t.mu.Unlock()
+	}()
+	return nil
+}
+
+// SpaceStatus 是界面显示的空间信息。
+type SpaceStatus struct {
+	store.SpaceInfo
+	Compacting  bool   `json:"compacting"`
+	LastCompact string `json:"lastCompact,omitempty"`
+}
+
+// Space 返回索引库空间概况（很快）。
+func (m *Manager) Space() SpaceStatus {
+	s := SpaceStatus{SpaceInfo: m.DB.Space()}
+	m.maint.mu.Lock()
+	s.Compacting, s.LastCompact = m.maint.compacting, m.maint.lastCompact
+	m.maint.mu.Unlock()
+	return s
+}
+
+// SpaceDetail 是详细的空间统计，大文本带上文件路径。
+type SpaceDetail struct {
+	*store.SpaceStats
+	BiggestPaths []string `json:"biggestPaths"`
+}
+
+// SpaceStats 统计索引库空间（读遍整个索引库，较慢）。
+func (m *Manager) SpaceStats() (*SpaceDetail, error) {
+	st, err := m.DB.Stats()
+	if err != nil {
+		return nil, err
+	}
+	d := &SpaceDetail{SpaceStats: st}
+	for _, b := range st.Biggest {
+		p := ""
+		if f, err := m.DB.GetFile(b.FileID); err == nil && f != nil {
+			p, _ = m.AbsPath(f.VolumeID, f.RelPath)
+			if p == "" {
+				p = f.RelPath
+			}
+			if f.Inner != "" {
+				p += " › " + f.Inner
+			}
+		}
+		d.BiggestPaths = append(d.BiggestPaths, p)
+	}
+	return d, nil
+}
+
+// SpaceText 把空间统计写成文字（诊断信息用）。
+func SpaceText(d *SpaceDetail) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "索引库 %s，WAL %s，空闲 %s（%s）\n", fmtBytes(d.DBBytes), fmtBytes(d.WALBytes), fmtBytes(d.FreeBytes),
+		map[bool]string{true: "增量回收模式", false: "需手动压缩才能归还"}[d.Incremental])
+	for _, p := range d.Parts {
+		fmt.Fprintf(&b, "  %s：%s\n", p.Name, fmtBytes(p.Bytes))
+	}
+	fmt.Fprintf(&b, "提取文本 %d 份，%d 个文件引用（%d 个与其他文件共用），共 %d 字；旧格式（待重新压缩）%d 份\n",
+		d.Texts, d.TextFiles, d.TextFiles-d.Texts, d.RawChars, d.Legacy)
+	b.WriteString("各扩展名的提取文本（压缩后）：\n")
+	for _, x := range d.ByExt {
+		fmt.Fprintf(&b, "  %s：%d 份，%s\n", x.Name, x.Count, fmtBytes(x.Bytes))
+	}
+	b.WriteString("最大的提取文本：\n")
+	for i, x := range d.Biggest {
+		p := ""
+		if i < len(d.BiggestPaths) {
+			p = d.BiggestPaths[i]
+		}
+		fmt.Fprintf(&b, "  %s：%s，%d 字，%d 个文件共用\n", logx.P(p), fmtBytes(x.Bytes), x.Chars, x.Sharers)
+	}
+	return b.String()
+}

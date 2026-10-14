@@ -2,19 +2,16 @@
 package store
 
 import (
-	"bytes"
-	"compress/zlib"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
-	"github.com/chenonestar/zhaozhao/internal/doc"
 	_ "modernc.org/sqlite"
 )
 
@@ -28,12 +25,15 @@ const (
 )
 
 // SchemaVersion 是当前索引库格式版本。
-const SchemaVersion = 1
+//   - 2：内容相同的文件共用一份提取文本（files.text_id → texts.id），文本改用 zstd 压缩。
+const SchemaVersion = 2
 
 type DB struct {
 	W    *sql.DB // 唯一的写连接
 	R    *sql.DB // 读连接池
 	Path string
+
+	cdc atomic.Pointer[codec] // 提取文本的编解码器（训练出词典后替换）
 }
 
 const schema = `
@@ -53,16 +53,28 @@ CREATE TABLE IF NOT EXISTS files(
   size INTEGER NOT NULL DEFAULT 0, mtime INTEGER NOT NULL DEFAULT 0,
   state INTEGER NOT NULL DEFAULT 0, err TEXT NOT NULL DEFAULT '', hash TEXT NOT NULL DEFAULT '',
   text_len INTEGER NOT NULL DEFAULT 0, ocr INTEGER NOT NULL DEFAULT 0, meta TEXT NOT NULL DEFAULT '',
-  prio INTEGER NOT NULL DEFAULT 1, indexed_at INTEGER NOT NULL DEFAULT 0,
+  prio INTEGER NOT NULL DEFAULT 1, indexed_at INTEGER NOT NULL DEFAULT 0, text_id INTEGER NOT NULL DEFAULT 0,
   UNIQUE(volume_id, rel_path, inner));
 CREATE INDEX IF NOT EXISTS files_root ON files(root_id);
 CREATE INDEX IF NOT EXISTS files_state ON files(state, prio, id);
 CREATE INDEX IF NOT EXISTS files_hash ON files(hash) WHERE hash <> '';
 CREATE INDEX IF NOT EXISTS files_stats ON files(root_id, state, prio, ocr);
 CREATE INDEX IF NOT EXISTS files_queue ON files(prio, mtime) WHERE state=0;
-CREATE TABLE IF NOT EXISTS texts(file_id INTEGER PRIMARY KEY, flags INTEGER NOT NULL DEFAULT 0, data BLOB NOT NULL, locs BLOB);
+CREATE TABLE IF NOT EXISTS texts(id INTEGER PRIMARY KEY, flags INTEGER NOT NULL DEFAULT 0, data BLOB NOT NULL, locs BLOB);
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(c, n, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 0');
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_v USING fts5vocab(fts, 'row');
+`
+
+// schemaV2 在升级（schemaUpgrades）之后执行：依赖 files.text_id 的索引和触发器。
+// 没有文件引用的文本自动删除：文件被删除、重新提取、内容变化时都不必另外处理文本。
+const schemaV2 = `
+CREATE INDEX IF NOT EXISTS files_text ON files(text_id) WHERE text_id>0;
+CREATE TRIGGER IF NOT EXISTS files_text_del AFTER DELETE ON files WHEN OLD.text_id>0 BEGIN
+  DELETE FROM texts WHERE id=OLD.text_id AND NOT EXISTS (SELECT 1 FROM files WHERE text_id=OLD.text_id);
+END;
+CREATE TRIGGER IF NOT EXISTS files_text_upd AFTER UPDATE OF text_id ON files WHEN OLD.text_id>0 AND OLD.text_id<>NEW.text_id BEGIN
+  DELETE FROM texts WHERE id=OLD.text_id AND NOT EXISTS (SELECT 1 FROM files WHERE text_id=OLD.text_id);
+END;
 `
 
 // Open 打开（必要时创建）数据目录下的索引库。
@@ -71,13 +83,28 @@ func Open(dir string) (*DB, error) {
 		return nil, err
 	}
 	p := filepath.Join(dir, "index.db")
-	dsn := "file:" + filepath.ToSlash(p) + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(0)"
+	// journal_size_limit：WAL 文件在检查点之后截短到 64 MB 以内，不会一直占着几百 MB
+	dsn := "file:" + filepath.ToSlash(p) + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(0)&_pragma=journal_size_limit(67108864)"
 	w, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 	w.SetMaxOpenConns(1)
+	// 新建的索引库用增量回收：删除内容后空出的空间可以在空闲时逐步还给磁盘（只能在建表前设置）
+	var tables int
+	_ = w.QueryRow(`SELECT count(*) FROM sqlite_master`).Scan(&tables)
+	if tables == 0 {
+		_, _ = w.Exec(`PRAGMA auto_vacuum=INCREMENTAL`)
+	}
 	if _, err := w.Exec(schema); err != nil {
+		w.Close()
+		return nil, fmt.Errorf("初始化索引库失败: %w", err)
+	}
+	if err := upgradeSchema(w); err != nil {
+		w.Close()
+		return nil, fmt.Errorf("升级索引库失败: %w", err)
+	}
+	if _, err := w.Exec(schemaV2); err != nil {
 		w.Close()
 		return nil, fmt.Errorf("初始化索引库失败: %w", err)
 	}
@@ -88,9 +115,11 @@ func Open(dir string) (*DB, error) {
 	}
 	r.SetMaxOpenConns(8)
 	db := &DB{W: w, R: r, Path: p}
-	if v, _ := db.GetMeta("schema_version"); v == "" {
-		_ = db.SetMeta("schema_version", fmt.Sprint(SchemaVersion))
+	if err := db.loadCodec(); err != nil {
+		db.Close()
+		return nil, err
 	}
+	_ = db.SetMeta("schema_version", fmt.Sprint(SchemaVersion))
 	return db, nil
 }
 
@@ -308,8 +337,7 @@ func (d *DB) RemoveVolume(id string) error {
 func deleteWhere(tx *sql.Tx, cond string, arg any) error {
 	for _, q := range []string{
 		`DELETE FROM fts WHERE rowid IN (SELECT id FROM files WHERE ` + cond + `)`,
-		`DELETE FROM texts WHERE file_id IN (SELECT id FROM files WHERE ` + cond + `)`,
-		`DELETE FROM files WHERE ` + cond,
+		`DELETE FROM files WHERE ` + cond, // 文本由触发器删除
 	} {
 		if _, err := tx.Exec(q, arg); err != nil {
 			return err
@@ -411,10 +439,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,0)`,
 		if _, err := tx.Exec(`DELETE FROM fts WHERE rowid=?`, id); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM texts WHERE file_id=?`, id); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`UPDATE files SET root_id=?,name=?,ext=?,kind=?,size=?,mtime=?,state=?,err=?,hash=?,text_len=0,ocr=0,meta=?,prio=?,indexed_at=0 WHERE id=?`,
+		if _, err := tx.Exec(`UPDATE files SET root_id=?,name=?,ext=?,kind=?,size=?,mtime=?,state=?,err=?,hash=?,text_len=0,ocr=0,meta=?,prio=?,indexed_at=0,text_id=0 WHERE id=?`,
 			f.RootID, f.Name, f.Ext, f.Kind, f.Size, f.MTime, f.State, f.Err, f.Hash, f.Meta, f.Prio, id); err != nil {
 			return err
 		}
@@ -462,7 +487,6 @@ func DeleteFilesTx(tx *sql.Tx, ids []int64) error {
 func deleteChildren(tx *sql.Tx, vol, rel string) error {
 	for _, q := range []string{
 		`DELETE FROM fts WHERE rowid IN (SELECT id FROM files WHERE volume_id=?1 AND rel_path=?2 AND inner<>'')`,
-		`DELETE FROM texts WHERE file_id IN (SELECT id FROM files WHERE volume_id=?1 AND rel_path=?2 AND inner<>'')`,
 		`DELETE FROM files WHERE volume_id=?1 AND rel_path=?2 AND inner<>''`,
 	} {
 		if _, err := tx.Exec(q, vol, rel); err != nil {
@@ -561,128 +585,6 @@ func (d *DB) PendingByPrio(prio int) (int64, error) {
 	var n int64
 	err := d.R.QueryRow(`SELECT COUNT(*) FROM files WHERE state=0 AND prio=?`, prio).Scan(&n)
 	return n, err
-}
-
-// ---- 文本 ----
-
-// Text 是提取结果的存储形式。
-type Text struct {
-	LineBased bool
-	Text      string
-	Locs      []Loc
-}
-
-// Loc 记录从 Offset（字符偏移）开始的内容所在位置，如「第 3 页」「Sheet1!B2」。
-type Loc = doc.Loc
-
-func deflate(b []byte) []byte {
-	var buf bytes.Buffer
-	zw, _ := zlib.NewWriterLevel(&buf, zlib.BestSpeed)
-	zw.Write(b)
-	zw.Close()
-	return buf.Bytes()
-}
-
-func inflate(b []byte) ([]byte, error) {
-	zr, err := zlib.NewReader(bytes.NewReader(b))
-	if err != nil {
-		return nil, err
-	}
-	defer zr.Close()
-	return io.ReadAll(zr)
-}
-
-// PutResult 记录提取结果。text 为 nil 表示无文本（失败、加密等）。
-func PutResult(tx *sql.Tx, id int64, state int, errMsg string, hash string, ocr bool, t *Text, ftsText, nameFTS string) error {
-	if _, err := tx.Exec(`DELETE FROM fts WHERE rowid=?`, id); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM texts WHERE file_id=?`, id); err != nil {
-		return err
-	}
-	n := 0
-	if t != nil {
-		n = len([]rune(t.Text))
-		var locs []byte
-		if len(t.Locs) > 0 {
-			b, _ := json.Marshal(t.Locs)
-			locs = deflate(b)
-		}
-		flags := 0
-		if t.LineBased {
-			flags |= 1
-		}
-		if _, err := tx.Exec(`INSERT INTO texts(file_id,flags,data,locs) VALUES(?,?,?,?)`, id, flags, deflate([]byte(t.Text)), locs); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.Exec(`INSERT INTO fts(rowid,c,n) VALUES(?,?,?)`, id, ftsText, nameFTS); err != nil {
-		return err
-	}
-	_, err := tx.Exec(`UPDATE files SET state=?, err=?, hash=CASE WHEN ?<>'' THEN ? ELSE hash END, text_len=?, ocr=?, indexed_at=? WHERE id=?`,
-		state, errMsg, hash, hash, n, b2i(ocr), time.Now().Unix(), id)
-	return err
-}
-
-// GetText 读取某文件的提取文本。
-func (d *DB) GetText(id int64) (*Text, error) {
-	var flags int
-	var data, locs []byte
-	err := d.R.QueryRow(`SELECT flags,data,locs FROM texts WHERE file_id=?`, id).Scan(&flags, &data, &locs)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	raw, err := inflate(data)
-	if err != nil {
-		return nil, err
-	}
-	t := &Text{LineBased: flags&1 != 0, Text: string(raw)}
-	if len(locs) > 0 {
-		lb, err := inflate(locs)
-		if err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(lb, &t.Locs); err != nil {
-			return nil, err
-		}
-	}
-	return t, nil
-}
-
-// CopyResult 把 src 文件的提取结果复用给 dst（内容相同的文件，F-BG-03）。
-func CopyResult(tx *sql.Tx, src, dst int64, ftsText, nameFTS string) error {
-	if _, err := tx.Exec(`DELETE FROM texts WHERE file_id=?`, dst); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM fts WHERE rowid=?`, dst); err != nil {
-		return err
-	}
-	res, err := tx.Exec(`INSERT INTO texts(file_id,flags,data,locs) SELECT ?,flags,data,locs FROM texts WHERE file_id=?`, dst, src)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("源文件没有提取文本")
-	}
-	if _, err := tx.Exec(`INSERT INTO fts(rowid,c,n) VALUES(?,?,?)`, dst, ftsText, nameFTS); err != nil {
-		return err
-	}
-	_, err = tx.Exec(`UPDATE files SET state=1, err='', text_len=(SELECT text_len FROM files WHERE id=?1), ocr=(SELECT ocr FROM files WHERE id=?1), indexed_at=? WHERE id=?`,
-		src, time.Now().Unix(), dst)
-	return err
-}
-
-// FindDuplicate 查找已完成提取、内容哈希与大小都相同的另一个文件。
-func (d *DB) FindDuplicate(hash string, size int64, exclude int64) (int64, error) {
-	var id int64
-	err := d.R.QueryRow(`SELECT id FROM files WHERE hash=? AND size=? AND state=1 AND id<>? LIMIT 1`, hash, size, exclude).Scan(&id)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
-	return id, err
 }
 
 // ---- 状态 ----
@@ -851,7 +753,6 @@ func b2i(b bool) int {
 func deleteInner(tx *sql.Tx, cond string, arg any) error {
 	for _, q := range []string{
 		`DELETE FROM fts WHERE rowid IN (SELECT id FROM files WHERE ` + cond + ` AND inner<>'')`,
-		`DELETE FROM texts WHERE file_id IN (SELECT id FROM files WHERE ` + cond + ` AND inner<>'')`,
 		`DELETE FROM files WHERE ` + cond + ` AND inner<>''`,
 	} {
 		if _, err := tx.Exec(q, arg); err != nil {
@@ -923,7 +824,7 @@ func (d *DB) GetSig(volumeID, rel string) (FileSig, bool) {
 // VolumeIndexBytes 估算某个卷的索引占用空间（压缩后的提取文本大小）。
 func (d *DB) VolumeIndexBytes(volID string) (int64, error) {
 	var n sql.NullInt64
-	err := d.R.QueryRow(`SELECT SUM(length(t.data)) FROM texts t JOIN files f ON f.id=t.file_id WHERE f.volume_id=?`, volID).Scan(&n)
+	err := d.R.QueryRow(`SELECT SUM(length(data)) FROM texts WHERE id IN (SELECT text_id FROM files WHERE volume_id=? AND text_id>0)`, volID).Scan(&n)
 	return n.Int64, err
 }
 
@@ -1006,4 +907,33 @@ func (d *DB) TopRanked(match string, k int) ([]Ranked, error) {
 		}
 	}
 	return out, nil
+}
+
+// upgradeSchema 把旧版本的索引库升级到当前格式。升级只改表结构（很快），
+// 旧数据的重新压缩、合并重复文本在后台逐步进行（F-BG-13）。
+func upgradeSchema(w *sql.DB) error {
+	var has int
+	if err := w.QueryRow(`SELECT count(*) FROM pragma_table_info('files') WHERE name='text_id'`).Scan(&has); err != nil {
+		return err
+	}
+	if has > 0 {
+		return nil
+	}
+	// 0.1.x：texts 以 file_id 为主键，一个文件一份。file_id 原样作为文本编号，文件的 text_id 指向它。
+	tx, err := w.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, q := range []string{
+		`ALTER TABLE files ADD COLUMN text_id INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE texts RENAME COLUMN file_id TO id`,
+		`UPDATE files SET text_id=id WHERE id IN (SELECT id FROM texts)`,
+		`DELETE FROM texts WHERE id NOT IN (SELECT text_id FROM files)`, // 旧版本可能留下的孤立文本
+	} {
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("%s: %w", q, err)
+		}
+	}
+	return tx.Commit()
 }

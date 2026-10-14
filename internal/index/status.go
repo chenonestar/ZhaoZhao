@@ -83,6 +83,9 @@ type Status struct {
 	// Components 是外部组件（LibreOffice、OCR）的自检结果
 	Components         []extract.ComponentStatus `json:"components"`
 	ComponentsChecking bool                      `json:"componentsChecking"`
+	// Maintenance 是后台整理索引库的进度（没有在整理时为空）；Space 是索引库占用空间
+	Maintenance string      `json:"maintenance,omitempty"`
+	Space       SpaceStatus `json:"space"`
 }
 
 // currentJobs 返回正在处理的文件，处理得最久的在前。
@@ -134,6 +137,8 @@ func (m *Manager) Status() Status {
 	st := Status{Paused: m.pausedAll.Load(), Rebuilding: m.rebuilding.Load(), Corrupt: m.corrupt.Load(),
 		Workers: m.Config().workers(), OnBattery: onBattery(), Roots: []RootStatus{}, Volumes: []VolumeStatus{}}
 	st.Current = m.currentJobs()
+	st.Maintenance = m.Maintenance()
+	st.Space = m.Space()
 	if s.net != nil {
 		fast := m.laneStat(prioFast)
 		st.Active, st.Workers = fast.Used, fast.Cap

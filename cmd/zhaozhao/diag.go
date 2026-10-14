@@ -98,6 +98,12 @@ func exportDiagnostics(dataDir string, lg *logx.Logger, mgr *index.Manager, anon
 		return "", err
 	}
 
+	if sp, err := mgr.SpaceStats(); err == nil {
+		if err := add("索引空间.txt", index.SpaceText(sp)); err != nil {
+			f.Close()
+			return "", err
+		}
+	}
 	if lt := mgr.LegacyTest(); lt.Report != nil {
 		if err := add("老格式测试.txt", index.LegacyTestText(lt.Report, false)); err != nil {
 			f.Close()

@@ -70,6 +70,7 @@ type Manager struct {
 	LegacyPool *worker.Pool
 
 	ltest   legacyTester // 老格式测试
+	maint   maintState   // 后台整理索引库
 	ocrCfg  extract.OCRConfig
 	DataDir string
 
@@ -210,6 +211,8 @@ func (m *Manager) Start() error {
 	m.startScheduler()
 	m.wg.Add(1)
 	go m.volumeLoop()
+	m.wg.Add(1)
+	go m.maintainLoop()
 	// 启动对账：处理未运行期间发生的变化（F-BG-02）
 	m.RescanAll()
 	return nil

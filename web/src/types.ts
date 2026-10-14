@@ -136,6 +136,34 @@ export interface Status {
   volumes: VolumeStatus[];
   components: ComponentStatus[] | null;
   componentsChecking: boolean;
+  maintenance?: string;
+  space: SpaceStatus;
+}
+
+export interface SpaceStatus {
+  dbBytes: number;
+  walBytes: number;
+  freeBytes: number;
+  incremental: boolean;
+  compacting: boolean;
+  lastCompact?: string;
+}
+
+export interface SpaceItem {
+  name: string;
+  bytes: number;
+  count?: number;
+}
+
+export interface SpaceDetail extends SpaceStatus {
+  parts: SpaceItem[] | null;
+  byExt: SpaceItem[] | null;
+  biggest: { fileId: number; bytes: number; chars: number; sharers: number }[] | null;
+  biggestPaths: string[] | null;
+  texts: number;
+  textFiles: number;
+  rawChars: number;
+  legacy: number;
 }
 
 export interface HotkeyState {
