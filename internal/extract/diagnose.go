@@ -77,11 +77,24 @@ func CheckSoffice() ComponentStatus {
 	defer os.RemoveAll(dir)
 	src := filepath.Join(dir, "check.rtf")
 	_ = os.WriteFile(src, []byte(`{\rtf1\ansi zhaozhaocheck}`), 0o600)
+	// 先试常驻方式（正常索引时用的方式），不可用再试每个文件单独启动
 	start := time.Now()
+	out, err := checkResident(src, dir)
+	if err == nil {
+		r := extractConverted(out, "docx", "")
+		if r.Status == "ok" && strings.Contains(r.Text, "zhaozhaocheck") {
+			st.Seconds = time.Since(start).Seconds()
+			st.OK, st.Message = true, fmt.Sprintf("可用（常驻转换，启动并试转换用时 %.1f 秒）", st.Seconds)
+			return st
+		}
+		err = errors.New("试转换结果不对：" + r.Err)
+	}
+	resident := err.Error()
+	start = time.Now()
 	r := convertLegacy(src, "rtf", 3*time.Minute, filepath.Join(dir, "profile"))
 	st.Seconds = time.Since(start).Seconds()
 	if r.Status == "ok" && strings.Contains(r.Text, "zhaozhaocheck") {
-		st.OK, st.Message = true, fmt.Sprintf("可用（试转换用时 %.1f 秒）", st.Seconds)
+		st.OK, st.Message = true, fmt.Sprintf("可用（试转换用时 %.1f 秒）；常驻转换不可用，每个文件需单独启动，转换较慢：%s", st.Seconds, resident)
 		return st
 	}
 	st.Message = "不可用：" + r.Err

@@ -232,7 +232,7 @@ func loadSecret(dataDir string) string {
 	return s
 }
 
-// cleanStaleTemp 删除上次异常退出遗留的临时目录（LibreOffice 配置、转换与 OCR 中间文件）。
+// cleanStaleTemp 删除上次异常退出遗留的临时目录（LibreOffice 配置、转换与 OCR 中间文件）和桥接脚本。
 func cleanStaleTemp() {
 	ents, err := os.ReadDir(os.TempDir())
 	if err != nil {
@@ -240,7 +240,7 @@ func cleanStaleTemp() {
 	}
 	for _, e := range ents {
 		n := e.Name()
-		if !e.IsDir() || !strings.HasPrefix(n, "zhaozhao-") {
+		if !strings.HasPrefix(n, "zhaozhao-") || (!e.IsDir() && !strings.HasPrefix(n, "zhaozhao-lobridge-")) {
 			continue
 		}
 		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > 10*time.Minute {

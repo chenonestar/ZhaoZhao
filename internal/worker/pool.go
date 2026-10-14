@@ -26,6 +26,32 @@ type proc struct {
 	pid      int
 	lastUsed time.Time
 	jobs     int
+
+	waitOnce sync.Once
+	waitErr  error
+	waited   chan struct{}
+}
+
+// done 返回子进程退出时关闭的通道（只调用一次 cmd.Wait）。
+func (pr *proc) done() <-chan struct{} {
+	pr.waitOnce.Do(func() {
+		pr.waited = make(chan struct{})
+		go func() { pr.waitErr = pr.cmd.Wait(); close(pr.waited) }()
+	})
+	return pr.waited
+}
+
+// exited 等待子进程退出，最多 d。
+func (pr *proc) exited(d time.Duration) bool {
+	if d < 0 {
+		d = 0
+	}
+	select {
+	case <-pr.done():
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
 
 // Pool 管理一组提取子进程。Exe 为空时在当前进程内执行（测试用）。
@@ -180,7 +206,7 @@ func (p *Pool) reapIdle() {
 	p.mu.Unlock()
 	for _, pr := range old {
 		logx.Debugf("%s %d 闲置超过 %v，结束（共处理 %d 个文件）", p.label(), pr.pid, p.IdleTimeout, pr.jobs)
-		p.kill(pr)
+		p.retire(pr, 15*time.Second)
 	}
 }
 
@@ -218,11 +244,25 @@ func (p *Pool) kill(pr *proc) error {
 	}
 	pr.in.Close()
 	killTree(pr.cmd)
-	err := pr.cmd.Wait()
+	<-pr.done()
+	err := pr.waitErr
 	p.mu.Lock()
 	delete(p.live, pr)
 	p.mu.Unlock()
 	return err
+}
+
+// retire 让闲置的子进程正常退出：关闭它的标准输入，子进程会结束常驻的 LibreOffice、OCR 进程并删除
+// 临时配置目录；grace 内没有退出才强制结束。
+func (p *Pool) retire(pr *proc, grace time.Duration) {
+	pr.in.Close()
+	if !pr.exited(grace) {
+		killTree(pr.cmd)
+		<-pr.done()
+	}
+	p.mu.Lock()
+	delete(p.live, pr)
+	p.mu.Unlock()
 }
 
 // Extract 在子进程里提取一个文件（不报告进度，timeout 为总时限）。
@@ -383,9 +423,15 @@ func (p *Pool) Close() {
 	p.idle = nil
 	p.broadcast()
 	p.mu.Unlock()
+	// 先关闭标准输入让子进程自己收尾（结束常驻的 LibreOffice、删除临时配置目录），最多等 3 秒
 	for _, pr := range ps {
 		pr.in.Close()
-		killTree(pr.cmd)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for _, pr := range ps {
+		if !pr.exited(time.Until(deadline)) {
+			killTree(pr.cmd)
+		}
 	}
 }
 

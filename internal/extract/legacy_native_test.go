@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenonestar/zhaozhao/internal/doc"
 )
@@ -123,6 +124,7 @@ func TestRtfNative(t *testing.T) {
 
 // TestLegacyDispatch 按实际内容选择解析器：WPS 文件、扩展名与内容不符、内置解析器处理不了的文件。
 func TestLegacyDispatch(t *testing.T) {
+	t.Cleanup(CleanupWorker)
 	opt := DefaultOptions()
 	opt.LegacyMode = LegacyNative
 	cases := []struct {
@@ -163,4 +165,54 @@ func TestLegacyDispatch(t *testing.T) {
 	opt.LegacyMode = LegacyLO
 	r := Extract(legacyFixture(t, "汇报.ppt"), "ppt", opt)
 	mustContain(t, "LibreOffice 转换的汇报.ppt", r.Text, "季度汇报", "树袋熊")
+}
+
+// TestResidentLO 常驻 LibreOffice：连续转换多个文件只启动一次；转换失败不影响后续文件。
+func TestResidentLO(t *testing.T) {
+	if SofficePath() == "" {
+		t.Skip("没有 LibreOffice")
+	}
+	t.Cleanup(CleanupWorker)
+	opt := DefaultOptions()
+	opt.LegacyMode = LegacyLO
+	files := []struct{ name, want string }{
+		{"合同.doc", "海獭"}, {"报销.xls", "穿山甲"}, {"汇报.ppt", "树袋熊"}, {"脚注.doc", "鸬鹚"},
+	}
+	start := time.Now()
+	for i, f := range files {
+		t0 := time.Now()
+		r := Extract(legacyFixture(t, f.name), Ext(f.name), opt)
+		if r.Status != doc.StatusOK {
+			t.Fatalf("%s：%s %s", f.name, r.Status, r.Err)
+		}
+		mustContain(t, f.name, r.Text, f.want)
+		t.Logf("%d %s 用时 %.2fs", i, f.name, time.Since(t0).Seconds())
+	}
+	if loDisabled != "" {
+		t.Logf("常驻方式不可用（%s），使用了单独启动", loDisabled)
+	} else if loCur == nil || loCur.n != len(files) {
+		t.Errorf("应只启动一次常驻 LibreOffice")
+	}
+	// 损坏的文件：失败，但常驻进程继续可用
+	bad := filepath.Join(t.TempDir(), "坏.doc")
+	os.WriteFile(bad, []byte("not a document at all"), 0o600)
+	r := Extract(bad, "doc", opt)
+	t.Logf("坏.doc：%s %s", r.Status, r.Err)
+	r = Extract(legacyFixture(t, "合同.doc"), "doc", opt)
+	mustContain(t, "再次转换", r.Text, "海獭")
+	t.Logf("合计 %.2fs", time.Since(start).Seconds())
+}
+
+func TestCheckSofficeResident(t *testing.T) {
+	if SofficePath() == "" {
+		t.Skip("没有 LibreOffice")
+	}
+	st := CheckSoffice()
+	t.Logf("%+v", st)
+	if !st.OK {
+		t.Fatal(st.Message)
+	}
+	if loScript != "" {
+		t.Error("自检用的桥接脚本应删除")
+	}
 }

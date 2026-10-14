@@ -68,10 +68,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: 安装 LibreOffice 与中文字体
+      - name: 安装 LibreOffice（含 Python-UNO，供常驻转换使用）与中文字体
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libreoffice-writer libreoffice-calc libreoffice-impress fonts-wqy-zenhei
+          sudo apt-get install -y --no-install-recommends libreoffice-writer libreoffice-calc libreoffice-impress python3-uno fonts-wqy-zenhei
       - name: 安装样本生成与 OCR 依赖
         run: pip install python-docx openpyxl python-pptx py7zr reportlab pillow rapidocr-onnxruntime
       - name: 生成样本
@@ -109,7 +109,7 @@ jobs:
         run: |
           export ZHAOZHAO_FIXTURES="$RUNNER_TEMP/fx"
           export ZHAOZHAO_OCR="python3 $PWD/tools/ocr_bridge.py"
-          go test -count=1 ./internal/extract ./internal/index
+          go test -count=1 ./internal/extract ./internal/index ./internal/worker
 
   # Windows：真正在 Windows 上运行测试，验证卷识别、目录监听等平台相关代码
   test-windows:

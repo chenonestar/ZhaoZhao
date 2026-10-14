@@ -66,9 +66,10 @@ func SofficePath() string {
 	return sofficePath
 }
 
-// CleanupWorker 在解析子进程退出前调用：结束 OCR 子进程，删除本进程的 LibreOffice 配置目录。
+// CleanupWorker 在解析子进程退出前调用：结束 OCR 子进程和常驻的 LibreOffice，删除本进程的 LibreOffice 配置目录。
 func CleanupWorker() {
 	ShutdownOCR()
+	ShutdownLO()
 	if profileDir != "" {
 		_ = os.RemoveAll(profileDir)
 	}
@@ -83,16 +84,52 @@ func LegacyTimeout(t time.Duration) time.Duration {
 	return t
 }
 
-func extractLegacy(p, ext string, timeout time.Duration) doc.Result {
+// extractLegacy 用 LibreOffice 把老格式转成 OOXML 再提取：优先用常驻的 LibreOffice，
+// 不可用时每个文件单独启动一次。
+func extractLegacy(p, ext string, opt Options) doc.Result {
 	if profileDir == "" {
 		profileDir = filepath.Join(os.TempDir(), fmt.Sprintf("zhaozhao-lo-%d", os.Getpid()))
 	}
-	return convertLegacy(p, ext, LegacyTimeout(timeout), profileDir)
+	target := legacyTarget[ext]
+	if target == "" {
+		target = legacyTarget[legacyFamily[ext]]
+	}
+	if SofficePath() == "" {
+		return doc.Result{Status: doc.StatusFailed, Err: "未找到格式转换组件（LibreOffice），安装后可在失败列表中重试"}
+	}
+	timeout := LegacyTimeout(opt.Timeout)
+	deadline := time.Now().Add(timeout)
+	tmp, err := os.MkdirTemp("", "zhaozhao-conv-")
+	if err != nil {
+		return doc.Result{Status: doc.StatusFailed, Err: err.Error()}
+	}
+	defer os.RemoveAll(tmp)
+	// 复制到临时目录并用 ASCII 文件名，规避 LibreOffice 对特殊路径的处理问题
+	src := filepath.Join(tmp, "in."+ext)
+	if err := copyFile(p, src); err != nil {
+		return doc.Result{Status: doc.StatusFailed, Err: "读取文件失败: " + err.Error()}
+	}
+	outDir := filepath.Join(tmp, "out")
+	_ = os.MkdirAll(outDir, 0o700)
+	out := filepath.Join(outDir, "in."+target)
+	start := time.Now()
+	handled, err := convertResident(src, out, target, profileDir, deadline, opt)
+	if !handled {
+		return convertLegacy(p, ext, timeout, profileDir)
+	}
+	if err != nil {
+		return doc.Result{Status: doc.StatusFailed, Err: "格式转换失败：" + err.Error()}
+	}
+	logx.Debugf("格式转换 %s → %s 用时 %.1fs", logx.P(p), target, time.Since(start).Seconds())
+	return extractConverted(out, target, "")
 }
 
-// convertLegacy 用 LibreOffice 把老格式转成 OOXML 再提取。profile 是 LibreOffice 的配置目录。
+// convertLegacy 每次单独启动 LibreOffice 把老格式转成 OOXML 再提取。profile 是 LibreOffice 的配置目录。
 func convertLegacy(p, ext string, timeout time.Duration, profile string) doc.Result {
 	target := legacyTarget[ext]
+	if target == "" {
+		target = legacyTarget[legacyFamily[ext]]
+	}
 	so := SofficePath()
 	if so == "" {
 		return doc.Result{Status: doc.StatusFailed, Err: "未找到格式转换组件（LibreOffice），安装后可在失败列表中重试"}
@@ -125,15 +162,19 @@ func convertLegacy(p, ext string, timeout time.Duration, profile string) doc.Res
 		}
 		return doc.Result{Status: doc.StatusFailed, Err: "格式转换失败：" + DescribeExit(err, output.String())}
 	}
-	out := filepath.Join(outDir, "in."+target)
+	logx.Debugf("格式转换 %s → %s 用时 %.1fs", logx.P(p), target, time.Since(start).Seconds())
+	return extractConverted(filepath.Join(outDir, "in."+target), target, output.String())
+}
+
+// extractConverted 提取 LibreOffice 转换出的 OOXML 文件。output 是 LibreOffice 的输出，用于说明失败原因。
+func extractConverted(out, target, output string) doc.Result {
 	if _, err := os.Stat(out); err != nil {
 		msg := "格式转换失败（文件可能已加密或损坏）"
-		if o := strings.TrimSpace(output.String()); o != "" {
+		if o := strings.TrimSpace(output); o != "" {
 			msg += "：" + truncate(o, 300)
 		}
 		return doc.Result{Status: doc.StatusFailed, Err: msg}
 	}
-	logx.Debugf("格式转换 %s → %s 用时 %.1fs", logx.P(p), target, time.Since(start).Seconds())
 	var r doc.Result
 	switch target {
 	case "docx":

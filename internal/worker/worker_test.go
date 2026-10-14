@@ -232,3 +232,49 @@ func TestCrashAndHangAreIsolated(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+// 解析子进程里的常驻 LibreOffice：连续转换复用同一个；子进程闲置结束时正常收尾，
+// 不留下 LibreOffice 进程和配置目录。
+func TestResidentLOLifecycle(t *testing.T) {
+	if extract.SofficePath() == "" {
+		t.Skip("没有 LibreOffice")
+	}
+	p := realPool(t, 1)
+	src := filepath.Join("..", "..", "testdata", "legacy", "合同.doc")
+	opts := extract.DefaultOptions()
+	opts.LegacyMode = extract.LegacyLO
+	for i := 0; i < 2; i++ {
+		t0 := time.Now()
+		r := p.Extract(context.Background(), src, "doc", opts, 3*time.Minute)
+		if r.Status != doc.StatusOK || !strings.Contains(r.Text, "海獭") {
+			t.Fatalf("第 %d 次：%s %s", i+1, r.Status, r.Err)
+		}
+		t.Logf("第 %d 次转换用时 %.2fs", i+1, time.Since(t0).Seconds())
+	}
+	var pid int
+	p.mu.Lock()
+	for pr := range p.live {
+		pid = pr.pid
+	}
+	p.mu.Unlock()
+	profile := filepath.Join(os.TempDir(), fmt.Sprintf("zhaozhao-lo-%d", pid))
+	if _, err := os.Stat(profile); err != nil {
+		t.Fatalf("应有 LibreOffice 配置目录: %v", err)
+	}
+	p.IdleTimeout = time.Millisecond
+	time.Sleep(10 * time.Millisecond)
+	p.reapIdle()
+	if _, err := os.Stat(profile); !os.IsNotExist(err) {
+		t.Errorf("子进程结束后应删除 LibreOffice 配置目录: %v", err)
+	}
+	if runtime.GOOS == "linux" {
+		time.Sleep(500 * time.Millisecond)
+		ents, _ := os.ReadDir("/proc")
+		for _, e := range ents {
+			b, _ := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+			if strings.Contains(string(b), fmt.Sprintf("zhaozhao-lo-%d", pid)) {
+				t.Errorf("残留进程 %s: %q", e.Name(), strings.ReplaceAll(string(b), "\x00", " "))
+			}
+		}
+	}
+}

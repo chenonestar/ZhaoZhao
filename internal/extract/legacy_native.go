@@ -27,7 +27,7 @@ var legacyFamily = map[string]string{
 
 func extractLegacyAny(p, ext string, opt Options) doc.Result {
 	if opt.LegacyMode == LegacyLO {
-		return extractLegacy(p, ext, opt.Timeout)
+		return extractLegacy(p, ext, opt)
 	}
 	r, why := extractLegacyNative(p, ext, opt)
 	if why == "" {
@@ -37,7 +37,7 @@ func extractLegacyAny(p, ext string, opt Options) doc.Result {
 		return doc.Result{Status: doc.StatusFailed, Err: "内置解析不支持：" + why, NeedConvert: true}
 	}
 	logx.Debugf("内置解析不支持 %s（%s），改用 LibreOffice", logx.P(p), why)
-	return extractLegacy(p, ext, opt.Timeout)
+	return extractLegacy(p, ext, opt)
 }
 
 // extractLegacyNative 按文件的实际内容（而不是扩展名）选用内置解析器：扩展名经常不可信，
