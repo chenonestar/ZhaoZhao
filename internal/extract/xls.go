@@ -407,7 +407,7 @@ func parseSST(segs [][]byte) []string {
 	if !ok || n < 0 || n > 1<<24 {
 		return nil
 	}
-	out := make([]string, 0, n)
+	out := make([]string, 0, min(n, 1<<16)) // 数量来自文件头，不可信：不按它预先分配
 	for i := 0; i < n; i++ {
 		cch, ok := r.u16()
 		if !ok {
