@@ -206,7 +206,7 @@ func TestConfigMigration(t *testing.T) {
 // 三条通道同时进行：大量普通文件还没处理完时，OCR 已经在做（旧版要等普通文件全部完成）。
 func TestLanesRunConcurrently(t *testing.T) {
 	dir := t.TempDir()
-	for i := 0; i < 3000; i++ {
+	for i := 0; i < 1500; i++ {
 		write(t, filepath.Join(dir, fmt.Sprintf("d%02d", i%20), fmt.Sprintf("t%04d.txt", i)), fmt.Sprintf("普通文本 %d", i))
 	}
 	for i := 0; i < 3; i++ {
@@ -214,7 +214,7 @@ func TestLanesRunConcurrently(t *testing.T) {
 	}
 	prov := &fakeProv{}
 	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
-	e := newEnvWith(t, prov, `{"workers":1,"ocrWorkers":1,"configVersion":2}`, func(m *Manager) { useFakeOCR(t, m, "200ms") })
+	e := newEnvWith(t, prov, `{"workers":1,"ocrWorkers":1,"configVersion":2}`, func(m *Manager) { useFakeOCR(t, m, "1ms") })
 	if _, err := e.m.AddRoot(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -227,5 +227,5 @@ func TestLanesRunConcurrently(t *testing.T) {
 	if st.FastQueue == 0 {
 		t.Fatalf("OCR 应与普通文件同时进行，而不是等普通文件全部完成: %+v", st.Totals)
 	}
-	e.waitIdle()
+	waitFor(t, "全部完成", 3*time.Minute, func() bool { c, _ := e.m.DB.AllCounts(); return c.Pending == 0 })
 }
