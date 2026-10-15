@@ -67,12 +67,28 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_v USING fts5vocab(fts, 'row');
 
 // schemaV2 在升级（schemaUpgrades）之后执行：依赖 files.text_id 的索引和触发器。
 // 没有文件引用的文本自动删除：文件被删除、重新提取、内容变化时都不必另外处理文本。
+//
+// 删除的文件（内容哈希已知、提取成功的）的文本先放进回收区保留几天：文件只是被移动或改名时，
+// 新位置的文件内容相同，直接复用，不必重新提取（尤其不必重新 OCR）。回收区的条目过期删除时文本随之删除。
 const schemaV2 = `
 CREATE INDEX IF NOT EXISTS files_text ON files(text_id) WHERE text_id>0;
-CREATE TRIGGER IF NOT EXISTS files_text_del AFTER DELETE ON files WHEN OLD.text_id>0 BEGIN
-  DELETE FROM texts WHERE id=OLD.text_id AND NOT EXISTS (SELECT 1 FROM files WHERE text_id=OLD.text_id);
+CREATE TABLE IF NOT EXISTS recycled(id INTEGER PRIMARY KEY, text_id INTEGER NOT NULL UNIQUE, hash TEXT NOT NULL,
+  size INTEGER NOT NULL, ocr INTEGER NOT NULL DEFAULT 0, text_len INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS recycled_hash ON recycled(hash, size);
+DROP TRIGGER IF EXISTS files_text_del;
+DROP TRIGGER IF EXISTS files_text_upd;
+CREATE TRIGGER IF NOT EXISTS files_text_gone AFTER DELETE ON files WHEN OLD.text_id>0 BEGIN
+  INSERT OR IGNORE INTO recycled(text_id,hash,size,ocr,text_len,at)
+    SELECT OLD.text_id, OLD.hash, OLD.size, OLD.ocr, OLD.text_len, unixepoch()
+    WHERE OLD.hash<>'' AND OLD.state=1 AND NOT EXISTS (SELECT 1 FROM files WHERE text_id=OLD.text_id);
+  DELETE FROM texts WHERE id=OLD.text_id AND NOT EXISTS (SELECT 1 FROM files WHERE text_id=OLD.text_id)
+    AND NOT EXISTS (SELECT 1 FROM recycled WHERE text_id=OLD.text_id);
 END;
-CREATE TRIGGER IF NOT EXISTS files_text_upd AFTER UPDATE OF text_id ON files WHEN OLD.text_id>0 AND OLD.text_id<>NEW.text_id BEGIN
+CREATE TRIGGER IF NOT EXISTS files_text_changed AFTER UPDATE OF text_id ON files WHEN OLD.text_id>0 AND OLD.text_id<>NEW.text_id BEGIN
+  DELETE FROM texts WHERE id=OLD.text_id AND NOT EXISTS (SELECT 1 FROM files WHERE text_id=OLD.text_id)
+    AND NOT EXISTS (SELECT 1 FROM recycled WHERE text_id=OLD.text_id);
+END;
+CREATE TRIGGER IF NOT EXISTS recycled_gone AFTER DELETE ON recycled BEGIN
   DELETE FROM texts WHERE id=OLD.text_id AND NOT EXISTS (SELECT 1 FROM files WHERE text_id=OLD.text_id);
 END;
 `
@@ -312,7 +328,7 @@ func (d *DB) SetRootScanned(id int64, t int64) error {
 // RemoveRoot 删除索引根及其全部文件、提取文本与全文索引。
 func (d *DB) RemoveRoot(id int64) error {
 	return d.Tx(func(tx *sql.Tx) error {
-		if err := deleteWhere(tx, `root_id=?`, id); err != nil {
+		if err := deleteNoRecycle(tx, `root_id=?`, id); err != nil {
 			return err
 		}
 		_, err := tx.Exec(`DELETE FROM roots WHERE id=?`, id)
@@ -323,7 +339,7 @@ func (d *DB) RemoveRoot(id int64) error {
 // RemoveVolume 删除某个卷的全部索引。
 func (d *DB) RemoveVolume(id string) error {
 	return d.Tx(func(tx *sql.Tx) error {
-		if err := deleteWhere(tx, `volume_id=?`, id); err != nil {
+		if err := deleteNoRecycle(tx, `volume_id=?`, id); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`DELETE FROM roots WHERE volume_id=?`, id); err != nil {
@@ -332,6 +348,19 @@ func (d *DB) RemoveVolume(id string) error {
 		_, err := tx.Exec(`DELETE FROM volumes WHERE id=?`, id)
 		return err
 	})
+}
+
+// deleteNoRecycle 删除文件，不保留到回收区（用户移除整个索引根、磁盘时，不会有「移动到别处」的文件）。
+func deleteNoRecycle(tx *sql.Tx, cond string, arg any) error {
+	var last int64
+	if err := tx.QueryRow(`SELECT ifnull(max(id),0) FROM recycled`).Scan(&last); err != nil {
+		return err
+	}
+	if err := deleteWhere(tx, cond, arg); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`DELETE FROM recycled WHERE id>?`, last)
+	return err
 }
 
 func deleteWhere(tx *sql.Tx, cond string, arg any) error {
@@ -502,7 +531,7 @@ func (d *DB) DeleteOrphans() (int64, error) {
 	if err := d.R.QueryRow(`SELECT COUNT(*) FROM files WHERE root_id NOT IN (SELECT id FROM roots)`).Scan(&n); err != nil || n == 0 {
 		return 0, err
 	}
-	return n, d.Tx(func(tx *sql.Tx) error { return deleteWhere(tx, `root_id NOT IN (SELECT id FROM roots) AND 1=?`, 1) })
+	return n, d.Tx(func(tx *sql.Tx) error { return deleteNoRecycle(tx, `root_id NOT IN (SELECT id FROM roots) AND 1=?`, 1) })
 }
 
 // ReplaceChildren 删除容器的全部内部条目（重新提取前调用）。

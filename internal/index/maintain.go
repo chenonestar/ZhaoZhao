@@ -21,6 +21,9 @@ import (
 // maintainDelay 是启动后开始整理前的等待（避开启动时的扫描高峰）；测试里调短。
 var maintainDelay = 20 * time.Second
 
+// recycleKeep：删除的文件的提取结果在回收区保留多久（期间出现内容相同的文件就直接复用）。
+const recycleKeep = 3 * 24 * time.Hour
+
 // dedupeEvery：空闲时每隔这么久再检查一次有没有内容相同却各存一份的文本
 // （同时提取两个相同的文件时会各存一份）。
 const dedupeEvery = 24 * time.Hour
@@ -97,6 +100,9 @@ func (m *Manager) maintainLoop() {
 		return
 	}
 	for {
+		if n, err := m.DB.PurgeRecycled(time.Now().Add(-recycleKeep)); err == nil && n > 0 {
+			logx.Debugf("回收区：删除 %d 份过期的文本", n)
+		}
 		m.recheckPDFs()
 		m.migrateTexts()
 		if m.sched.idle.Load() {

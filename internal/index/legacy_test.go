@@ -264,3 +264,61 @@ func TestRecheckPDFs(t *testing.T) {
 		t.Errorf("复查应只做一次：%q", v)
 	}
 }
+
+// 文件移动、改名后内容没变：复用原来的提取结果（OCR 结果），不重新提取。
+func TestMoveReusesExtraction(t *testing.T) {
+	dir := t.TempDir()
+	writePNG(t, filepath.Join(dir, "扫描.png"), 7)
+	os.MkdirAll(filepath.Join(dir, "归档"), 0o755)
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	e := newEnvWith(t, prov, "", func(m *Manager) { useFakeOCR(t, m, "1ms") })
+	if _, err := e.m.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+	textID := func(name string) (id int64, state int, ocr int) {
+		e.m.DB.R.QueryRow(`SELECT text_id, state, ocr FROM files WHERE name=?`, name).Scan(&id, &state, &ocr)
+		return
+	}
+	old, st, _ := textID("扫描.png")
+	if old == 0 || st != store.StateDone {
+		t.Fatalf("先应 OCR 完成：text_id %d state %d", old, st)
+	}
+	if err := os.Rename(filepath.Join(dir, "扫描.png"), filepath.Join(dir, "归档", "改名后的扫描.png")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "移动后的文件处理完成", 20*time.Second, func() bool {
+		_, st, _ := textID("改名后的扫描.png")
+		var n int
+		e.m.DB.R.QueryRow(`SELECT count(*) FROM files WHERE name='扫描.png'`).Scan(&n)
+		return st == store.StateDone && n == 0
+	})
+	got, _, ocr := textID("改名后的扫描.png")
+	if got != old || ocr != 1 {
+		t.Errorf("应复用原来的 OCR 结果：text_id %d → %d，ocr %d", old, got, ocr)
+	}
+	// 先移出索引目录（记录被删除，提取结果进回收区），过一会儿再移回来：从回收区复用
+	outside := filepath.Join(t.TempDir(), "暂存.png")
+	if err := os.Rename(filepath.Join(dir, "归档", "改名后的扫描.png"), outside); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "移出后记录删除", 20*time.Second, func() bool {
+		var n, r int
+		e.m.DB.R.QueryRow(`SELECT count(*) FROM files WHERE ext='png'`).Scan(&n)
+		e.m.DB.R.QueryRow(`SELECT count(*) FROM recycled WHERE text_id=?`, old).Scan(&r)
+		return n == 0 && r == 1
+	})
+	if err := os.Rename(outside, filepath.Join(dir, "又移回来.png")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "移回后处理完成", 20*time.Second, func() bool { _, st, _ := textID("又移回来.png"); return st == store.StateDone })
+	if got, _, ocr := textID("又移回来.png"); got != old || ocr != 1 {
+		t.Errorf("应从回收区复用：text_id %d → %d，ocr %d", old, got, ocr)
+	}
+	var r int
+	e.m.DB.R.QueryRow(`SELECT count(*) FROM recycled`).Scan(&r)
+	if r != 0 {
+		t.Errorf("复用后回收区应清空：%d", r)
+	}
+}

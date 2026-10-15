@@ -153,9 +153,13 @@ func (d *DB) PutResult(tx *sql.Tx, id int64, state int, errMsg string, hash stri
 
 // GetText 读取某文件的提取文本。
 func (d *DB) GetText(id int64) (*Text, error) {
+	return d.readText(d.R.QueryRow(`SELECT t.flags,t.data,t.locs FROM files f JOIN texts t ON t.id=f.text_id WHERE f.id=?`, id))
+}
+
+func (d *DB) readText(row *sql.Row) (*Text, error) {
 	var flags int
 	var data, locs []byte
-	err := d.R.QueryRow(`SELECT t.flags,t.data,t.locs FROM files f JOIN texts t ON t.id=f.text_id WHERE f.id=?`, id).Scan(&flags, &data, &locs)
+	err := row.Scan(&flags, &data, &locs)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -195,6 +199,59 @@ func CopyResult(tx *sql.Tx, src, dst int64, ftsText, nameFTS string) error {
 	_, err := tx.Exec(`UPDATE files SET state=1, err='', text_id=?2, text_len=(SELECT text_len FROM files WHERE id=?1), ocr=(SELECT ocr FROM files WHERE id=?1), indexed_at=?3 WHERE id=?4`,
 		src, textID, time.Now().Unix(), dst)
 	return err
+}
+
+// Recycled 是回收区里一份可以复用的文本。
+type Recycled struct {
+	TextID  int64
+	OCR     bool
+	TextLen int
+}
+
+// FindRecycled 在回收区里找内容哈希与大小都相同的已删除文件的文本（文件被移动、改名时复用）。
+func (d *DB) FindRecycled(hash string, size int64) (*Recycled, error) {
+	var r Recycled
+	var ocr int
+	err := d.R.QueryRow(`SELECT text_id, ocr, text_len FROM recycled WHERE hash=? AND size=? LIMIT 1`, hash, size).Scan(&r.TextID, &ocr, &r.TextLen)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	r.OCR = ocr != 0
+	return &r, err
+}
+
+// GetTextByID 按文本编号读取文本。
+func (d *DB) GetTextByID(textID int64) (*Text, error) {
+	return d.readText(d.R.QueryRow(`SELECT flags,data,locs FROM texts WHERE id=?`, textID))
+}
+
+// AttachText 让文件 dst 使用回收区里的文本 r（文件被移动、改名后内容没变）。
+func AttachText(tx *sql.Tx, dst int64, r *Recycled, hash, ftsText, nameFTS string) error {
+	var one int
+	if err := tx.QueryRow(`SELECT 1 FROM texts WHERE id=?`, r.TextID).Scan(&one); err != nil {
+		return fmt.Errorf("回收区的文本已不存在")
+	}
+	if _, err := tx.Exec(`DELETE FROM fts WHERE rowid=?`, dst); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO fts(rowid,c,n) VALUES(?,?,?)`, dst, ftsText, nameFTS); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE files SET state=1, err='', hash=?, text_id=?, text_len=?, ocr=?, indexed_at=? WHERE id=?`,
+		hash, r.TextID, r.TextLen, b2i(r.OCR), time.Now().Unix(), dst); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`DELETE FROM recycled WHERE text_id=?`, r.TextID) // 文本有文件引用了，不会被删除
+	return err
+}
+
+// PurgeRecycled 删除回收区里早于 before 的条目（文本随之删除）。
+func (d *DB) PurgeRecycled(before time.Time) (int64, error) {
+	r, err := d.W.Exec(`DELETE FROM recycled WHERE at<?`, before.Unix())
+	if err != nil {
+		return 0, err
+	}
+	return r.RowsAffected()
 }
 
 // FindDuplicate 查找已完成提取、内容哈希与大小都相同的另一个文件。

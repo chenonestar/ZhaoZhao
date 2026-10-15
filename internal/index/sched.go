@@ -109,8 +109,9 @@ type prepared struct {
 	text     *store.Text
 	fts      string
 	nameFTS  string
-	reuse    int64 // 复用该文件的提取结果（内容相同）
-	requeue  int   // 非 0 时保存结果后把文件重新排到这个队列（OCR、老格式转换）
+	reuse    int64           // 复用该文件的提取结果（内容相同）
+	recycled *store.Recycled // 复用回收区里刚删除的文件的提取结果（文件被移动、改名）
+	requeue  int             // 非 0 时保存结果后把文件重新排到这个队列（OCR、老格式转换）
 	children []*preparedChild
 }
 
@@ -602,6 +603,14 @@ func (m *Manager) runJob(j *job) {
 				return
 			}
 		}
+		// 刚删除的文件里有内容相同的（文件被移动、改名）：复用它的提取结果，不必重新提取、重新 OCR
+		if r, _ := m.DB.FindRecycled(hash, f.Size); r != nil {
+			if p := m.prepareRecycled(f, r, hash); p != nil {
+				logx.Debugf("内容与刚删除的文件相同（移动或改名），复用结果 %s", logx.P(abs))
+				m.sendJob(j, p)
+				return
+			}
+		}
 	}
 
 	useOCR := j.class == prioOCR
@@ -778,6 +787,17 @@ func (m *Manager) prepare(f store.File, res doc.Result) *prepared {
 	return p
 }
 
+// prepareRecycled 复用回收区里的文本（文件被移动、改名，内容没变）。
+func (m *Manager) prepareRecycled(f store.File, r *store.Recycled, hash string) *prepared {
+	t, err := m.DB.GetTextByID(r.TextID)
+	if err != nil || t == nil {
+		return nil
+	}
+	o := m.Norm()
+	return &prepared{file: f, state: store.StateDone, recycled: r, text: t, fts: ftsOf(o, t.Text), nameFTS: ftsOf(o, f.Name),
+		res: doc.Result{Status: doc.StatusOK, Hash: hash, OCR: r.OCR}}
+}
+
 // prepareReuse 复用内容相同文件的提取结果，不再重新解析（F-BG-03）。
 func (m *Manager) prepareReuse(f store.File, src int64, hash string) *prepared {
 	t, err := m.DB.GetText(src)
@@ -862,6 +882,15 @@ func (m *Manager) writeOne(tx *sql.Tx, p *prepared) error {
 	if size != f.Size || mtime != f.MTime {
 		logx.Debugf("丢弃 %s 的提取结果：提取期间文件又被修改（将重新提取）", logx.P(f.RelPath))
 		return nil
+	}
+	if p.recycled != nil {
+		err := store.AttachText(tx, f.ID, p.recycled, p.res.Hash, p.fts, p.nameFTS)
+		if err == nil {
+			return nil
+		}
+		logx.Debugf("复用回收区的文本失败（%v），重新提取 %s", err, logx.P(f.RelPath))
+		_, err = tx.Exec(`UPDATE files SET state=0 WHERE id=?`, f.ID)
+		return err
 	}
 	if p.reuse != 0 {
 		if err := store.CopyResult(tx, p.reuse, f.ID, p.fts, p.nameFTS); err != nil {

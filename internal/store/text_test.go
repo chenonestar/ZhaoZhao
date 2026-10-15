@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -207,5 +208,67 @@ func TestSharedTextGC(t *testing.T) {
 	}
 	if countTexts(t, db) != 0 {
 		t.Errorf("删除索引根后应没有文本，剩 %d 份", countTexts(t, db))
+	}
+}
+
+// 删除的文件的文本先进回收区：同样内容的文件出现时（移动、改名）直接复用；过期后删除。
+// 移除整个索引根时不进回收区。
+func TestRecycleOnDelete(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.UpsertVolume(Volume{ID: "v1"})
+	rid, _ := db.AddRoot("v1", "")
+	add := func(rel, hash string, text string) int64 {
+		f := &File{RootID: rid, VolumeID: "v1", RelPath: rel, Name: rel, Ext: "pdf", Size: 100, Hash: hash}
+		db.Tx(func(tx *sql.Tx) error {
+			if err := UpsertFile(tx, f, "n"); err != nil {
+				return err
+			}
+			if text == "" {
+				return nil
+			}
+			return db.PutResult(tx, f.ID, StateDone, "", hash, true, &Text{Text: text}, "x", "n")
+		})
+		return f.ID
+	}
+	count := func(table string) int {
+		var n int
+		db.R.QueryRow(`SELECT count(*) FROM ` + table).Scan(&n)
+		return n
+	}
+	a := add("旧位置/扫描件.pdf", "h1", "OCR 识别出的内容")
+	if err := db.DeleteFiles([]int64{a}); err != nil {
+		t.Fatal(err)
+	}
+	if count("recycled") != 1 || count("texts") != 1 {
+		t.Fatalf("删除后文本应进回收区：recycled %d texts %d", count("recycled"), count("texts"))
+	}
+	r, err := db.FindRecycled("h1", 100)
+	if err != nil || r == nil || !r.OCR {
+		t.Fatalf("应在回收区找到：%+v %v", r, err)
+	}
+	b := add("新位置/扫描件.pdf", "", "")
+	if err := db.Tx(func(tx *sql.Tx) error { return AttachText(tx, b, r, "h1", "x", "n") }); err != nil {
+		t.Fatal(err)
+	}
+	if tx, _ := db.GetText(b); tx == nil || tx.Text != "OCR 识别出的内容" || count("recycled") != 0 {
+		t.Fatalf("复用后：%+v recycled %d", tx, count("recycled"))
+	}
+	if f, _ := db.GetFile(b); f.State != StateDone || !f.OCR || f.Hash != "h1" {
+		t.Errorf("复用后的文件信息：%+v", f)
+	}
+	db.DeleteFiles([]int64{b})
+	if n, _ := db.PurgeRecycled(time.Now().Add(time.Hour)); n != 1 || count("texts") != 0 {
+		t.Errorf("过期后应删除：%d texts %d", n, count("texts"))
+	}
+	add("c.pdf", "h2", "内容")
+	if err := db.RemoveRoot(rid); err != nil {
+		t.Fatal(err)
+	}
+	if count("recycled") != 0 || count("texts") != 0 {
+		t.Errorf("移除索引根不进回收区：recycled %d texts %d", count("recycled"), count("texts"))
 	}
 }
