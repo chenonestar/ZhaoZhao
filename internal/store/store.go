@@ -709,6 +709,23 @@ func (d *DB) MoveLegacy(exts []string, prio int, retryFailed bool) (moved, retri
 	return moved, retried, err
 }
 
+// RequeueEncrypted 把标记为「已加密」的这些扩展名的文件重新排队（新版本能读出其中一部分时用）。
+func (d *DB) RequeueEncrypted(exts []string, prio int) (int64, error) {
+	if len(exts) == 0 {
+		return 0, nil
+	}
+	in := strings.TrimSuffix(strings.Repeat("?,", len(exts)), ",")
+	args := []any{prio}
+	for _, e := range exts {
+		args = append(args, e)
+	}
+	r, err := d.W.Exec(`UPDATE files SET state=0, err='', prio=? WHERE state=3 AND inner='' AND ext IN (`+in+`)`, args...)
+	if err != nil {
+		return 0, err
+	}
+	return r.RowsAffected()
+}
+
 func (d *DB) RetryFailed(ids []int64) error {
 	return d.Tx(func(tx *sql.Tx) error {
 		if len(ids) == 0 {

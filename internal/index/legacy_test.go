@@ -176,3 +176,42 @@ func TestBigramCoverage(t *testing.T) {
 		}
 	}
 }
+
+// 0.2.0 把「保护工作簿」的 .xls 记成了已加密：升级后重新排队一次，能读出内容的就读出来。
+func TestRetryProtectedXls(t *testing.T) {
+	t.Cleanup(extract.CleanupWorker)
+	dir := t.TempDir()
+	copyFixture(t, "保护工作簿.xls", filepath.Join(dir, "保护工作簿.xls"))
+	copyFixture(t, "有打开密码.xls", filepath.Join(dir, "有打开密码.xls"))
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	e := newEnv(t, prov)
+	if _, err := e.m.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+	if st, _, msg := fileByName(t, e.m.DB, "保护工作簿.xls"); st != store.StateDone || !has(e.names("狐獴"), "保护工作簿.xls") {
+		t.Fatalf("保护工作簿.xls：state %d %s", st, msg)
+	}
+	if st, _, _ := fileByName(t, e.m.DB, "有打开密码.xls"); st != store.StateEncrypted {
+		t.Fatalf("有打开密码.xls 应为已加密：state %d", st)
+	}
+	// 模拟 0.2.0 的结果：两个都记为已加密，且还没做过重新排队
+	e.m.DB.W.Exec(`UPDATE files SET state=?, err='文件已加密' WHERE ext='xls'`, store.StateEncrypted)
+	e.m.DB.W.Exec(`DELETE FROM meta WHERE k='xls_default_password'`)
+	e.m.retryProtectedXls()
+	e.m.kick()
+	e.waitIdle()
+	if st, _, _ := fileByName(t, e.m.DB, "保护工作簿.xls"); st != store.StateDone {
+		t.Errorf("重新排队后应读出内容：state %d", st)
+	}
+	if st, _, _ := fileByName(t, e.m.DB, "有打开密码.xls"); st != store.StateEncrypted {
+		t.Errorf("有打开密码的仍应为已加密：state %d", st)
+	}
+	// 只做一次
+	e.m.DB.W.Exec(`UPDATE files SET state=? WHERE name='保护工作簿.xls'`, store.StateEncrypted)
+	e.m.retryProtectedXls()
+	if st, _, _ := fileByName(t, e.m.DB, "保护工作簿.xls"); st != store.StateEncrypted {
+		t.Errorf("重新排队只应做一次")
+	}
+}

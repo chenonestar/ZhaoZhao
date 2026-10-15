@@ -1,6 +1,9 @@
 package extract
 
 import (
+	"bytes"
+	"crypto/rc4"
+	"crypto/sha1"
 	"os"
 	"path/filepath"
 	"strings"
@@ -215,4 +218,91 @@ func TestCheckSofficeResident(t *testing.T) {
 	if loScript != "" {
 		t.Error("自检用的桥接脚本应删除")
 	}
+}
+
+// 「保护工作簿」的 .xls 用默认密码加密，打开不需要密码：内置解析器应能读出内容；
+// 真正设了打开密码的才算已加密。样本由 LibreOffice 生成（标准 RC4），已用 msoffcrypto 独立核对。
+func TestXlsDefaultPassword(t *testing.T) {
+	opt := DefaultOptions()
+	opt.LegacyMode = LegacyNative
+	for _, as := range []string{"保护工作簿.xls", "保护工作簿.et"} {
+		r := Extract(copyAs(t, "保护工作簿.xls", as), Ext(as), opt)
+		if r.Status != doc.StatusOK || !strings.Contains(r.Text, "狐獴") || !strings.Contains(r.Text, "8848") {
+			t.Errorf("%s：%+v", as, r)
+		}
+	}
+	r := Extract(legacyFixture(t, "有打开密码.xls"), "xls", opt)
+	if r.Status != doc.StatusEncrypted || strings.Contains(r.Text, "穿山甲") {
+		t.Errorf("有打开密码.xls 应为已加密：%+v", r)
+	}
+}
+
+// Excel 2003 以后默认用 RC4 CryptoAPI 加密：把普通工作簿按同样的方式加密后再读。
+// （算法已用 Apache POI 的真实 Excel 加密样本与 msoffcrypto 逐字节核对过。）
+func TestXlsCryptoAPIDefaultPassword(t *testing.T) {
+	st, _, err := oleStreams(legacyFixture(t, "报销.xls"), "Workbook")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := encryptXlsCryptoAPI(t, st["Workbook"], xlsDefaultPassword)
+	r, err := xlsText(enc)
+	if err != nil || !strings.Contains(r.Text, "穿山甲") || !strings.Contains(r.Text, "隐藏的关键词") {
+		t.Fatalf("%v %.200q", err, r.Text)
+	}
+	if r.Locs[0].Label != "报销!A1" {
+		t.Errorf("工作表名应正确（BoundSheet 的位置字段不加密）：%v", r.Locs[0])
+	}
+	if _, err := xlsText(encryptXlsCryptoAPI(t, st["Workbook"], "别的密码")); err != errNativeEncrypted {
+		t.Errorf("非默认密码应为已加密：%v", err)
+	}
+}
+
+// encryptXlsCryptoAPI 按 MS-OFFCRYPTO 的 RC4 CryptoAPI 方式加密 Workbook 流（128 位密钥）。
+func encryptXlsCryptoAPI(t *testing.T, plain []byte, password string) []byte {
+	t.Helper()
+	salt := []byte("0123456789abcdef")
+	h0 := sha1.Sum(append(append([]byte{}, salt...), utf16leBytes(password)...))
+	key := func(block uint32) []byte {
+		b := append(append([]byte{}, h0[:]...), byte(block), byte(block>>8), byte(block>>16), byte(block>>24))
+		h := sha1.Sum(b)
+		return h[:16]
+	}
+	verifier := []byte("verifier-16bytes")
+	vh := sha1.Sum(verifier)
+	c, _ := rc4.NewCipher(key(0))
+	encV := make([]byte, 16)
+	c.XORKeyStream(encV, verifier)
+	encH := make([]byte, 20)
+	c.XORKeyStream(encH, vh[:])
+	le := func(v int) []byte { return []byte{byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24)} }
+	csp := utf16leBytes("Microsoft Enhanced Cryptographic Provider v1.0\x00")
+	hdr := bytes.Join([][]byte{le(4), le(0), le(0x6801), le(0x8004), le(128), le(1), le(0), le(0), csp}, nil)
+	fp := bytes.Join([][]byte{{1, 0}, {4, 0, 2, 0}, le(4), le(len(hdr)), hdr, le(16), salt, encV, le(20), encH}, nil)
+	rec := append([]byte{0x2F, 0, byte(len(fp)), byte(len(fp) >> 8)}, fp...)
+	// 插在第一个 BOF 之后；工作表位置（BoundSheet8 的 lbPlyPos）随之后移
+	bofLen := 4 + le16(plain, 2)
+	s := append(append(append([]byte{}, plain[:bofLen]...), rec...), plain[bofLen:]...)
+	for off := 0; off+4 <= len(s); off += 4 + le16(s, off+2) {
+		if le16(s, off) == 0x0085 {
+			pos := le32(s, off+4) + len(rec)
+			copy(s[off+4:], le(pos))
+		}
+	}
+	out := make([]byte, len(s))
+	for off := 0; off < len(s); off += 1024 {
+		end := min(off+1024, len(s))
+		c, _ := rc4.NewCipher(key(uint32(off / 1024)))
+		c.XORKeyStream(out[off:end], s[off:end])
+	}
+	for off := 0; off+4 <= len(s); off += 4 + le16(s, off+2) {
+		typ, n := le16(s, off), le16(s, off+2)
+		copy(out[off:off+4], s[off:off+4])
+		switch {
+		case typ == 0x0809 || typ == 0x002F:
+			copy(out[off+4:off+4+n], s[off+4:off+4+n])
+		case typ == 0x0085:
+			copy(out[off+4:off+8], s[off+4:off+8])
+		}
+	}
+	return out
 }

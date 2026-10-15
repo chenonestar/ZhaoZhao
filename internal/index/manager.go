@@ -205,6 +205,7 @@ func (m *Manager) Start() error {
 		m.logf("清理了 %d 条不属于任何索引根的残留记录", n)
 	}
 	m.syncLegacyQueue(m.Config().LegacyLOOnly)
+	m.retryProtectedXls()
 	m.refreshVolumes(true)
 	m.initWatch()
 	m.startScanners(2)
@@ -242,6 +243,27 @@ func (m *Manager) syncLegacyQueue(loOnly bool) {
 	m.logf("老格式处理方式：%s；%d 个待处理的老格式文件已调整队列，%d 个以前失败的重新排队",
 		map[bool]string{true: "只用 LibreOffice 转换", false: "内置解析优先，解析不了的再用 LibreOffice"}[loOnly], moved, retried)
 	m.kick()
+}
+
+// retryProtectedXls：0.2.0 把设了「保护工作簿」的 .xls（用默认密码加密，打开不需要密码）误记为「已加密」，
+// 0.2.1 起能读出内容。升级后把这些文件重新排队一次；真正有打开密码的会再次记为已加密。
+func (m *Manager) retryProtectedXls() {
+	if v, _ := m.DB.GetMeta("xls_default_password"); v == "1" {
+		return
+	}
+	prio := prioFast
+	if m.Config().LegacyLOOnly {
+		prio = prioLegacy
+	}
+	n, err := m.DB.RequeueEncrypted([]string{"xls", "xlt", "et", "ett"}, prio)
+	if err != nil {
+		m.logf("重新排队已加密的 .xls 失败: %v", err)
+		return
+	}
+	_ = m.DB.SetMeta("xls_default_password", "1")
+	if n > 0 {
+		m.logf("%d 个标记为「已加密」的 Excel 文件重新排队：设了「保护工作簿」的文件现在能读出内容", n)
+	}
 }
 
 // Stop 停止全部后台任务。

@@ -1,6 +1,7 @@
 package extract
 
 import (
+	"errors"
 	"math"
 	"sort"
 	"strconv"
@@ -27,8 +28,27 @@ func extractXlsNative(p string) (doc.Result, error) {
 		}
 		return doc.Result{}, nativeUnsupported("没有 Workbook 流")
 	}
+	return xlsText(wb)
+}
+
+// xlsText 解析 Workbook 流（加密的先尝试默认密码解密）。
+func xlsText(wb []byte) (doc.Result, error) {
 	x := &xlsReader{data: wb}
-	if err := x.parse(); err != nil {
+	err := x.parse()
+	var enc xlsEncrypted
+	if errors.As(err, &enc) {
+		// 加密的：先用 Excel「保护工作簿」的默认密码解密，解不开才是真正设了打开密码
+		dec, derr := xlsDecrypt(wb, enc.filepass, xlsDefaultPassword)
+		switch {
+		case derr == errXlsWrongPassword:
+			return doc.Result{}, errNativeEncrypted
+		case derr != nil:
+			return doc.Result{}, nativeUnsupported("Excel 的旧式加密（%v）", derr)
+		}
+		x = &xlsReader{data: dec, decrypted: true}
+		err = x.parse()
+	}
+	if err != nil {
 		return doc.Result{}, err
 	}
 	var b doc.Builder
@@ -79,14 +99,20 @@ type xlsSheet struct {
 	notes []string
 }
 
+// xlsEncrypted 表示 Workbook 流是加密的（遇到 FILEPASS 记录）。
+type xlsEncrypted struct{ filepass []byte }
+
+func (xlsEncrypted) Error() string { return "加密的工作簿" }
+
 type xlsReader struct {
-	data     []byte
-	sst      []string
-	xfFmt    []int          // XF 序号 → 数字格式编号
-	formats  map[int]string // 自定义数字格式
-	date1904 bool
-	sheets   []*xlsSheet
-	names    map[int]string // 工作表 BOF 在流中的位置 → 名称
+	decrypted bool // 已经解密：FILEPASS 记录不再处理
+	data      []byte
+	sst       []string
+	xfFmt     []int          // XF 序号 → 数字格式编号
+	formats   map[int]string // 自定义数字格式
+	date1904  bool
+	sheets    []*xlsSheet
+	names     map[int]string // 工作表 BOF 在流中的位置 → 名称
 }
 
 type xlsRecord struct {
@@ -159,7 +185,9 @@ func (x *xlsReader) parse() error {
 				cur = nil
 			}
 		case xlsFilePass:
-			return errNativeEncrypted
+			if !x.decrypted {
+				return xlsEncrypted{filepass: d}
+			}
 		case xlsDateMode:
 			x.date1904 = le16(d, 0) == 1
 		case xlsFormat:

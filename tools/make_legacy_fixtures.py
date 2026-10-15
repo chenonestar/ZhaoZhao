@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """生成老格式测试样本（.doc/.xls/.ppt/.rtf 以及同结构的 .wps/.et/.dps），提交到 testdata/legacy。
 用法: python3 tools/make_legacy_fixtures.py testdata/legacy
+加密的 .xls 样本另见 tools/make_encrypted_xls.py。
 依赖: python-docx openpyxl python-pptx，以及 soffice。
 样本内容尽量覆盖内置解析器要处理的结构：表格、页眉页脚、脚注、超链接域、多工作表、
 日期与数字格式、公式（数字和文字结果）、批注、超过 8 KB 的共享字符串表（跨 CONTINUE 记录）、

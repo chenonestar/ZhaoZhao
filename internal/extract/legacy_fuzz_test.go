@@ -10,7 +10,7 @@ import (
 // 内置解析器读的是来历不明的文件：任何输入都不能崩溃、卡死或占用大量内存。
 // 平时只跑种子样本；排查时用 go test -fuzz=FuzzLegacyNative -fuzztime=60s ./internal/extract 长时间随机测试。
 func FuzzLegacyNative(f *testing.F) {
-	for _, n := range []string{"合同.doc", "脚注.doc", "报销.xls", "汇报.ppt", "合同.rtf", "gbk.rtf", "其实是网页.xls"} {
+	for _, n := range []string{"合同.doc", "脚注.doc", "报销.xls", "汇报.ppt", "合同.rtf", "gbk.rtf", "其实是网页.xls", "保护工作簿.xls", "有打开密码.xls"} {
 		b, err := os.ReadFile(filepath.Join("..", "..", "testdata", "legacy", n))
 		if err != nil {
 			f.Fatal(err)
