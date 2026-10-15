@@ -92,7 +92,13 @@ footer { display: flex; gap: 4px; padding: 5px 14px; border-top: 1px solid var(-
 .tabs button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .manage-body { flex: 1; overflow: auto; padding: 14px 18px; }
 .summary { background: var(--bg); padding: 12px 14px; border-radius: 8px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 4px; }
-.current > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+/* 正在处理：标题加 8 行的固定高度，多了在里面滚动 */
+.current { height: calc(9 * 18px); overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: var(--panel); }
+.current > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; line-height: 18px; }
+.current > .stall { white-space: normal; }
+/* 组件检测结果固定占 3 行 */
+.components { min-height: calc(3 * 18px); }
+.components > div { line-height: 18px; }
 .btns { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
 .section-head { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; }
 .section-head h4, .manage-body h4 { margin: 14px 0 8px; }

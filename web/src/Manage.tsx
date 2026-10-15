@@ -74,30 +74,31 @@ function IndexTab({ status, refresh }: { status: Status | null; refresh: () => v
             {" "}{status.roots.length > 1 ? `全部 ${status.roots.length} 个索引根合计：` : ""}文件 {t.Total} · 已提取 {t.Done} · 待处理 {t.Pending} · 仅文件名 {t.MetaOnly} · 失败 {t.Failed} · 已加密 {t.Encrypted}
           </span>
         </div>
-        {status.stalledSec > 0 && (
-          <div className="error">
-            已经 {fmtDuration(status.stalledSec)} 没有任何文件完成，可能卡住了。请到「设置」页底部点「导出诊断信息」，把生成的文件发给开发者；
-            也可以先暂停再恢复，或退出后重新启动。
-          </div>
-        )}
         <QueueLine label="普通文件待处理" n={status.fastQueue} eta={status.fastEtaSec} lane={{ used: status.active, cap: status.workers }} />
         <QueueLine label="老格式待转换" n={status.legacyQueue} eta={status.legacyEtaSec} lane={status.legacy} paused={status.onBattery} />
         <QueueLine label="OCR 待识别" n={status.ocrQueue} eta={status.ocrEtaSec} lane={status.ocr} paused={status.onBattery} />
         {status.onBattery && <div className="dim">正在使用电池：OCR 和格式转换已暂停</div>}
-        {status.net && status.net.used > 0 && <div className="dim small">网络盘读取 {status.net.used}/{status.net.cap}</div>}
-        {status.current.length > 0 && (
+        {/* 正在处理：固定高度、内部滚动，卡住提示也放在里面，状态刷新时下面的内容不上下跳动 */}
+        {(!status.idle || status.current.length > 0 || status.stalledSec > 0) && (
           <div className="current dim">
-            正在处理：
-            {status.current.slice(0, 12).map((j) => (
-              <div key={j.path} title={j.path}>
+            {status.stalledSec > 0 && (
+              <div className="error stall">
+                已经 {fmtDuration(status.stalledSec)} 没有任何文件完成，可能卡住了。请到「设置」页底部点「导出诊断信息」，把生成的文件发给开发者；
+                也可以先暂停再恢复，或退出后重新启动。
+              </div>
+            )}
+            <div>
+              正在处理 {status.current.length} 个{status.net && status.net.used > 0 ? ` · 网络盘读取 ${status.net.used}/${status.net.cap}` : ""}
+            </div>
+            {status.current.map((j) => (
+              <div key={j.id} title={j.path}>
                 <span className="badge">{j.kind}</span> {j.path.split(/[\\/]/).pop()} — {j.stage}{j.progress ? ` ${j.progress}` : ""} · {fmtDuration(j.seconds)}
               </div>
             ))}
-            {status.current.length > 12 && <div>…… 还有 {status.current.length - 12} 个</div>}
           </div>
         )}
         <div className="components small">
-          {status.componentsChecking && <div className="dim">正在检测格式转换和 OCR 组件…</div>}
+          {status.componentsChecking && !(status.components ?? []).length && <div className="dim">正在检测格式转换和 OCR 组件…</div>}
           {(status.components ?? []).map((c) => (
             <div key={c.name} className={c.ok ? "dim" : "bad"} title={c.path}>
               {c.ok ? "✓" : "✗"} {c.name}：{c.message}
@@ -107,7 +108,7 @@ function IndexTab({ status, refresh }: { status: Status | null; refresh: () => v
         <div className="btns">
           {status.paused ? <button className="primary" onClick={() => run(api.resume())}>恢复全部任务</button> : <button onClick={() => run(api.pause())}>暂停全部任务</button>}
           <button onClick={() => run(api.rescan())}>立即扫描全部</button>
-          <button disabled={status.componentsChecking} onClick={() => run(api.checkComponents())}>检测组件</button>
+          <button disabled={status.componentsChecking} onClick={() => run(api.checkComponents())}>{status.componentsChecking ? "正在检测组件…" : "检测组件"}</button>
           <button onClick={() => { if (confirm("重建会重新提取所有文件的内容，耗时较长。继续吗？")) run(api.rebuild()); }}>重建全部索引</button>
         </div>
       </div>

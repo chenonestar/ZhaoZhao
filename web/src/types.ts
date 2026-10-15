@@ -98,6 +98,7 @@ export interface VolumeStatus {
 }
 
 export interface CurrentJob {
+  id: number;
   path: string;
   kind: string;
   stage: string;

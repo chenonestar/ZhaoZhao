@@ -45,9 +45,10 @@ var (
 type job struct {
 	f        store.File
 	path     string
-	class    int   // prioFast / prioLegacy / prioOCR：决定提取方式和时限
-	lane     *lane // 所在通道
-	since    time.Time
+	class    int       // prioFast / prioLegacy / prioOCR：决定提取方式和时限
+	lane     *lane     // 所在通道
+	queued   time.Time // 进入「正在处理」的时间：界面按它排序，顺序不跳动
+	since    time.Time // 开始当前处理的时间（等待时为派发时间）
 	stage    string
 	progress string
 	sent     bool // 结果已交给写入协程：写入完成后才从「处理中」移除，避免同一文件被再次派发
@@ -272,7 +273,8 @@ func (m *Manager) laneDispatcher(l *lane) {
 		s.idle.Store(false)
 		loOnly := m.Config().LegacyLOOnly
 		for _, f := range files {
-			j := &job{f: f, class: classOf(f, loOnly), lane: l, stage: "等待空闲的提取线程", since: time.Now()}
+			now := time.Now()
+			j := &job{f: f, class: classOf(f, loOnly), lane: l, stage: "等待空闲的提取线程", queued: now, since: now}
 			j.path, _ = m.AbsPath(f.VolumeID, f.RelPath)
 			s.mu.Lock()
 			s.inflight[f.ID] = j

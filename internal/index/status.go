@@ -41,6 +41,7 @@ type VolumeStatus struct {
 
 // CurrentJob 是一个正在处理的文件。
 type CurrentJob struct {
+	ID       int64  `json:"id"`
 	Path     string `json:"path"`
 	Kind     string `json:"kind"`     // 普通 / 老格式 / OCR
 	Stage    string `json:"stage"`    // 当前步骤，如「从网络盘读取」「OCR 识别」
@@ -88,7 +89,7 @@ type Status struct {
 	Space       SpaceStatus `json:"space"`
 }
 
-// currentJobs 返回正在处理的文件，处理得最久的在前。
+// currentJobs 返回正在处理的文件，按进入列表的先后排序：已有的文件位置不变，新的排在后面（界面不跳动）。
 func (m *Manager) currentJobs() []CurrentJob {
 	s := &m.sched
 	out := []CurrentJob{}
@@ -96,18 +97,26 @@ func (m *Manager) currentJobs() []CurrentJob {
 		return out
 	}
 	now := time.Now()
+	type item struct {
+		CurrentJob
+		queued time.Time
+	}
+	var items []item
 	s.mu.Lock()
 	for _, j := range s.inflight {
-		out = append(out, CurrentJob{Path: j.path, Kind: classNames[j.class], Stage: j.stage, Progress: j.progress,
-			Seconds: int64(now.Sub(j.since).Seconds())})
+		items = append(items, item{CurrentJob{ID: j.f.ID, Path: j.path, Kind: classNames[j.class], Stage: j.stage, Progress: j.progress,
+			Seconds: int64(now.Sub(j.since).Seconds())}, j.queued})
 	}
 	s.mu.Unlock()
-	sort.Slice(out, func(i, k int) bool {
-		if out[i].Seconds != out[k].Seconds {
-			return out[i].Seconds > out[k].Seconds
+	sort.Slice(items, func(i, k int) bool {
+		if !items[i].queued.Equal(items[k].queued) {
+			return items[i].queued.Before(items[k].queued)
 		}
-		return out[i].Path < out[k].Path
+		return items[i].ID < items[k].ID
 	})
+	for _, it := range items {
+		out = append(out, it.CurrentJob)
+	}
 	return out
 }
 
