@@ -22,10 +22,10 @@ func TestGarbledText(t *testing.T) {
 		{"Invoice number 20250707 has been paid in full.", false},
 		{"Le système a été mis à jour à 10 h, après vérification.", false},
 		{"第1页", false},
-		{" ", true},                // 私用区
-		{"�����合同", true},                           // 替换符
-		{"ºÏÍ¬±àºÅ£ºHT-2025 Î¥Ô¼½ðÎªºÏÍ¬×Ü¶îµÄ°Ù·ÖÖ®Îå", true},                 // GBK 被当成西文
-		{"ÄÖ", false},                                                       // 太短，不判断
+		{" ", true}, // 私用区
+		{"�����合同", true},  // 替换符
+		{"ºÏÍ¬±àºÅ£ºHT-2025 Î¥Ô¼½ðÎªºÏÍ¬×Ü¶îµÄ°Ù·ÖÖ®Îå", true}, // GBK 被当成西文
+		{"ÄÖ", false}, // 太短，不判断
 	} {
 		if got := garbledText(c.s); got != c.want {
 			t.Errorf("%q：%v，应为 %v", c.s, got, c.want)
