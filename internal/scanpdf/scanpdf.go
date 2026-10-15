@@ -10,9 +10,13 @@ import (
 )
 
 // Page 是一页：JPEG 图片，或 JBIG2 为 true 时的一个（无法识别的）JBIG2 图片对象。
+// Text 非空时在图片上叠一行文字（英文，标准字体），模拟扫描页上加的页码、电子章。
+// PUAText 非空时叠一行「乱码」文字：字体编码把字符映射到私用区，文字层取出来是乱码。
 type Page struct {
-	Image image.Image
-	JBIG2 bool
+	Image   image.Image
+	JBIG2   bool
+	Text    string
+	PUAText string
 }
 
 // Write 写出 PDF。
@@ -60,9 +64,29 @@ func Write(w io.Writer, pages []Page) error {
 			w, h, cs, bpc, filter, len(data)), data)
 		// 页面按图片像素数的 72dpi 尺寸
 		content := []byte(fmt.Sprintf("q %d 0 0 %d 0 0 cm /Im0 Do Q", w, h))
+		fonts := ""
+		if p.Text != "" {
+			f := obj("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", nil)
+			fonts += fmt.Sprintf(" /F1 %d 0 R", f)
+			content = append(content, fmt.Sprintf(" BT /F1 10 Tf 10 10 Td (%s) Tj ET", p.Text)...)
+		}
+		if p.PUAText != "" {
+			// 把 A～Z 映射到私用区字形名（uniE041…），没有 ToUnicode：取出的文字是私用区字符
+			diff := ""
+			for c := 'A'; c <= 'Z'; c++ {
+				diff += fmt.Sprintf(" /uniE0%02X", int(c))
+			}
+			f := obj("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Type /Encoding /Differences [65"+diff+"] >> >>", nil)
+			fonts += fmt.Sprintf(" /F2 %d 0 R", f)
+			content = append(content, fmt.Sprintf(" BT /F2 12 Tf 10 30 Td (%s) Tj ET", p.PUAText)...)
+		}
+		res := fmt.Sprintf("/XObject << /Im0 %d 0 R >>", img)
+		if fonts != "" {
+			res += " /Font <<" + fonts + " >>"
+		}
 		c := obj(fmt.Sprintf("<< /Length %d >>", len(content)), content)
-		kids = append(kids, obj(fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %d %d] /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>",
-			w, h, img, c), nil))
+		kids = append(kids, obj(fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %d %d] /Resources << %s >> /Contents %d 0 R >>",
+			w, h, res, c), nil))
 	}
 	// 补写页面树（对象 2）：放在文件末尾，交叉引用表指向新位置
 	kidRefs := ""

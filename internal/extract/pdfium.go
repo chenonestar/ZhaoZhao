@@ -46,6 +46,12 @@ var fpdf struct {
 	BitmapGetStride     func(bmp uintptr) int32
 	BitmapDestroy       func(bmp uintptr)
 	RenderPageBitmap    func(bmp, page uintptr, x, y, w, h, rotate, flags int32)
+	PageCountObjects    func(page uintptr) int32
+	PageGetObject       func(page uintptr, index int32) uintptr
+	ObjGetType          func(obj uintptr) int32
+	ObjGetBounds        func(obj uintptr, left, bottom, right, top *float32) int32
+	FormCountObjects    func(form uintptr) int32
+	FormGetObject       func(form uintptr, index uint32) uintptr
 }
 
 // pdfiumCandidates 返回可能的 PDFium 库位置：环境变量、程序目录下的 components/pdfium、程序目录。
@@ -130,6 +136,12 @@ func registerPDFium(lib uintptr) (err error) {
 	reg(&fpdf.BitmapGetStride, "FPDFBitmap_GetStride")
 	reg(&fpdf.BitmapDestroy, "FPDFBitmap_Destroy")
 	reg(&fpdf.RenderPageBitmap, "FPDF_RenderPageBitmap")
+	reg(&fpdf.PageCountObjects, "FPDFPage_CountObjects")
+	reg(&fpdf.PageGetObject, "FPDFPage_GetObject")
+	reg(&fpdf.ObjGetType, "FPDFPageObj_GetType")
+	reg(&fpdf.ObjGetBounds, "FPDFPageObj_GetBounds")
+	reg(&fpdf.FormCountObjects, "FPDFFormObj_CountObjects")
+	reg(&fpdf.FormGetObject, "FPDFFormObj_GetObject")
 	return nil
 }
 
@@ -190,11 +202,71 @@ func (d *pdfDoc) pages() int { return int(fpdf.GetPageCount(d.h)) }
 
 // text 返回第 i 页（从 0 开始）的文字。
 func (d *pdfDoc) text(i int) (string, error) {
+	s, _, err := d.page(i, false)
+	return s, err
+}
+
+// page 返回第 i 页的文字；withImages 时还返回图片覆盖页面的比例（0～1），用来判断是不是扫描页。
+func (d *pdfDoc) page(i int, withImages bool) (string, float64, error) {
 	page := fpdf.LoadPage(d.h, int32(i))
 	if page == 0 {
-		return "", fmt.Errorf("第 %d 页无法读取", i+1)
+		return "", 0, fmt.Errorf("第 %d 页无法读取", i+1)
 	}
 	defer fpdf.ClosePage(page)
+	cov := 0.0
+	if withImages {
+		cov = d.imageCoverage(i, page)
+	}
+	s, err := pageText(page, i)
+	return s, cov, err
+}
+
+// PDFium 的页面对象类型。
+const (
+	fpdfObjImage = 3
+	fpdfObjForm  = 5
+)
+
+// imageCoverage 估算图片占页面面积的比例：各图片（包括表单对象里的图片）的面积之和，
+// 截到页面范围内，最多为 1。扫描页通常是一张铺满整页的图片。
+func (d *pdfDoc) imageCoverage(i int, page uintptr) float64 {
+	var size [2]float32
+	if fpdf.GetPageSizeByIndexF(d.h, int32(i), &size) == 0 || size[0] <= 0 || size[1] <= 0 {
+		return 0
+	}
+	pw, ph := float64(size[0]), float64(size[1])
+	area := 0.0
+	add := func(obj uintptr) {
+		var l, b, r, t float32
+		if fpdf.ObjGetBounds(obj, &l, &b, &r, &t) == 0 {
+			return
+		}
+		w := min(float64(r), pw) - max(float64(l), 0)
+		h := min(float64(t), ph) - max(float64(b), 0)
+		if w > 0 && h > 0 {
+			area += w * h
+		}
+	}
+	n := fpdf.PageCountObjects(page)
+	for k := int32(0); k < n && k < 5000; k++ {
+		obj := fpdf.PageGetObject(page, k)
+		switch fpdf.ObjGetType(obj) {
+		case fpdfObjImage:
+			add(obj)
+		case fpdfObjForm: // 扫描软件有时把整页图片包在表单对象里
+			m := fpdf.FormCountObjects(obj)
+			for j := int32(0); j < m && j < 1000; j++ {
+				if fpdf.ObjGetType(fpdf.FormGetObject(obj, uint32(j))) == fpdfObjImage {
+					add(obj)
+					break
+				}
+			}
+		}
+	}
+	return min(area/(pw*ph), 1)
+}
+
+func pageText(page uintptr, i int) (string, error) {
 	tp := fpdf.TextLoadPage(page)
 	if tp == 0 {
 		return "", fmt.Errorf("第 %d 页的文字无法读取", i+1)

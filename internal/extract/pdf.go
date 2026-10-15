@@ -42,12 +42,25 @@ func extractPDFium(p string, opt Options) (res doc.Result, ok bool) {
 		if n > 50 && i%50 == 0 {
 			opt.Progress("读取文字 %d/%d 页", i+1, n)
 		}
-		txt, err := d.text(i)
-		if txt = strings.TrimSpace(txt); err != nil || txt == "" {
-			blank = append(blank, i+1)
-			continue
+		txt, cov, err := d.page(i, true)
+		txt = strings.TrimSpace(txt)
+		act := pageOCR
+		if err == nil {
+			act = classifyPage(txt, cov)
 		}
-		texts[i+1] = plainText(txt)
+		switch act {
+		case pageOCR:
+			if txt != "" {
+				logx.Debugf("PDF %s 第 %d 页的文字层像乱码，改用 OCR", logx.P(p), i+1)
+			}
+			blank = append(blank, i+1)
+		case pageOCRKeepText:
+			logx.Debugf("PDF %s 第 %d 页只有 %d 个字、图片占 %.0f%%，按扫描页识别", logx.P(p), i+1, len([]rune(txt)), cov*100)
+			blank = append(blank, i+1)
+			texts[i+1] = plainText(txt)
+		default:
+			texts[i+1] = plainText(txt)
+		}
 	}
 	if n == 0 {
 		return doc.Result{Status: doc.StatusFailed, Err: "PDF 没有页面"}, true
@@ -93,8 +106,8 @@ func extractPDFGo(p string, opt Options) (res doc.Result) {
 			return doc.Result{Status: doc.StatusEncrypted, Err: "文件已加密"}
 		}
 		txt = strings.TrimSpace(txt)
-		if err != nil || txt == "" {
-			blank = append(blank, i) // 逐页判断：没有文字层的页视为扫描页
+		if err != nil || classifyPage(txt, 0) == pageOCR {
+			blank = append(blank, i) // 逐页判断：没有文字层（或文字层是乱码）的页视为扫描页
 			continue
 		}
 		texts[i] = plainText(txt)
@@ -115,8 +128,11 @@ func pdfResult(n int, texts map[int]string, blank []int, got pdfOCRResult, ocrEr
 	usedOCR := false
 	ocrNote := got.note()
 	for pg, t := range got.texts {
-		if strings.TrimSpace(t) != "" {
-			texts[pg] = strings.TrimSpace(t)
+		if t = strings.TrimSpace(t); t != "" {
+			if old, ok := texts[pg]; ok { // 扫描页上原有的少量文字（页码、电子章等）也保留
+				t = old + "\n" + t
+			}
+			texts[pg] = t
 			usedOCR = true
 		}
 	}
