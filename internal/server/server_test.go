@@ -20,6 +20,12 @@ import (
 
 func newTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
+	return newTestServerWith(t, nil)
+}
+
+// newTestServerWith 在索引根里另外放上 files（文件名 → 内容）。
+func newTestServerWith(t *testing.T, files map[string]string) (*Server, string) {
+	t.Helper()
 	data := t.TempDir()
 	db, err := store.Open(data)
 	if err != nil {
@@ -31,6 +37,9 @@ func newTestServer(t *testing.T) (*Server, string) {
 	}
 	docs := t.TempDir()
 	os.WriteFile(filepath.Join(docs, "合同.txt"), []byte("违约金条款 axolotl"), 0o644)
+	for name, body := range files {
+		os.WriteFile(filepath.Join(docs, name), []byte(body), 0o644)
+	}
 	eng := &search.Engine{DB: db, Res: m, Norm: m.Norm}
 	var revealed string
 	srv, err := New(m, eng, 0, "", Actions{
@@ -191,3 +200,97 @@ func TestSearchAndOpenAPI(t *testing.T) {
 }
 
 func itoa(n int64) string { b, _ := json.Marshal(n); return string(b) }
+
+// 失败列表：按原因统计、筛选、分批加载、导出 CSV、整类重试。
+func TestFailedListAPI(t *testing.T) {
+	srv, _ := newTestServerWith(t, map[string]string{
+		"坏1.docx": "not a zip", "坏2.docx": "not a zip either", "坏3.xlsx": "garbage",
+		"空.txt": "",
+	})
+	base := "http://" + srv.Addr
+	jar, _ := cookiejar.New(nil)
+	c := &http.Client{Jar: jar}
+	c.Get(srv.URL())
+	do := func(method, path, body string, out any) int {
+		req, _ := http.NewRequest(method, base+path, strings.NewReader(body))
+		req.Header.Set("X-ZhaoZhao", "1")
+		r, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		b, _ := io.ReadAll(r.Body)
+		if out != nil {
+			if err := json.Unmarshal(b, out); err != nil {
+				t.Fatalf("%s: %v: %s", path, err, b)
+			}
+		}
+		return r.StatusCode
+	}
+	type summary struct {
+		Cats []store.ProblemCat `json:"cats"`
+		Exts []store.ExtCount   `json:"exts"`
+	}
+	count := func(s summary, key string) int64 {
+		for _, c := range s.Cats {
+			if c.Key == key {
+				return c.Count
+			}
+		}
+		return -1
+	}
+	var sum summary
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		do("GET", "/api/failed/summary", "", &sum)
+		if count(sum, "corrupt") == 3 && count(sum, "meta_empty") == 1 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if count(sum, "corrupt") != 3 || count(sum, "meta_empty") != 1 {
+		t.Fatalf("类别统计: %+v", sum.Cats)
+	}
+	if len(sum.Exts) != 2 || sum.Exts[0] != (store.ExtCount{Ext: "docx", Count: 2}) {
+		t.Fatalf("扩展名统计: %+v", sum.Exts)
+	}
+	type page struct {
+		Items []struct {
+			ID   int64  `json:"id"`
+			Path string `json:"path"`
+			Cat  string `json:"cat"`
+		} `json:"items"`
+		More bool `json:"more"`
+	}
+	var p1, p2 page
+	do("GET", "/api/failed?cat=corrupt&limit=2", "", &p1)
+	if len(p1.Items) != 2 || !p1.More || p1.Items[0].Cat != "文件损坏或格式不对" {
+		t.Fatalf("第一批: %+v", p1)
+	}
+	do("GET", "/api/failed?cat=corrupt&limit=2&after="+itoa(p1.Items[1].ID), "", &p2)
+	if len(p2.Items) != 1 || p2.More {
+		t.Fatalf("第二批: %+v", p2)
+	}
+	do("GET", "/api/failed?ext=docx&q="+url.QueryEscape("坏2"), "", &p1)
+	if len(p1.Items) != 1 || !strings.HasSuffix(p1.Items[0].Path, "坏2.docx") {
+		t.Fatalf("按扩展名和关键字: %+v", p1)
+	}
+	var ex struct {
+		Path  string `json:"path"`
+		Count int    `json:"count"`
+	}
+	if do("POST", "/api/failed/export", `{"cat":"corrupt","ext":"docx"}`, &ex) != 200 || ex.Count != 2 {
+		t.Fatalf("导出: %+v", ex)
+	}
+	b, err := os.ReadFile(ex.Path)
+	if err != nil || !strings.HasPrefix(string(b), "\xef\xbb\xbf路径,状态,原因类别") || strings.Count(string(b), "\r\n") != 3 ||
+		!strings.Contains(string(b), "坏1.docx") || strings.Contains(string(b), "坏3.xlsx") {
+		t.Fatalf("CSV 内容不对（%v）:\n%s", err, b)
+	}
+	var rt struct {
+		Count int `json:"count"`
+	}
+	if do("POST", "/api/failed/retry", `{"filter":{"cat":"corrupt","ext":"xlsx"}}`, &rt) != 200 || rt.Count != 1 {
+		t.Fatalf("整类重试: %+v", rt)
+	}
+}

@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
-import type { Config, FailedItem, HotkeyState, LegacyTestState, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
+import type { Config, FailedFilter, FailedItem, FailedSummary, HotkeyState, LegacyTestState, ProblemCat, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
 import { fmtDuration, fmtSize, fmtTime } from "./util";
 import { FolderPicker } from "./FolderPicker";
 import { Help } from "./Help";
@@ -278,35 +278,146 @@ function RootOptsDialog({ root, onClose, onSave }: { root: RootStatus; onClose: 
   );
 }
 
+const PAGE = 200;
+const EXT_SHOW = 24;
+
+// FailedTab：失败列表。按原因类别、扩展名、路径关键字筛选（数量由后台统计），
+// 每次加载 200 个，滚动到底自动加载下一批；「重试这一类」「导出」作用于筛选出的全部文件。
 function FailedTab({ refresh }: { refresh: () => void }) {
+  const [f, setF] = useState<FailedFilter>({ cat: "", ext: "", q: "" });
+  const [qInput, setQInput] = useState("");
+  const [sum, setSum] = useState<FailedSummary | null>(null);
   const [items, setItems] = useState<FailedItem[] | null>(null);
+  const [more, setMore] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [sel, setSel] = useState<Set<number>>(new Set());
+  const [allExts, setAllExts] = useState(false);
+  const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
-  const load = () => api.failed().then(setItems).catch((e) => setErr(e.message));
-  useEffect(() => { load(); }, []);
-  const run = (p: Promise<unknown>) => p.then(() => { setSel(new Set()); load(); refresh(); }).catch((e) => setErr(e.message));
-  if (!items) return <div className="dim pad">加载中…</div>;
+  const seq = useRef(0);
+  const end = useRef<HTMLDivElement>(null);
+
+  const reload = (flt: FailedFilter) => {
+    const n = ++seq.current;
+    setLoading(true);
+    setErr("");
+    Promise.all([api.failedSummary(flt), api.failed(flt, 0, PAGE)])
+      .then(([s, page]) => {
+        if (n !== seq.current) return;
+        setSum(s); setItems(page.items); setMore(page.more); setSel(new Set());
+      })
+      .catch((e) => { if (n === seq.current) setErr(e.message); })
+      .finally(() => { if (n === seq.current) setLoading(false); });
+  };
+  const loadMore = () => {
+    if (!items || !items.length || loading) return;
+    const n = seq.current;
+    setLoading(true);
+    api.failed(f, items[items.length - 1].id, PAGE)
+      .then((page) => { if (n === seq.current) { setItems([...items, ...page.items]); setMore(page.more); } })
+      .catch((e) => { if (n === seq.current) setErr(e.message); })
+      .finally(() => { if (n === seq.current) setLoading(false); });
+  };
+  useEffect(() => { reload(f); }, [f]);
+  // 关键字输入停顿后再查
+  useEffect(() => {
+    const t = setTimeout(() => { if (qInput !== f.q) setF({ ...f, q: qInput }); }, 300);
+    return () => clearTimeout(t);
+  }, [qInput]);
+  // 列表底部出现在视野里时自动加载下一批
+  useEffect(() => {
+    const el = end.current;
+    if (!el || !more) return;
+    const io = new IntersectionObserver((es) => { if (es[0].isIntersecting) loadMore(); });
+    io.observe(el);
+    return () => io.disconnect();
+  });
+
+  const run = (p: Promise<unknown>, done?: (r: any) => void) =>
+    p.then((r) => { done?.(r); reload(f); refresh(); }).catch((e) => setErr(e.message));
+  if (!sum || !items) return <div className="dim pad">{err ? <span className="error">{err}</span> : "加载中…"}</div>;
+
+  const failCats = sum.cats.filter((c) => !c.meta);
+  const metaCats = sum.cats.filter((c) => c.meta);
+  const total = (cs: ProblemCat[]) => cs.reduce((a, c) => a + c.count, 0);
+  const shown = f.cat === "" ? total(failCats) : f.cat === "meta" ? total(metaCats) : (sum.cats.find((c) => c.key === f.cat)?.count ?? 0);
+  const isMeta = f.cat === "meta" || !!metaCats.find((c) => c.key === f.cat);
+  const scope = f.cat === "" ? "失败和已加密" : f.cat === "meta" ? "仅文件名" : sum.cats.find((c) => c.key === f.cat)?.label ?? "";
+  const pick = (cat: string) => setF({ ...f, cat });
+  const chip = (key: string, label: string, n: number) => (
+    <span key={key} className={"chip" + (f.cat === key ? " on" : "")} onClick={() => pick(key)}>{label} {n}</span>
+  );
+  const exts = sum.exts.length > EXT_SHOW && !allExts ? sum.exts.slice(0, EXT_SHOW) : [...sum.exts];
+  if (f.ext && !exts.find((e) => e.ext === f.ext)) exts.push({ ext: f.ext, count: 0 });
   const ids = [...sel];
+  const allSel = items.length > 0 && items.every((x) => sel.has(x.id));
+
   return (
-    <div>
+    <div className="failed">
+      <input className="failed-q" value={qInput} onChange={(e) => setQInput(e.target.value)}
+        placeholder="按路径或文件名筛选（可以粘贴文件夹路径）" />
+      <div className="failed-facet"><span className="dim">失败</span>
+        <div className="chips">
+          {chip("", "全部", total(failCats))}
+          {failCats.filter((c) => c.count > 0 || c.key === f.cat).map((c) => chip(c.key, c.label, c.count))}
+        </div>
+      </div>
+      <div className="failed-facet"><span className="dim">仅文件名</span>
+        <div className="chips">
+          {chip("meta", "全部", total(metaCats))}
+          {metaCats.filter((c) => c.count > 0 || c.key === f.cat).map((c) => chip(c.key, c.label, c.count))}
+        </div>
+      </div>
+      <div className="failed-facet"><span className="dim">扩展名</span>
+        <div className="chips">
+          <span className={"chip" + (f.ext === "" ? " on" : "")} onClick={() => setF({ ...f, ext: "" })}>全部</span>
+          {exts.map((e) => (
+            <span key={e.ext} className={"chip" + (f.ext === e.ext ? " on" : "")} onClick={() => setF({ ...f, ext: f.ext === e.ext ? "" : e.ext })}>
+              {e.ext === "." ? "无扩展名" : e.ext} {e.count}
+            </span>
+          ))}
+          {sum.exts.length > EXT_SHOW && (
+            <span className="chip" onClick={() => setAllExts(!allExts)}>{allExts ? "收起" : `更多（${sum.exts.length - EXT_SHOW}）`}</span>
+          )}
+        </div>
+      </div>
       <div className="btns">
-        <button disabled={!ids.length} onClick={() => run(api.retry(ids))}>重试所选</button>
-        <button disabled={!items.length} onClick={() => run(api.retry([]))}>重试全部失败项</button>
+        <button disabled={!shown || isMeta}
+          title={isMeta ? "这些文件按设置只索引文件名。放宽设置（大小上限、OCR 等）后在「索引」页点「扫描」会自动处理" : "把筛选出的全部文件重新排队处理"}
+          onClick={() => { if (confirm(`重新处理「${scope}」中筛选出的 ${shown} 个文件？`)) run(api.retryFiltered(f), (r) => setMsg(`已重新排队 ${r.count} 个文件`)); }}>
+          重试这一类（{shown}）</button>
+        <button disabled={!shown} onClick={() => { setMsg("正在导出…"); run(api.exportFailed(f), (r) => setMsg(`已导出 ${r.count} 行：${r.path}`)); }}>导出这一类为 CSV</button>
+        <button disabled={!ids.length || isMeta} onClick={() => run(api.retry(ids), () => setMsg(`已重新排队所选的 ${ids.length} 个文件`))}>重试所选</button>
         <button disabled={!ids.length} onClick={() => { if (confirm("把所选文件加入排除规则并从索引移除？")) run(api.exclude(ids)); }}>加入排除规则</button>
       </div>
+      {msg && <div className="small ok">{msg}</div>}
       {err && <div className="error">{err}</div>}
-      {items.length === 0 && <div className="dim pad">没有失败的文件。</div>}
-      <table className="grid">
-        <tbody>
-          {items.map((f) => (
-            <tr key={f.id}>
-              <td><input type="checkbox" checked={sel.has(f.id)} onChange={() => { const n = new Set(sel); n.has(f.id) ? n.delete(f.id) : n.add(f.id); setSel(n); }} /></td>
-              <td className="path-cell"><div title={f.path}>{f.path}</div></td>
-              <td><span className={"badge " + (f.state === 3 ? "" : "bad")}>{f.state === 3 ? "已加密" : "失败"}</span> {f.reason}</td>
+      <div className="dim small">共 {shown} 个{items.length < shown ? `，已显示 ${items.length} 个` : ""}{ids.length ? `，已选 ${ids.length} 个` : ""}</div>
+      {items.length === 0 && !loading && <div className="dim pad">{f.q || f.ext || f.cat ? "没有符合条件的文件。" : "没有失败的文件。"}</div>}
+      {items.length > 0 && (
+        <table className="grid">
+          <thead>
+            <tr>
+              <th><input type="checkbox" title="全选已显示的" checked={allSel}
+                onChange={() => setSel(allSel ? new Set() : new Set(items.map((x) => x.id)))} /></th>
+              <th>路径</th>
+              <th>原因</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {items.map((x) => (
+              <tr key={x.id}>
+                <td><input type="checkbox" checked={sel.has(x.id)} onChange={() => { const n = new Set(sel); n.has(x.id) ? n.delete(x.id) : n.add(x.id); setSel(n); }} /></td>
+                <td className="failed-path" title={x.path}><div>{x.name}</div><div className="dim small">{x.path}</div></td>
+                <td className="failed-why"><span className={"badge " + (x.state === 2 ? "bad" : "")}>{x.cat}</span> {x.reason}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div ref={end} className="dim small pad">
+        {more ? (loading ? "正在加载…" : <button onClick={loadMore}>加载更多</button>) : items.length > PAGE ? "已全部显示" : ""}
+      </div>
     </div>
   );
 }

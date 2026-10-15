@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/chenonestar/zhaozhao/internal/index"
 	"github.com/chenonestar/zhaozhao/internal/logx"
+	"github.com/chenonestar/zhaozhao/internal/store"
 )
 
 func (s *Server) routes(mux *http.ServeMux) {
@@ -123,8 +125,15 @@ func (s *Server) routes(mux *http.ServeMux) {
 		}
 		return ok(), s.M.DeleteVolume(b.ID)
 	}))
+	// 失败列表：按原因类别、扩展名、路径关键字筛选，按编号分批加载（每批 limit 个，after 为上一批最后一个的编号）
 	h("/api/failed", func(w http.ResponseWriter, r *http.Request) {
-		fl, err := s.M.DB.ListFailed(2000)
+		q := r.URL.Query()
+		after, _ := strconv.ParseInt(q.Get("after"), 10, 64)
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		if limit <= 0 || limit > 1000 {
+			limit = 200
+		}
+		fl, err := s.M.DB.ListProblems(problemFilter(q), after, limit+1)
 		if err != nil {
 			writeErr(w, 500, err)
 			return
@@ -133,22 +142,59 @@ func (s *Server) routes(mux *http.ServeMux) {
 			ID     int64  `json:"id"`
 			Name   string `json:"name"`
 			Path   string `json:"path"`
+			Ext    string `json:"ext"`
 			State  int    `json:"state"`
+			Cat    string `json:"cat"`
 			Reason string `json:"reason"`
 		}
-		out := []item{}
+		more := len(fl) > limit
+		if more {
+			fl = fl[:limit]
+		}
+		out := struct {
+			Items []item `json:"items"`
+			More  bool   `json:"more"`
+		}{Items: []item{}, More: more}
 		for i := range fl {
-			p, _, _ := s.M.Display(&fl[i])
-			out = append(out, item{fl[i].ID, fl[i].Name, p, fl[i].State, fl[i].Err})
+			p, _, _ := s.M.Display(&fl[i].File)
+			out.Items = append(out.Items, item{fl[i].ID, fl[i].Name, p, fl[i].Ext, fl[i].State, store.ProblemLabel(fl[i].Cat), fl[i].Err})
 		}
 		writeJSON(w, out)
 	})
+	h("/api/failed/summary", func(w http.ResponseWriter, r *http.Request) {
+		cats, exts, err := s.M.DB.ProblemSummary(problemFilter(r.URL.Query()))
+		if err != nil {
+			writeErr(w, 500, err)
+			return
+		}
+		writeJSON(w, map[string]any{"cats": cats, "exts": exts})
+	})
+	// 重试：给了 filter 就重试符合条件的全部文件，否则重试 ids（ids 为空：全部失败的）
 	h("/api/failed/retry", s.post(func(r *http.Request) (any, error) {
 		var b struct {
-			IDs []int64 `json:"ids"`
+			IDs    []int64              `json:"ids"`
+			Filter *store.ProblemFilter `json:"filter"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&b)
+		if b.Filter != nil {
+			n, err := s.M.RetryProblems(*b.Filter)
+			return map[string]int64{"count": n}, err
+		}
 		return ok(), s.M.RetryFailed(b.IDs)
+	}))
+	h("/api/failed/export", s.post(func(r *http.Request) (any, error) {
+		var f store.ProblemFilter
+		if err := json.NewDecoder(r.Body).Decode(&f); err != nil {
+			return nil, err
+		}
+		p, n, err := s.M.ExportProblems(f)
+		if err != nil {
+			return nil, err
+		}
+		if s.Actions.RevealFile != nil {
+			_ = s.Actions.RevealFile(p)
+		}
+		return map[string]any{"path": p, "count": n}, nil
 	}))
 	h("/api/failed/exclude", s.post(func(r *http.Request) (any, error) {
 		var b struct {
@@ -488,4 +534,8 @@ func (s *Server) handleFS(w http.ResponseWriter, r *http.Request) {
 		return strings.ToLower(resp.Entries[i].Name) < strings.ToLower(resp.Entries[j].Name)
 	})
 	writeJSON(w, resp)
+}
+
+func problemFilter(q url.Values) store.ProblemFilter {
+	return store.ProblemFilter{Cat: q.Get("cat"), Ext: q.Get("ext"), Q: q.Get("q")}
 }

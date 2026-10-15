@@ -184,8 +184,34 @@ export interface FailedItem {
   id: number;
   name: string;
   path: string;
+  ext: string;
   state: number;
+  cat: string; // 原因类别名称
   reason: string;
+}
+
+export interface FailedPage {
+  items: FailedItem[];
+  more: boolean;
+}
+
+// 失败列表的筛选：cat 为 "" 时是失败和已加密，"meta" 是全部仅文件名；ext 为 "." 表示没有扩展名
+export interface FailedFilter {
+  cat: string;
+  ext: string;
+  q: string;
+}
+
+export interface ProblemCat {
+  key: string;
+  label: string;
+  meta: boolean;
+  count: number;
+}
+
+export interface FailedSummary {
+  cats: ProblemCat[];
+  exts: { ext: string; count: number }[];
 }
 
 export interface Config {

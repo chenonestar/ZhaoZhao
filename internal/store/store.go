@@ -72,6 +72,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_v USING fts5vocab(fts, 'row');
 // 新位置的文件内容相同，直接复用，不必重新提取（尤其不必重新 OCR）。回收区的条目过期删除时文本随之删除。
 const schemaV2 = `
 CREATE INDEX IF NOT EXISTS files_text ON files(text_id) WHERE text_id>0;
+CREATE INDEX IF NOT EXISTS files_problem ON files(id) WHERE state>=2;
 CREATE TABLE IF NOT EXISTS recycled(id INTEGER PRIMARY KEY, text_id INTEGER NOT NULL UNIQUE, hash TEXT NOT NULL,
   size INTEGER NOT NULL, ocr INTEGER NOT NULL DEFAULT 0, text_len INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS recycled_hash ON recycled(hash, size);
@@ -715,7 +716,6 @@ func (d *DB) ListFailed(limit int) ([]File, error) {
 	return out, rows.Err()
 }
 
-// RetryFailed 把指定的失败文件重新置为待提取；ids 为空时重试所有失败文件。
 // MoveLegacy 把待处理的老格式文件（exts）移到 prio 队列。retryFailed 时把以前提取失败的也重新排队。
 // 只处理磁盘上的文件本身，压缩包里的文件随压缩包一起提取。
 func (d *DB) MoveLegacy(exts []string, prio int, retryFailed bool) (moved, retried int64, err error) {
@@ -791,21 +791,6 @@ func (d *DB) Requeue(ids []int64, prio int) error {
 	return d.Tx(func(tx *sql.Tx) error {
 		for _, id := range ids {
 			if _, err := tx.Exec(`UPDATE files SET state=0, prio=? WHERE id=?`, prio, id); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-
-func (d *DB) RetryFailed(ids []int64) error {
-	return d.Tx(func(tx *sql.Tx) error {
-		if len(ids) == 0 {
-			_, err := tx.Exec(`UPDATE files SET state=0, err='' WHERE state=2`)
-			return err
-		}
-		for _, id := range ids {
-			if _, err := tx.Exec(`UPDATE files SET state=0, err='' WHERE id=? AND state IN (2,3)`, id); err != nil {
 				return err
 			}
 		}

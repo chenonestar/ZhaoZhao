@@ -1,5 +1,5 @@
 import type {
-  Config, FailedItem, FsListing, HotkeyState, LegacyTestState, Notice, SpaceDetail, Preview, Saved, SearchOpts, SearchResponse, Status,
+  Config, FailedFilter, FailedPage, FailedSummary, FsListing, HotkeyState, LegacyTestState, Notice, SpaceDetail, Preview, Saved, SearchOpts, SearchResponse, Status,
 } from "./types";
 
 export class ApiError extends Error {
@@ -61,8 +61,11 @@ export const api = {
   rebuild: (id?: number) => post("/api/roots/rebuild", { id: id ?? 0 }),
   rootOpts: (id: number, opts: unknown) => post("/api/roots/opts", { id, opts }),
   deleteVolume: (id: string) => post("/api/volumes/delete", { id }),
-  failed: () => call<FailedItem[]>("/api/failed"),
+  failed: (f: FailedFilter, after: number, limit = 200) => call<FailedPage>("/api/failed?" + qs({ ...f, after, limit })),
+  failedSummary: (f: FailedFilter) => call<FailedSummary>("/api/failed/summary?" + qs({ ...f })),
   retry: (ids: number[]) => post("/api/failed/retry", { ids }),
+  retryFiltered: (filter: FailedFilter) => post<{ count: number }>("/api/failed/retry", { filter }),
+  exportFailed: (f: FailedFilter) => post<{ path: string; count: number }>("/api/failed/export", f),
   exclude: (ids: number[]) => post("/api/failed/exclude", { ids }),
   config: () => call<Config>("/api/config"),
   saveConfig: (c: Config) => post<Config>("/api/config", c),
