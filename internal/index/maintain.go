@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chenonestar/zhaozhao/internal/extract"
 	"github.com/chenonestar/zhaozhao/internal/logx"
 	"github.com/chenonestar/zhaozhao/internal/store"
 )
@@ -96,6 +97,7 @@ func (m *Manager) maintainLoop() {
 		return
 	}
 	for {
+		m.recheckPDFs()
 		m.migrateTexts()
 		if m.sched.idle.Load() {
 			m.housekeeping()
@@ -176,6 +178,64 @@ func (m *Manager) migrateTexts() {
 		m.logf("索引库整理完成：重新压缩 %d 份文本，%d 个内容相同的文件改为共用一份文本，节省约 %s，用时 %s；目前可回收 %s%s",
 			total.Recompressed, total.Deduped, fmtBytes(total.SavedBytes), fmtDuration(time.Since(start)), fmtBytes(sp.FreeBytes),
 			map[bool]string{true: "（空闲时自动归还磁盘）", false: "（可在「索引」页点「压缩索引库」归还磁盘）"}[sp.Incremental])
+	}
+}
+
+// recheckPDFs：0.2.1 起，扫描页上叠了少量文字（页码、电子章）的页、文字层是乱码的页也会 OCR。
+// 之前已提取的 PDF 里可能有这两种情况，后台复查一次，把可疑的重新排队：
+//   - 文字极少（每 KB 不到 1 个字）的较大 PDF：多半是扫描件，只取到了叠加的少量文字；
+//   - 提取出的文字是乱码。
+//
+// 重新提取完成前，原来的文字照样能搜到。
+func (m *Manager) recheckPDFs() {
+	db := m.DB
+	if v, _ := db.GetMeta("pdf_recheck"); v == "done" {
+		return
+	}
+	if !m.ocrAvailable() || !m.Config().OCREnabled {
+		return // 不能 OCR 时重新提取也没有用：等开了 OCR 再复查
+	}
+	v, _ := db.GetMeta("pdf_recheck")
+	after, _ := strconv.ParseInt(v, 10, 64)
+	total := 0
+	for m.ctx.Err() == nil {
+		batch, err := db.DonePDFs(after, 300)
+		if err != nil {
+			m.logf("复查 PDF 失败: %v", err)
+			return
+		}
+		if len(batch) == 0 {
+			_ = db.SetMeta("pdf_recheck", "done")
+			if total > 0 {
+				m.logf("复查以前提取的 PDF：%d 个可能是扫描件或文字层是乱码，已重新排队（会做 OCR）", total)
+			}
+			return
+		}
+		var ids []int64
+		for _, p := range batch {
+			suspect := p.Size > 64<<10 && int64(p.TextLen)*1000 < p.Size
+			if !suspect {
+				if t, err := db.GetText(p.ID); err == nil && t != nil && extract.GarbledText(t.Text) {
+					suspect = true
+				}
+			}
+			if suspect {
+				ids = append(ids, p.ID)
+			}
+		}
+		if len(ids) > 0 {
+			if err := db.Requeue(ids, prioFast); err != nil {
+				m.logf("复查 PDF 失败: %v", err)
+				return
+			}
+			total += len(ids)
+			m.kick()
+		}
+		after = batch[len(batch)-1].ID
+		_ = db.SetMeta("pdf_recheck", strconv.FormatInt(after, 10))
+		if !m.throttle() {
+			return
+		}
 	}
 }
 

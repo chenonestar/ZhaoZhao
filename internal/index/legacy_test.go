@@ -1,12 +1,16 @@
 package index
 
 import (
+	"bytes"
+	"database/sql"
+	"image"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/chenonestar/zhaozhao/internal/extract"
+	"github.com/chenonestar/zhaozhao/internal/scanpdf"
 	"github.com/chenonestar/zhaozhao/internal/store"
 	"github.com/chenonestar/zhaozhao/internal/volume"
 )
@@ -213,5 +217,50 @@ func TestRetryProtectedXls(t *testing.T) {
 	e.m.retryProtectedXls()
 	if st, _, _ := fileByName(t, e.m.DB, "保护工作簿.xls"); st != store.StateEncrypted {
 		t.Errorf("重新排队只应做一次")
+	}
+}
+
+// 以前提取的 PDF 里，扫描页上叠了页码的只取到了页码：后台复查一次，重新排队做 OCR。
+func TestRecheckPDFs(t *testing.T) {
+	if _, err := extract.PDFiumPath(); err != nil {
+		t.Skip("没有 PDFium")
+	}
+	dir := t.TempDir()
+	img := image.NewGray(image.Rect(0, 0, 1600, 1200))
+	for i := range img.Pix {
+		img.Pix[i] = uint8((i*7919 + i/1600*104729) % 251) // 噪点：让 JPEG 足够大
+	}
+	var b bytes.Buffer
+	scanpdf.Write(&b, []scanpdf.Page{{Image: img, Text: "Page 1 of 1"}})
+	write(t, filepath.Join(dir, "扫描合同.pdf"), b.String())
+	write(t, filepath.Join(dir, "普通.txt"), "普通文本")
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	e := newEnvWith(t, prov, "", func(m *Manager) { useFakeOCR(t, m, "1ms") })
+	e.eng = newEngine(e.m)
+	if _, err := e.m.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+	if !has(e.names("fakeocrword"), "扫描合同.pdf") {
+		t.Fatal("新提取的扫描页（叠了页码）应做 OCR")
+	}
+	// 模拟 0.2.0 的结果：只取到了页码，没有 OCR；还没复查过
+	e.m.DB.Tx(func(tx *sql.Tx) error {
+		var id int64
+		tx.QueryRow(`SELECT id FROM files WHERE name='扫描合同.pdf'`).Scan(&id)
+		return e.m.DB.PutResult(tx, id, store.StateDone, "", "", false, &store.Text{Text: "Page 1 of 1"}, "page 1 of 1", "扫描合同")
+	})
+	e.m.DB.W.Exec(`DELETE FROM meta WHERE k='pdf_recheck'`)
+	if has(e.names("fakeocrword"), "扫描合同.pdf") {
+		t.Fatal("模拟失败")
+	}
+	e.m.recheckPDFs()
+	e.waitIdle()
+	if !has(e.names("fakeocrword"), "扫描合同.pdf") {
+		t.Error("复查后应重新提取并 OCR")
+	}
+	if v, _ := e.m.DB.GetMeta("pdf_recheck"); v != "done" {
+		t.Errorf("复查应只做一次：%q", v)
 	}
 }

@@ -726,6 +726,42 @@ func (d *DB) RequeueEncrypted(exts []string, prio int) (int64, error) {
 	return r.RowsAffected()
 }
 
+// PDFInfo 是复查 PDF 时用到的文件信息。
+type PDFInfo struct {
+	ID, Size int64
+	TextLen  int
+}
+
+// DonePDFs 按 id 顺序返回已提取、没有用过 OCR 的 PDF（磁盘上的文件本身）。
+func (d *DB) DonePDFs(after int64, limit int) ([]PDFInfo, error) {
+	rows, err := d.R.Query(`SELECT id, size, text_len FROM files WHERE ext='pdf' AND state=1 AND ocr=0 AND inner='' AND id>? ORDER BY id LIMIT ?`, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PDFInfo
+	for rows.Next() {
+		var p PDFInfo
+		if err := rows.Scan(&p.ID, &p.Size, &p.TextLen); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// Requeue 把文件重新排队提取。已有的文字在重新提取完成前照样能搜到。
+func (d *DB) Requeue(ids []int64, prio int) error {
+	return d.Tx(func(tx *sql.Tx) error {
+		for _, id := range ids {
+			if _, err := tx.Exec(`UPDATE files SET state=0, prio=? WHERE id=?`, prio, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func (d *DB) RetryFailed(ids []int64) error {
 	return d.Tx(func(tx *sql.Tx) error {
 		if len(ids) == 0 {

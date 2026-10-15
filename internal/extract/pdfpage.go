@@ -40,6 +40,9 @@ func classifyPage(text string, coverage float64) pageAction {
 	return pageUseText
 }
 
+// GarbledText 判断一段提取出的文字是不是乱码（后台复查旧索引用）。
+func GarbledText(s string) bool { return garbledText(s) }
+
 // garbledText 判断文字层是不是乱码。
 func garbledText(s string) bool {
 	total, bad, latin, han := 0, 0, 0, 0
