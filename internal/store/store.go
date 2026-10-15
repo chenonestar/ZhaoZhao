@@ -93,6 +93,12 @@ CREATE TRIGGER IF NOT EXISTS recycled_gone AFTER DELETE ON recycled BEGIN
 END;
 `
 
+// busyTimeout：数据库被占用时等待多久。
+const busyTimeout = 10 * time.Second
+
+// WALLimit：WAL 文件的目标上限。检查点之后截短到这个大小以内；写入期间超过它就主动做检查点（CheckpointIfLarge）。
+const WALLimit = 64 << 20
+
 // Open 打开（必要时创建）数据目录下的索引库。
 func Open(dir string) (*DB, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -100,7 +106,8 @@ func Open(dir string) (*DB, error) {
 	}
 	p := filepath.Join(dir, "index.db")
 	// journal_size_limit：WAL 文件在检查点之后截短到 64 MB 以内，不会一直占着几百 MB
-	dsn := "file:" + filepath.ToSlash(p) + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(0)&_pragma=journal_size_limit(67108864)"
+	dsn := "file:" + filepath.ToSlash(p) + fmt.Sprintf("?_pragma=journal_mode(WAL)&_pragma=busy_timeout(%d)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(0)&_pragma=journal_size_limit(%d)",
+		busyTimeout.Milliseconds(), WALLimit)
 	w, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err

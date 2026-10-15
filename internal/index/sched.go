@@ -814,9 +814,13 @@ func (m *Manager) prepareReuse(f store.File, src int64, hash string) *prepared {
 	return p
 }
 
+// walCheckEvery：写入期间每隔这么久看一次 WAL 有没有超过上限。
+const walCheckEvery = 10 * time.Second
+
 func (m *Manager) writer() {
 	defer m.wg.Done()
 	s := &m.sched
+	var walChecked time.Time
 	for {
 		var first *prepared
 		select {
@@ -866,6 +870,24 @@ func (m *Manager) writer() {
 		}
 		s.mu.Unlock()
 		m.activity()
+		if time.Since(walChecked) >= walCheckEvery {
+			walChecked = time.Now()
+			m.checkpointWAL()
+		}
+	}
+}
+
+// checkpointWAL 在 WAL 超过上限时主动写回主文件并截短（一直有人在搜索时自动检查点追不上）。
+func (m *Manager) checkpointWAL() {
+	t0 := time.Now()
+	did, busy, err := m.DB.CheckpointIfLarge(store.WALLimit, 3*time.Second)
+	switch {
+	case err != nil:
+		logx.Debugf("WAL 检查点失败: %v", err)
+	case busy:
+		logx.Debugf("WAL 超过 %s，有搜索没读完，稍后再写回", fmtBytes(store.WALLimit))
+	case did:
+		logx.Debugf("WAL 超过 %s，已写回主文件并截短，用时 %v", fmtBytes(store.WALLimit), time.Since(t0).Round(time.Millisecond))
 	}
 }
 

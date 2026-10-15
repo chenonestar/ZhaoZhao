@@ -1,11 +1,14 @@
 package store
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"sort"
 	"strings"
+	"time"
 )
 
 // SpaceInfo 是索引库文件的空间概况（很快，只读几个 PRAGMA）。
@@ -38,6 +41,33 @@ func (d *DB) Space() SpaceInfo {
 func (d *DB) Checkpoint() error {
 	_, err := d.W.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 	return err
+}
+
+// CheckpointIfLarge 在 WAL 文件超过 limit 字节时把它写回主文件并截短为 0（写入期间调用）。
+//
+// SQLite 的自动检查点不等读者：一直有人在搜索、刷新状态时，WAL 写回了也不能从头复用，
+// 只会越积越长（journal_size_limit 也只在检查点完成之后才截短）。这里等读者读完最多 wait
+// （期间其他写入等待）；等不到返回 busy，下次再试。did 表示 WAL 超过了 limit、做了检查点。
+func (d *DB) CheckpointIfLarge(limit int64, wait time.Duration) (did, busy bool, err error) {
+	st, err := os.Stat(d.Path + "-wal")
+	if err != nil || st.Size() <= limit {
+		return false, false, nil
+	}
+	ctx := context.Background()
+	c, err := d.W.Conn(ctx)
+	if err != nil {
+		return false, false, err
+	}
+	defer c.Close()
+	if _, err := c.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout=%d`, wait.Milliseconds())); err != nil {
+		return false, false, err
+	}
+	defer c.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout=%d`, busyTimeout.Milliseconds()))
+	var b, frames, done int
+	if err := c.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&b, &frames, &done); err != nil {
+		return true, false, err
+	}
+	return true, b != 0, nil
 }
 
 // IncrementalVacuum 把最多 pages 个空闲页还给磁盘（只对增量回收模式的索引库有效）。
