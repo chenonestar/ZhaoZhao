@@ -67,8 +67,8 @@ func extractLegacyNative(p, ext string, opt Options) (res doc.Result, why string
 			return doc.Result{}, err.Error()
 		}
 		switch {
-		case names["EncryptedPackage"]: // 加密的 docx/xlsx/pptx
-			return doc.Result{Status: doc.StatusEncrypted, Err: "文件已加密"}, ""
+		case names["EncryptedPackage"]: // 加密的 docx/xlsx/pptx（改了扩展名）
+			return extractEncryptedOOXML(p, fam), ""
 		case names["WordDocument"]:
 			r, nerr = extractDocNative(p)
 		case names["Workbook"] || names["Book"]:
@@ -106,7 +106,7 @@ func extractLegacyNative(p, ext string, opt Options) (res doc.Result, why string
 	case nerr == nil:
 		return r, ""
 	case errors.Is(nerr, errNativeEncrypted):
-		return doc.Result{Status: doc.StatusEncrypted, Err: "文件已加密"}, ""
+		return doc.Result{Status: doc.StatusEncrypted, Err: nerr.Error()}, ""
 	case errors.As(nerr, &en):
 		return doc.Result{}, en.why
 	}

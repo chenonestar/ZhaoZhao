@@ -206,6 +206,7 @@ func (m *Manager) Start() error {
 	}
 	m.syncLegacyQueue(m.Config().LegacyLOOnly)
 	m.retryProtectedXls()
+	m.retryProtectedOOXML()
 	m.refreshVolumes(true)
 	m.initWatch()
 	m.startScanners(2)
@@ -263,6 +264,23 @@ func (m *Manager) retryProtectedXls() {
 	_ = m.DB.SetMeta("xls_default_password", "1")
 	if n > 0 {
 		m.logf("%d 个标记为「已加密」的 Excel 文件重新排队：设了「保护工作簿」的文件现在能读出内容", n)
+	}
+}
+
+// retryProtectedOOXML：0.2.1 以前把用默认密码加密的 docx/xlsx/pptx（打开时不要密码，常见于设了保护的 xlsx）
+// 记为「已加密」，0.2.2 起能读出内容。升级后把这些文件重新排队一次；真正有打开密码的会再次记为已加密，并注明原因。
+func (m *Manager) retryProtectedOOXML() {
+	if v, _ := m.DB.GetMeta("ooxml_default_password"); v == "1" {
+		return
+	}
+	n, err := m.DB.RequeueEncrypted(extract.OOXMLExts(), prioFast)
+	if err != nil {
+		m.logf("重新排队已加密的 Office 文件失败: %v", err)
+		return
+	}
+	_ = m.DB.SetMeta("ooxml_default_password", "1")
+	if n > 0 {
+		m.logf("%d 个标记为「已加密」的 docx/xlsx/pptx 重新排队：打开时不要密码的现在能读出内容", n)
 	}
 }
 

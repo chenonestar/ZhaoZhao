@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rc4"
 	"crypto/sha1"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -252,7 +253,7 @@ func TestXlsCryptoAPIDefaultPassword(t *testing.T) {
 	if r.Locs[0].Label != "报销!A1" {
 		t.Errorf("工作表名应正确（BoundSheet 的位置字段不加密）：%v", r.Locs[0])
 	}
-	if _, err := xlsText(encryptXlsCryptoAPI(t, st["Workbook"], "别的密码")); err != errNativeEncrypted {
+	if _, err := xlsText(encryptXlsCryptoAPI(t, st["Workbook"], "别的密码")); !errors.Is(err, errNativeNeedPassword) {
 		t.Errorf("非默认密码应为已加密：%v", err)
 	}
 }

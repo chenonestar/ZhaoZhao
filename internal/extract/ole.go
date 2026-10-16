@@ -20,6 +20,9 @@ func nativeUnsupported(format string, a ...any) error { return errNative{fmt.Spr
 
 var errNativeEncrypted = errors.New("文件已加密")
 
+// errNativeNeedPassword：默认密码解不开，是真正设了打开密码的文件。
+var errNativeNeedPassword = fmt.Errorf("%w（需要打开密码）", errNativeEncrypted)
+
 var oleMagic = []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}
 
 // oleStreams 读取 OLE 复合文档根目录下的指定流，同时返回根目录下全部流的名称。

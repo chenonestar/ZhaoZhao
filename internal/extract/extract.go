@@ -81,11 +81,12 @@ func Extract(p, ext string, opt Options) (res doc.Result) {
 	}
 	if (f.h == hDocx || f.h == hXlsx || f.h == hPptx) && isOLE(p) {
 		// OLE 格式的 docx/xlsx/pptx 通常是加密的；也可能是改了扩展名的 doc/xls/ppt
+		fam := map[handler]string{hDocx: "doc", hXlsx: "xls", hPptx: "ppt"}[f.h]
 		names, _ := oleRootNames(p)
 		if !names["WordDocument"] && !names["Workbook"] && !names["Book"] && !names["PowerPoint Document"] {
-			return doc.Result{Status: doc.StatusEncrypted, Err: "文件已加密"}
+			return extractEncryptedOOXML(p, fam)
 		}
-		return extractLegacyAny(p, legacyFamily[ext], opt)
+		return extractLegacyAny(p, fam, opt)
 	}
 	switch f.h {
 	case hText:

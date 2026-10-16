@@ -6,6 +6,7 @@ import (
 	"image"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,7 +18,12 @@ import (
 
 func copyFixture(t *testing.T, name, dst string) {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "..", "testdata", "legacy", name))
+	copyFixtureFrom(t, "legacy", name, dst)
+}
+
+func copyFixtureFrom(t *testing.T, sub, name, dst string) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "testdata", sub, name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,6 +222,43 @@ func TestRetryProtectedXls(t *testing.T) {
 	e.m.DB.W.Exec(`UPDATE files SET state=? WHERE name='保护工作簿.xls'`, store.StateEncrypted)
 	e.m.retryProtectedXls()
 	if st, _, _ := fileByName(t, e.m.DB, "保护工作簿.xls"); st != store.StateEncrypted {
+		t.Errorf("重新排队只应做一次")
+	}
+}
+
+// 0.2.1 把用默认密码加密的 xlsx 记成了已加密：升级后重新排队一次，原因写明是否需要打开密码。
+func TestRetryProtectedOOXML(t *testing.T) {
+	dir := t.TempDir()
+	copyFixtureFrom(t, "encrypted", "默认密码.xlsx", filepath.Join(dir, "填报.xlsx"))
+	copyFixtureFrom(t, "encrypted", "打开密码.xlsx", filepath.Join(dir, "有密码.xlsx"))
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	e := newEnv(t, prov)
+	if _, err := e.m.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+	if st, _, msg := fileByName(t, e.m.DB, "填报.xlsx"); st != store.StateDone || !has(e.names("雪豹"), "填报.xlsx") {
+		t.Fatalf("填报.xlsx：state %d %s", st, msg)
+	}
+	if st, _, msg := fileByName(t, e.m.DB, "有密码.xlsx"); st != store.StateEncrypted || !strings.Contains(msg, "需要打开密码") {
+		t.Fatalf("有密码.xlsx 应为已加密并注明需要打开密码：state %d %s", st, msg)
+	}
+	// 模拟 0.2.1 的结果：两个都记为已加密，且还没做过重新排队
+	e.m.DB.W.Exec(`UPDATE files SET state=?, err='文件已加密' WHERE ext='xlsx'`, store.StateEncrypted)
+	e.m.DB.W.Exec(`DELETE FROM meta WHERE k='ooxml_default_password'`)
+	e.m.retryProtectedOOXML()
+	e.m.kick()
+	e.waitIdle()
+	if st, _, _ := fileByName(t, e.m.DB, "填报.xlsx"); st != store.StateDone {
+		t.Errorf("重新排队后应读出内容：state %d", st)
+	}
+	if st, _, _ := fileByName(t, e.m.DB, "有密码.xlsx"); st != store.StateEncrypted {
+		t.Errorf("有打开密码的仍应为已加密：state %d", st)
+	}
+	e.m.DB.W.Exec(`UPDATE files SET state=? WHERE name='填报.xlsx'`, store.StateEncrypted)
+	e.m.retryProtectedOOXML()
+	if st, _, _ := fileByName(t, e.m.DB, "填报.xlsx"); st != store.StateEncrypted {
 		t.Errorf("重新排队只应做一次")
 	}
 }

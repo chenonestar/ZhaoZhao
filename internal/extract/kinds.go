@@ -101,6 +101,18 @@ func Supported(ext string) bool {
 // IsLegacy 是否为需要转换组件的老格式（优先级较低）。
 func IsLegacy(ext string) bool { return formats[ext].h == hLegacy }
 
+// OOXMLExts 返回全部 Office 2007 以后格式（docx/xlsx/pptx 及模板、带宏的变体）的扩展名。
+func OOXMLExts() []string {
+	var out []string
+	for e, f := range formats {
+		if f.h == hDocx || f.h == hXlsx || f.h == hPptx {
+			out = append(out, e)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // LegacyExts 返回全部老格式扩展名。
 func LegacyExts() []string {
 	var out []string

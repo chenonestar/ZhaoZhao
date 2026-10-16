@@ -41,7 +41,7 @@ func xlsText(wb []byte) (doc.Result, error) {
 		dec, derr := xlsDecrypt(wb, enc.filepass, xlsDefaultPassword)
 		switch {
 		case derr == errXlsWrongPassword:
-			return doc.Result{}, errNativeEncrypted
+			return doc.Result{}, errNativeNeedPassword
 		case derr != nil:
 			return doc.Result{}, nativeUnsupported("Excel 的旧式加密（%v）", derr)
 		}
