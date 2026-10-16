@@ -46,16 +46,24 @@ export function Manage({ status, tab, setTab, onClose, refresh, onQuit }: Props)
 }
 
 // QueueLine 显示一条处理通道：待处理数量、正在处理的线程数、预计剩余时间。三条通道同时进行。
-function QueueLine({ label, n, eta, lane, paused }: { label: string; n: number; eta: number; lane?: SlotStatus; paused?: boolean }) {
+function QueueLine({ label, n, eta, lane, paused, extra }: { label: string; n: number; eta: number; lane?: SlotStatus; paused?: boolean; extra?: string }) {
   if (!n) return null;
   let when = "正在估算剩余时间";
   if (paused) when = "已暂停";
   else if (eta > 0) when = `按最近的速度预计还需 ${fmtDuration(eta)}`;
   return (
     <div className="dim">
-      {label} {n}{lane ? `（同时处理 ${lane.used}/${lane.cap}）` : ""}，{when}
+      {label} {n}{lane ? `（同时处理 ${lane.used}/${lane.cap}${extra ?? ""}）` : ""}，{when}
     </div>
   );
+}
+
+// ocrExtra：OCR 每个进程的线程数和最近的速度，以及正在实测搭配时的说明。
+function ocrExtra(s: Status): string {
+  let x = s.ocrThreads > 0 ? `，每个 ${s.ocrThreads} 线程` : "";
+  if (s.ocrPagesPerMin > 0) x += `，最近每分钟 ${s.ocrPagesPerMin.toFixed(1)} 页`;
+  if (s.ocrTuning) x += `；${s.ocrTuning}`;
+  return x;
 }
 
 function IndexTab({ status, refresh }: { status: Status | null; refresh: () => void }) {
@@ -76,7 +84,7 @@ function IndexTab({ status, refresh }: { status: Status | null; refresh: () => v
         </div>
         <QueueLine label="普通文件待处理" n={status.fastQueue} eta={status.fastEtaSec} lane={{ used: status.active, cap: status.workers }} />
         <QueueLine label="老格式待转换" n={status.legacyQueue} eta={status.legacyEtaSec} lane={status.legacy} paused={status.onBattery} />
-        <QueueLine label="OCR 待识别" n={status.ocrQueue} eta={status.ocrEtaSec} lane={status.ocr} paused={status.onBattery} />
+        <QueueLine label="OCR 待识别" n={status.ocrQueue} eta={status.ocrEtaSec} lane={status.ocr} paused={status.onBattery} extra={ocrExtra(status)} />
         {status.onBattery && <div className="dim">正在使用电池：OCR 和格式转换已暂停</div>}
         {/* 正在处理：固定高度、内部滚动，卡住提示也放在里面，状态刷新时下面的内容不上下跳动 */}
         {(!status.idle || status.current.length > 0 || status.stalledSec > 0) && (
@@ -487,7 +495,7 @@ function SettingsTab() {
       {num("legacyWorkers", "老格式转换并发数", "只用于内置解析读不了的老格式文件（LibreOffice 转换）")}
       {chk("legacyLOOnly", "老格式只用 LibreOffice 转换，不用内置解析（较慢；仅在内置解析结果有问题时使用）")}
       {chk("ocrEnabled", "识别图片和扫描 PDF 里的文字（OCR）")}
-      {num("ocrWorkers", "OCR 并发数", "0 表示自动：8 个以上逻辑处理器时 2 个，否则 1 个；每个约占几百 MB 内存")}
+      {num("ocrWorkers", "OCR 进程数", "0 = 自动（推荐）：在这台电脑上实测，选出最快的进程数和每个进程的线程数。手动设为 N 时，每个进程用「CPU 核心数 ÷ N」个线程；进程开得多不会更快，每个还占几百 MB 内存")}
       {chk("pauseOnBattery", "使用电池时暂停 OCR 和格式转换")}
       {chk("keepAwake", "建立索引期间不让电脑自动睡眠（只在接通电源时；屏幕保护、关闭显示器不受影响；索引完成后自动恢复）")}
 

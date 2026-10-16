@@ -43,6 +43,17 @@ type OCRConfig struct {
 	Args    []string `json:"args,omitempty"`
 	MinSide int      `json:"minSide"` // 短边小于该像素数的图片不做 OCR（默认 200）
 	PageSec int      `json:"pageSec"` // 单页（单张图）OCR 超时秒数（默认 120）
+	// Threads 是每个 OCR 进程用的线程数（RapidOCR 的 --numThread，它默认 4）。0 表示不指定。
+	// 多个 OCR 进程的线程总数超过 CPU 核心数时互相争抢，总速度反而下降（实测可慢一倍）。
+	Threads int `json:"threads,omitempty"`
+}
+
+// args 返回启动 OCR 进程的参数。
+func (c OCRConfig) args() []string {
+	if c.Threads <= 0 {
+		return c.Args
+	}
+	return append(append([]string{}, c.Args...), fmt.Sprintf("--numThread=%d", c.Threads))
 }
 
 // Enabled 说明是否配置了 OCR 组件。
@@ -134,10 +145,10 @@ var (
 	ocrFail int
 )
 
-func (c OCRConfig) key() string { return c.Command + "\x00" + strings.Join(c.Args, "\x00") }
+func (c OCRConfig) key() string { return c.Command + "\x00" + strings.Join(c.args(), "\x00") }
 
 func startOCR(c OCRConfig) (*ocrProc, error) {
-	cmd := exec.Command(c.Command, c.Args...)
+	cmd := exec.Command(c.Command, c.args()...)
 	cmd.Dir = filepath.Dir(c.Command)
 	if !filepath.IsAbs(c.Command) {
 		cmd.Dir = ""

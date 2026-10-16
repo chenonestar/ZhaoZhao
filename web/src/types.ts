@@ -118,6 +118,9 @@ export interface Status {
   active: number;
   current: CurrentJob[];
   keepingAwake: boolean;
+  ocrThreads: number;
+  ocrPagesPerMin: number;
+  ocrTuning?: string;
   totals: Counts;
   ocrQueue: number;
   legacyQueue: number;

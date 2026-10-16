@@ -53,6 +53,8 @@ type job struct {
 	stage    string
 	progress string
 	sent     bool // 结果已交给写入协程：写入完成后才从「处理中」移除，避免同一文件被再次派发
+
+	pagesDone, pagesTotal int // OCR：已识别的页数、总页数（由进度消息得到，用于实测每分钟页数）
 }
 
 // lane 是一条处理通道。普通文件、老格式转换、OCR 各一条，各有自己的派发器和提取协程，三条同时进行：
@@ -149,9 +151,9 @@ func (m *Manager) startScheduler() {
 	})
 }
 
-// laneSizes 返回三条通道各自的并发数。
-func (c Config) laneSizes() map[int]int {
-	return map[int]int{prioFast: c.workers(), prioLegacy: c.legacyWorkers(), prioOCR: c.ocrWorkers()}
+// laneSizes 返回三条通道各自的并发数。OCR 的进程数由 ocrPlanNow 决定（自动时实测选择）。
+func (m *Manager) laneSizes(c Config) map[int]int {
+	return map[int]int{prioFast: c.workers(), prioLegacy: c.legacyWorkers(), prioOCR: m.ocrPlanNow().procs}
 }
 
 // applyWorkers 按当前设置调整各通道并发数、进程池大小和网络盘读取名额（设置修改后立即生效，不用重启）。
@@ -161,7 +163,7 @@ func (m *Manager) applyWorkers() {
 		return
 	}
 	cfg := m.Config()
-	sizes := cfg.laneSizes()
+	sizes := m.laneSizes(cfg)
 	s.net.SetCap(cfg.netConc())
 	// 每条通道用自己的进程池；没有单独的池（测试）时共用主池
 	main := sizes[prioFast]
@@ -188,7 +190,7 @@ func (m *Manager) applyWorkers() {
 		l.resize = make(chan struct{})
 	})
 	s.mu.Unlock()
-	logx.Debugf("并发设置：普通文件 %d，老格式转换 %d，OCR %d，网络盘读取 %d（三类同时进行）", sizes[prioFast], sizes[prioLegacy], sizes[prioOCR], cfg.netConc())
+	logx.Debugf("并发设置：普通文件 %d，老格式转换 %d，OCR %s，网络盘读取 %d（三类同时进行）", sizes[prioFast], sizes[prioLegacy], m.ocrPlanNow(), cfg.netConc())
 	m.kick()
 }
 
@@ -385,6 +387,9 @@ func (m *Manager) setStage(j *job, stage string) {
 func (m *Manager) setProgress(j *job, p string) {
 	m.sched.mu.Lock()
 	j.progress = p
+	if j.class == prioOCR {
+		m.countOCRProgress(j, p)
+	}
 	m.sched.mu.Unlock()
 	m.activity()
 }
@@ -477,6 +482,7 @@ func (m *Manager) extractOptions(cfg Config, withOCR bool) extract.Options {
 	o := extract.DefaultOptions()
 	if withOCR {
 		o.OCR = m.ocrCfg
+		o.OCR.Threads = m.ocrPlanNow().threads // 每个 OCR 进程的线程数：总数不超过 CPU 核心数
 	}
 	o.MaxTextBytes = int64(cfg.MaxTextMB) << 20
 	o.SniffUnknown = cfg.SniffUnknown
@@ -646,6 +652,9 @@ func (m *Manager) runJob(j *job) {
 	res := pool.Run(m.ctx, src, f.Ext, opts, t, func(p string) { m.setProgress(j, p) })
 	if m.ctx.Err() != nil {
 		return
+	}
+	if useOCR {
+		m.finishOCRPages(j)
 	}
 	if src != abs && res.Err != "" {
 		res.Err = strings.ReplaceAll(res.Err, src, abs) // 错误信息里不出现临时副本的路径

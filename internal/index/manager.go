@@ -85,6 +85,10 @@ type Manager struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
+	ocr ocrState // OCR 进程数 × 线程数的自动调整
+
+	cfgNotes []string // 读取设置时升级旧设置产生的说明，启动后提示一次
+
 	pausedAll atomic.Bool
 	// keepingAwake：正在阻止电脑自动睡眠（keepAwakeLoop）
 	keepingAwake atomic.Bool
@@ -144,7 +148,12 @@ func (m *Manager) loadConfig() Config {
 	if b, err := os.ReadFile(m.configPath()); err == nil {
 		c.Version = 0 // 文件里没有版本号的是旧版本保存的
 		_ = json.Unmarshal(b, &c)
+		before := c
 		c = c.migrate()
+		if before.Version < 3 && c.OCRWorkers == 0 && (before.OCRWorkers > 1 || (before.OCRWorkers == 1 && before.Version == 2)) {
+			m.cfgNotes = append(m.cfgNotes, fmt.Sprintf("OCR 并发数已从手动设的 %d 改为「自动」：程序会在这台电脑上实测，选出最快的进程数和每个进程的线程数"+
+				"（进程开得多，线程总数超过 CPU 核心数时互相争抢，反而更慢）。需要的话可以在「设置」里改回手动。", before.OCRWorkers))
+		}
 	}
 	return c.normalized()
 }
@@ -175,6 +184,9 @@ func (m *Manager) SetConfig(c Config) error {
 	if d := configDiff(old, c); d != "" {
 		m.logf("设置已修改：%s", d)
 	}
+	if old.OCRWorkers != c.OCRWorkers {
+		m.resetOCRPlan()
+	}
 	m.applyWorkers()
 	m.refreshRules()
 	if old.Simplify != c.Simplify {
@@ -203,6 +215,14 @@ func (m *Manager) Start() error {
 	if err := m.loadState(); err != nil {
 		return err
 	}
+	if len(m.cfgNotes) > 0 {
+		for _, n := range m.cfgNotes {
+			m.logf("%s", n)
+			m.addNotice(Notice{Kind: "info", Message: n})
+		}
+		m.cfgNotes = nil
+		_ = m.SetConfig(m.Config()) // 保存升级后的设置，下次启动不再提示
+	}
 	if n, err := m.DB.DeleteOrphans(); err == nil && n > 0 {
 		m.logf("清理了 %d 条不属于任何索引根的残留记录", n)
 	}
@@ -220,6 +240,8 @@ func (m *Manager) Start() error {
 	go m.maintainLoop()
 	m.wg.Add(1)
 	go m.keepAwakeLoop()
+	m.wg.Add(1)
+	go m.ocrTuneLoop()
 	// 启动对账：处理未运行期间发生的变化（F-BG-02）
 	m.RescanAll()
 	return nil

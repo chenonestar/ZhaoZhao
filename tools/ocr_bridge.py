@@ -11,7 +11,9 @@ import json, sys
 
 from rapidocr_onnxruntime import RapidOCR
 
-engine = RapidOCR()
+# 与 RapidOCR-json 一样接受 --numThread=N（每个进程的线程数）
+threads = [int(a.split("=", 1)[1]) for a in sys.argv[1:] if a.startswith("--numThread=")]
+engine = RapidOCR(intra_op_num_threads=threads[-1]) if threads else RapidOCR()
 sys.stdout.write("OCR init completed.\n")
 sys.stdout.flush()
 for line in sys.stdin:

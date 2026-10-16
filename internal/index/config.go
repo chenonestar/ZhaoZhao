@@ -34,7 +34,7 @@ type Config struct {
 	LegacyWorkers     int  `json:"legacyWorkers"`   // 老格式转换并发数
 	LegacyLOOnly      bool `json:"legacyLOOnly"`    // 老格式只用 LibreOffice 转换，不用内置解析（排查问题用）
 	OCREnabled        bool `json:"ocrEnabled"`      // OCR 总开关
-	OCRWorkers        int  `json:"ocrWorkers"`      // OCR 并发数（每个占用较多内存），0 表示自动
+	OCRWorkers        int  `json:"ocrWorkers"`      // OCR 进程数，0 表示自动（实测选择进程数和每个进程的线程数）
 	NetworkScanMin    int  `json:"networkScanMin"`  // 网络盘定时扫描间隔（分钟）
 	NetworkReadConc   int  `json:"networkReadConc"` // 网络盘读取并发数
 	PauseOnBattery    bool `json:"pauseOnBattery"`  // 使用电池时暂停 OCR 和格式转换
@@ -54,7 +54,8 @@ type Config struct {
 
 // configVersion 是当前设置文件格式版本。
 //   - 2：OCR 并发数改为自动（0）；默认不使用全局快捷键；增加日志详细程度。
-const configVersion = 2
+//   - 3：OCR 自动时按实测选择进程数和线程数；以前手动设的 OCR 并发数改回自动（开得多反而慢）。
+const configVersion = 3
 
 // migrate 把旧版本保存的设置升级到当前版本：旧版本把当时的默认值原样写进了文件，
 // 这些值在新版本里有了更好的默认（自动），不升级的话用户永远用不上。
@@ -70,19 +71,11 @@ func (c Config) migrate() Config {
 			c.LogLevel = "detail"
 		}
 	}
+	if c.Version < 3 {
+		c.OCRWorkers = 0
+	}
 	c.Version = configVersion
 	return c
-}
-
-// ocrWorkers 返回 OCR 并发数：0 表示自动，8 个以上逻辑处理器时用 2 个，否则 1 个。
-func (c Config) ocrWorkers() int {
-	if c.OCRWorkers > 0 {
-		return c.OCRWorkers
-	}
-	if runtime.NumCPU() >= 8 {
-		return 2
-	}
-	return 1
 }
 
 func (c Config) legacyWorkers() int {
