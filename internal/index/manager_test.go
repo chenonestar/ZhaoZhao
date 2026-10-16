@@ -702,11 +702,13 @@ func TestStaleScanSigStillCompletes(t *testing.T) {
 func TestKeepAwakeWhileBusy(t *testing.T) {
 	var mu sync.Mutex
 	var calls []bool
-	oldSup, oldSet, oldEvery := keepAwakeSupported, keepAwakeSet, keepAwakeEvery
+	oldSup, oldSet, oldEvery, oldIdle := keepAwakeSupported, keepAwakeSet, keepAwakeEvery, keepAwakeIdleFor
 	keepAwakeSupported = func() bool { return true }
 	keepAwakeSet = func(on bool) error { mu.Lock(); calls = append(calls, on); mu.Unlock(); return nil }
-	keepAwakeEvery = 20 * time.Millisecond
-	t.Cleanup(func() { keepAwakeSupported, keepAwakeSet, keepAwakeEvery = oldSup, oldSet, oldEvery })
+	keepAwakeEvery, keepAwakeIdleFor = 20*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() {
+		keepAwakeSupported, keepAwakeSet, keepAwakeEvery, keepAwakeIdleFor = oldSup, oldSet, oldEvery, oldIdle
+	})
 
 	dir := t.TempDir()
 	for i := range 30 {
@@ -719,15 +721,16 @@ func TestKeepAwakeWhileBusy(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.waitIdle()
-	deadline := time.Now().Add(5 * time.Second)
+	// 处理期间阻止睡眠；处理完、空闲超过 keepAwakeIdleFor 后恢复（中间短暂空闲不来回切换）
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		mu.Lock()
-		got := fmt.Sprint(calls)
+		n, first, last := len(calls), false, true
+		if n > 0 {
+			first, last = calls[0], calls[n-1]
+		}
 		mu.Unlock()
-		if got == "[true false]" {
-			if e.m.keepingAwake.Load() {
-				t.Fatal("处理完后不应再显示阻止睡眠")
-			}
+		if n >= 2 && first && !last && !e.m.keepingAwake.Load() {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)

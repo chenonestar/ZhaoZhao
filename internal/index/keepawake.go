@@ -2,10 +2,12 @@ package index
 
 import "time"
 
-// keepAwakeEvery、keepAwakeSet 测试时可以替换。
+// keepAwakeEvery、keepAwakeIdleFor、keepAwakeSet 测试时可以替换。
 var (
 	keepAwakeEvery = 5 * time.Second
-	keepAwakeSet   = setKeepAwake
+	// keepAwakeIdleFor：没有任务这么久之后才恢复自动睡眠（两批文件之间、扫描刚结束时会短暂空闲，不来回切换）
+	keepAwakeIdleFor = time.Minute
+	keepAwakeSet     = setKeepAwake
 )
 
 // keepAwakeLoop：建立索引期间（有待处理的文件或正在扫描）、接通电源、没有暂停时，不让电脑自动睡眠。
@@ -25,8 +27,13 @@ func (m *Manager) keepAwakeLoop() {
 	}()
 	t := time.NewTicker(keepAwakeEvery)
 	defer t.Stop()
+	var lastBusy time.Time
 	for {
-		want := m.Config().KeepAwake && !m.pausedAll.Load() && !onBattery() && m.busy()
+		allowed := m.Config().KeepAwake && !m.pausedAll.Load() && !onBattery()
+		if m.busy() {
+			lastBusy = time.Now()
+		}
+		want := allowed && !lastBusy.IsZero() && time.Since(lastBusy) < keepAwakeIdleFor
 		if want != on {
 			if err := keepAwakeSet(want); err != nil {
 				m.logf("设置「索引期间不让电脑自动睡眠」失败: %v", err)
