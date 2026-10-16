@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import type { Config, FailedFilter, FailedItem, FailedSummary, HotkeyState, LegacyTestState, ProblemCat, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
-import { fmtDuration, fmtSize, fmtTime } from "./util";
+import { copyText, fmtDuration, fmtSize, fmtTime } from "./util";
 import { FolderPicker } from "./FolderPicker";
 import { Help } from "./Help";
 
@@ -336,6 +336,8 @@ function FailedTab({ refresh }: { refresh: () => void }) {
 
   const run = (p: Promise<unknown>, done?: (r: any) => void) =>
     p.then((r) => { done?.(r); reload(f); refresh(); }).catch((e) => setErr(e.message));
+  // 打开、打开所在文件夹：不用刷新列表
+  const act = (p: Promise<unknown>) => p.then(() => setErr("")).catch((e) => setErr(e.message));
   if (!sum || !items) return <div className="dim pad">{err ? <span className="error">{err}</span> : "加载中…"}</div>;
 
   const failCats = sum.cats.filter((c) => !c.meta);
@@ -357,16 +359,19 @@ function FailedTab({ refresh }: { refresh: () => void }) {
     <div className="failed">
       <input className="failed-q" value={qInput} onChange={(e) => setQInput(e.target.value)}
         placeholder="按路径或文件名筛选（可以粘贴文件夹路径）" />
-      <div className="failed-facet"><span className="dim">失败</span>
-        <div className="chips">
-          {chip("", "全部", total(failCats))}
-          {failCats.filter((c) => c.count > 0 || c.key === f.cat).map((c) => chip(c.key, c.label, c.count))}
-        </div>
+      {/* 失败和「仅文件名」分开看：仅文件名是按设置有意跳过内容，不是失败 */}
+      <div className="seg">
+        <button className={isMeta ? "" : "on"} onClick={() => setF({ ...f, cat: "", ext: "" })}>失败和已加密 {total(failCats)}</button>
+        <button className={isMeta ? "on" : ""} onClick={() => setF({ ...f, cat: "meta", ext: "" })}>仅文件名 {total(metaCats)}（不是失败）</button>
       </div>
-      <div className="failed-facet"><span className="dim">仅文件名</span>
+      {isMeta && (
+        <div className="dim small">这些文件按设置只索引了文件名，没有提取内容，不是处理失败。放宽相应设置（文件大小上限、OCR 等）后，
+          在「索引」页点「扫描」会自动处理。</div>
+      )}
+      <div className="failed-facet"><span className="dim">原因</span>
         <div className="chips">
-          {chip("meta", "全部", total(metaCats))}
-          {metaCats.filter((c) => c.count > 0 || c.key === f.cat).map((c) => chip(c.key, c.label, c.count))}
+          {chip(isMeta ? "meta" : "", "全部", total(isMeta ? metaCats : failCats))}
+          {(isMeta ? metaCats : failCats).filter((c) => c.count > 0 || c.key === f.cat).map((c) => chip(c.key, c.label, c.count))}
         </div>
       </div>
       <div className="failed-facet"><span className="dim">扩展名</span>
@@ -389,6 +394,10 @@ function FailedTab({ refresh }: { refresh: () => void }) {
           重试这一类（{shown}）</button>
         <button disabled={!shown} onClick={() => { setMsg("正在导出…"); run(api.exportFailed(f), (r) => setMsg(`已导出 ${r.count} 行：${r.path}`)); }}>导出这一类为 CSV</button>
         <button disabled={!ids.length || isMeta} onClick={() => run(api.retry(ids), () => setMsg(`已重新排队所选的 ${ids.length} 个文件`))}>重试所选</button>
+        <button disabled={!ids.length} onClick={() => {
+          copyText(items.filter((x) => sel.has(x.id)).map((x) => x.path).join("\r\n"));
+          setMsg(`已复制所选 ${ids.length} 个文件的路径`);
+        }}>复制所选路径</button>
         <button disabled={!ids.length} onClick={() => { if (confirm("把所选文件加入排除规则并从索引移除？")) run(api.exclude(ids)); }}>加入排除规则</button>
       </div>
       {msg && <div className="small ok">{msg}</div>}
@@ -402,7 +411,8 @@ function FailedTab({ refresh }: { refresh: () => void }) {
               <th><input type="checkbox" title="全选已显示的" checked={allSel}
                 onChange={() => setSel(allSel ? new Set() : new Set(items.map((x) => x.id)))} /></th>
               <th>路径</th>
-              <th>原因</th>
+              <th className="col-why">原因</th>
+              <th className="col-act"></th>
             </tr>
           </thead>
           <tbody>
@@ -411,6 +421,11 @@ function FailedTab({ refresh }: { refresh: () => void }) {
                 <td><input type="checkbox" checked={sel.has(x.id)} onChange={() => { const n = new Set(sel); n.has(x.id) ? n.delete(x.id) : n.add(x.id); setSel(n); }} /></td>
                 <td className="failed-path" title={x.path}><div>{x.name}</div><div className="dim small">{x.path}</div></td>
                 <td className="failed-why"><span className={"badge " + (x.state === 2 ? "bad" : "")}>{x.cat}</span> {x.reason}</td>
+                <td className="failed-act">
+                  <button onClick={() => act(api.open(x.id, "open"))}>打开</button>
+                  <button onClick={() => act(api.open(x.id, "folder"))}>所在文件夹</button>
+                  <button onClick={() => { copyText(x.path); setMsg("已复制路径：" + x.path); }}>复制路径</button>
+                </td>
               </tr>
             ))}
           </tbody>

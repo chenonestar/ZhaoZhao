@@ -32,6 +32,9 @@ func problemDB(t *testing.T) *DB {
 		{"个人/big.mp4", "", "mp4", StateMetaOnly, "文件超过 100 MB，仅索引文件名"},
 		{"个人/x.exe", "", "exe", StateMetaOnly, "非文本文件，仅索引文件名"},
 		{"个人/noext", "", "", StateMetaOnly, "非文本文件，仅索引文件名"},
+		{"个人/图标.png", "", "png", StateMetaOnly, "图片尺寸过小，已跳过 OCR"},
+		{"包.zip", "照片.jpg", "jpg", StateMetaOnly, "压缩包内的图片不做 OCR"},
+		{"个人/扫描.jpg", "", "jpg", StateMetaOnly, "OCR 未启用，仅索引文件名"},
 		{"个人/ok.txt", "", "txt", StateDone, ""},
 		{"包.zip", "", "zip", StateDone, ""},
 		{"包.zip", "里面/坏.doc", "doc", StateFailed, "不是有效的 Word 文档"},
@@ -68,7 +71,7 @@ func TestProblemSummary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "encrypted=2 network=1 timeout=1 access=1 ocr=1 convert=1 corrupt=2 other=1 meta_size=1 meta_type=2"
+	want := "encrypted=2 network=1 timeout=1 access=1 ocr=1 convert=1 corrupt=2 other=1 meta_size=1 meta_type=2 meta_small=1 meta_inzip=1 meta_ocr=1"
 	if got := catCounts(cats); got != want {
 		t.Fatalf("类别统计\n得到 %s\n应为 %s", got, want)
 	}
@@ -88,7 +91,7 @@ func TestProblemSummary(t *testing.T) {
 	}
 	// 选了「仅文件名」：没有扩展名的记为 "."
 	_, exts, _ = db.ProblemSummary(ProblemFilter{Cat: "meta"})
-	if fmt.Sprint(exts) != "[{. 1} {exe 1} {mp4 1}]" {
+	if fmt.Sprint(exts) != "[{jpg 2} {. 1} {exe 1} {mp4 1} {png 1}]" {
 		t.Fatalf("仅文件名的扩展名统计: %v", exts)
 	}
 	// 路径关键字：盘符、反斜杠都可以

@@ -150,5 +150,13 @@ table.grid .actions button { margin-left: 4px; padding: 2px 8px; }
 .failed table.grid { table-layout: fixed; }
 .failed table.grid th:first-child { width: 32px; }
 .failed-path > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.failed table.grid th:last-child { width: 42%; }
+.failed th.col-why { width: 34%; }
+.failed th.col-act { width: 196px; }
+.failed-act { white-space: nowrap; text-align: right; }
+.failed-act button { padding: 1px 6px; font-size: 12px; margin-left: 3px; }
+.seg { display: inline-flex; margin: 2px 0 6px; }
+.seg button { border-radius: 0; margin-left: -1px; }
+.seg button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+.seg button:last-child { border-radius: 0 6px 6px 0; }
+.seg button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .failed-why { word-break: break-all; font-size: 12.5px; }
