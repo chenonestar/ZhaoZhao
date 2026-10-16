@@ -89,6 +89,7 @@ function IndexTab({ status, refresh }: { status: Status | null; refresh: () => v
             )}
             <div>
               正在处理 {status.current.length} 个{status.net && status.net.used > 0 ? ` · 网络盘读取 ${status.net.used}/${status.net.cap}` : ""}
+              {status.keepingAwake ? " · 已阻止电脑自动睡眠（索引完成后恢复）" : ""}
             </div>
             {status.current.map((j) => (
               <div key={j.id} title={j.path}>
@@ -488,6 +489,7 @@ function SettingsTab() {
       {chk("ocrEnabled", "识别图片和扫描 PDF 里的文字（OCR）")}
       {num("ocrWorkers", "OCR 并发数", "0 表示自动：8 个以上逻辑处理器时 2 个，否则 1 个；每个约占几百 MB 内存")}
       {chk("pauseOnBattery", "使用电池时暂停 OCR 和格式转换")}
+      {chk("keepAwake", "建立索引期间不让电脑自动睡眠（只在接通电源时；屏幕保护、关闭显示器不受影响；索引完成后自动恢复）")}
 
       <h4>移动硬盘与网络盘</h4>
       {num("networkScanMin", "网络盘定时扫描间隔（分钟）")}

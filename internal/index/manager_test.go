@@ -697,3 +697,42 @@ func TestStaleScanSigStillCompletes(t *testing.T) {
 		t.Fatal("应能搜到内容")
 	}
 }
+
+// 有文件要处理时阻止电脑自动睡眠，处理完恢复。
+func TestKeepAwakeWhileBusy(t *testing.T) {
+	var mu sync.Mutex
+	var calls []bool
+	oldSup, oldSet, oldEvery := keepAwakeSupported, keepAwakeSet, keepAwakeEvery
+	keepAwakeSupported = func() bool { return true }
+	keepAwakeSet = func(on bool) error { mu.Lock(); calls = append(calls, on); mu.Unlock(); return nil }
+	keepAwakeEvery = 20 * time.Millisecond
+	t.Cleanup(func() { keepAwakeSupported, keepAwakeSet, keepAwakeEvery = oldSup, oldSet, oldEvery })
+
+	dir := t.TempDir()
+	for i := range 30 {
+		os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%d.txt", i)), []byte("内容"), 0o644)
+	}
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	e := newEnv(t, prov)
+	if _, err := e.m.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		got := fmt.Sprint(calls)
+		mu.Unlock()
+		if got == "[true false]" {
+			if e.m.keepingAwake.Load() {
+				t.Fatal("处理完后不应再显示阻止睡眠")
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	t.Fatalf("应先阻止、处理完后恢复：%v", calls)
+}

@@ -54,8 +54,14 @@ try {
 
     Write-Host "== 等待索引完成"
     $deadline = (Get-Date).AddMinutes(8)
+    $awakeSeen = $false
     while ($true) {
         $st = Invoke-RestMethod "$api/api/status" -WebSession $sess
+        if ($st.keepingAwake -and -not $awakeSeen) {
+            $awakeSeen = $true
+            Write-Host "  已阻止电脑自动睡眠；powercfg /requests："
+            powercfg /requests 2>&1 | Out-Host
+        }
         Write-Host ("  总数={0} 待处理={1} 失败={2} 扫描中={3} 正在处理={4}" -f $st.totals.Total, $st.totals.Pending, $st.totals.Failed, $st.scanning, (($st.current | ForEach-Object { "$($_.kind):$($_.stage)" }) -join ";"))
         if (-not $st.scanning -and $st.totals.Total -ge 5 -and $st.totals.Pending -eq 0 -and $st.current.Count -eq 0 -and -not $st.componentsChecking) { break }
         if ((Get-Date) -gt $deadline) { $fail.Add("索引超时未完成"); break }
@@ -89,7 +95,7 @@ try {
     if (@($st.components).Count -lt 2) { $fail.Add("状态里缺少组件自检结果") }
 
     Write-Host "== 失败列表"
-    Invoke-RestMethod "$api/api/failed" -WebSession $sess | ForEach-Object { Write-Host "  $($_.path)  $($_.reason)" }
+    (Invoke-RestMethod "$api/api/failed" -WebSession $sess).items | ForEach-Object { Write-Host "  $($_.path)  $($_.cat)：$($_.reason)" }
 
     Write-Host "== 退出（与托盘「退出」相同的路径）"
     Invoke-RestMethod "$api/api/quit" -Method Post -WebSession $sess -Headers @{ "X-ZhaoZhao" = "1" } -ContentType "application/json" -Body "{}" | Out-Null
@@ -109,6 +115,8 @@ finally {
         Write-Host "== 日志（末尾 40 行）"; Get-Content $log -Tail 40
         $text = Get-Content $log -Raw -Encoding UTF8
         if ($text -notmatch "常驻 LibreOffice 已启动") { $fail.Add("没有使用常驻 LibreOffice（日志里没有「常驻 LibreOffice 已启动」）") }
+        if ($text -notmatch "建立索引期间不让电脑自动睡眠") { $fail.Add("索引期间没有阻止电脑自动睡眠（日志里没有记录）") }
+        if ($text -match "索引期间不让电脑自动睡眠」失败") { $fail.Add("阻止电脑自动睡眠失败：" + (($text -split "`n") -match "自动睡眠」失败" | Select-Object -First 1)) }
         if ($text -match "常驻 LibreOffice 不可用") { $fail.Add("常驻 LibreOffice 不可用：" + (($text -split "`n") -match "常驻 LibreOffice 不可用" | Select-Object -First 1)) }
     }
 }

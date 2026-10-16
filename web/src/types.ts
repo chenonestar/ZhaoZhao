@@ -117,6 +117,7 @@ export interface Status {
   workers: number;
   active: number;
   current: CurrentJob[];
+  keepingAwake: boolean;
   totals: Counts;
   ocrQueue: number;
   legacyQueue: number;
@@ -233,6 +234,7 @@ export interface Config {
   networkScanMin: number;
   networkReadConc: number;
   pauseOnBattery: boolean;
+  keepAwake: boolean;
   containerMaxDepth: number;
   archiveMaxMB: number;
   archiveMaxRatio: number;

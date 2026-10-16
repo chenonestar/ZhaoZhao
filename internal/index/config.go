@@ -38,6 +38,7 @@ type Config struct {
 	NetworkScanMin    int  `json:"networkScanMin"`  // 网络盘定时扫描间隔（分钟）
 	NetworkReadConc   int  `json:"networkReadConc"` // 网络盘读取并发数
 	PauseOnBattery    bool `json:"pauseOnBattery"`  // 使用电池时暂停 OCR 和格式转换
+	KeepAwake         bool `json:"keepAwake"`       // 建立索引期间不让电脑自动睡眠（接通电源时）
 	ContainerMaxDepth int  `json:"containerMaxDepth"`
 	ArchiveMaxMB      int  `json:"archiveMaxMB"`    // 单个压缩包解压总量上限
 	ArchiveMaxRatio   int  `json:"archiveMaxRatio"` // 单个内部文件压缩比上限
@@ -130,6 +131,7 @@ func DefaultConfig(dataDir string) Config {
 		NetworkScanMin:    60,
 		NetworkReadConc:   2,
 		PauseOnBattery:    true,
+		KeepAwake:         true,
 		ContainerMaxDepth: 3,
 		ArchiveMaxMB:      2048,
 		ArchiveMaxRatio:   100,

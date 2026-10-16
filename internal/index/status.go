@@ -79,6 +79,7 @@ type Status struct {
 	Corrupt      bool           `json:"corrupt"`
 	OnBattery    bool           `json:"onBattery"`
 	Scanning     bool           `json:"scanning"`
+	KeepingAwake bool           `json:"keepingAwake"` // 正在阻止电脑自动睡眠
 	Processed    int64          `json:"processed"`
 	Roots        []RootStatus   `json:"roots"`
 	Volumes      []VolumeStatus `json:"volumes"`
@@ -168,6 +169,7 @@ func (m *Manager) Status() Status {
 	st.LegacyEtaSec = m.laneEta(prioLegacy, st.LegacyQueue)
 	st.OCREtaSec = m.laneEta(prioOCR, st.OCRQueue)
 	st.StalledSec = int64(m.stalled().Seconds())
+	st.KeepingAwake = m.keepingAwake.Load()
 
 	roots, _ := m.DB.ListRoots()
 	volSync := map[string]bool{}

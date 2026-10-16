@@ -86,7 +86,9 @@ type Manager struct {
 	wg     sync.WaitGroup
 
 	pausedAll atomic.Bool
-	kickCh    chan struct{}
+	// keepingAwake：正在阻止电脑自动睡眠（keepAwakeLoop）
+	keepingAwake atomic.Bool
+	kickCh       chan struct{}
 
 	scanMu   sync.Mutex
 	scanQ    chan scanReq
@@ -216,6 +218,8 @@ func (m *Manager) Start() error {
 	go m.volumeLoop()
 	m.wg.Add(1)
 	go m.maintainLoop()
+	m.wg.Add(1)
+	go m.keepAwakeLoop()
 	// 启动对账：处理未运行期间发生的变化（F-BG-02）
 	m.RescanAll()
 	return nil
