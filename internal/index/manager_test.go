@@ -739,3 +739,37 @@ func TestKeepAwakeWhileBusy(t *testing.T) {
 	defer mu.Unlock()
 	t.Fatalf("应先阻止、处理完后恢复：%v", calls)
 }
+
+// 几秒就索引完的任务也要立即阻止睡眠（不等下一次定时检查）：Windows 冒烟测试里整个索引 1 秒就做完了。
+func TestKeepAwakeEngagesForShortJob(t *testing.T) {
+	var mu sync.Mutex
+	var calls []bool
+	oldSup, oldSet, oldEvery := keepAwakeSupported, keepAwakeSet, keepAwakeEvery
+	keepAwakeSupported = func() bool { return true }
+	keepAwakeSet = func(on bool) error { mu.Lock(); calls = append(calls, on); mu.Unlock(); return nil }
+	keepAwakeEvery = time.Hour // 定时检查不会发生
+	t.Cleanup(func() { keepAwakeSupported, keepAwakeSet, keepAwakeEvery = oldSup, oldSet, oldEvery })
+
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("内容"), 0o644)
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	// 先暂停：循环第一次检查时不阻止睡眠；之后加入目录、恢复，任务只有一秒，等不到下一次定时检查
+	e := newEnvWith(t, prov, "", func(m *Manager) { m.PauseAll() })
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	if len(calls) != 0 {
+		t.Fatalf("暂停时不应阻止睡眠：%v", calls)
+	}
+	mu.Unlock()
+	if _, err := e.m.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	e.m.ResumeAll()
+	e.waitIdle()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) == 0 || !calls[0] {
+		t.Fatalf("有任务时应立即阻止睡眠：%v", calls)
+	}
+}

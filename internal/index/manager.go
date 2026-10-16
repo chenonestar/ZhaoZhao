@@ -92,6 +92,7 @@ type Manager struct {
 	pausedAll atomic.Bool
 	// keepingAwake：正在阻止电脑自动睡眠（keepAwakeLoop）
 	keepingAwake atomic.Bool
+	awakeCh      chan struct{} // 有新任务时叫醒 keepAwakeLoop，不必等下一次定时检查
 	kickCh       chan struct{}
 
 	scanMu   sync.Mutex
@@ -128,7 +129,7 @@ type Manager struct {
 func New(db *store.DB, prov volume.Provider, pool *worker.Pool, dataDir string) *Manager {
 	m := &Manager{DB: db, Prov: prov, Pool: pool, DataDir: dataDir,
 		vols: map[string]*volState{}, roots: map[int64]*rootRT{},
-		kickCh: make(chan struct{}, 1), scanQ: make(chan scanReq, 1024),
+		kickCh: make(chan struct{}, 1), awakeCh: make(chan struct{}, 1), scanQ: make(chan scanReq, 1024),
 		scanSet: map[scanReq]bool{}, scanInfo: map[int64]*scanState{}}
 	m.watch.watched = map[int64]recursiveWatcher{}
 	m.watch.pending = map[string]pendingEvent{}
@@ -407,6 +408,15 @@ func (m *Manager) kick() {
 		default:
 		}
 	})
+	m.pokeAwake()
+}
+
+// pokeAwake 叫醒 keepAwakeLoop：有任务时立即阻止自动睡眠（几秒就做完的任务也照样记录）。
+func (m *Manager) pokeAwake() {
+	select {
+	case m.awakeCh <- struct{}{}:
+	default:
+	}
 }
 
 // ---- 路径 ----

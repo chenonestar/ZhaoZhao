@@ -376,7 +376,12 @@ func (m *Manager) laneStat(p int) SlotStatus {
 	return SlotStatus{Used: l.running, Cap: l.target}
 }
 
-func (m *Manager) activity() { m.sched.lastActivity.Store(int64(awake.Now())) }
+func (m *Manager) activity() {
+	m.sched.lastActivity.Store(int64(awake.Now()))
+	if !m.keepingAwake.Load() {
+		m.pokeAwake()
+	}
+}
 
 func (m *Manager) setStage(j *job, stage string) {
 	m.sched.mu.Lock()

@@ -51,6 +51,7 @@ func (m *Manager) keepAwakeLoop() {
 		case <-m.ctx.Done():
 			return
 		case <-t.C:
+		case <-m.awakeCh: // 有新任务：立即检查
 		}
 	}
 }
