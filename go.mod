@@ -11,6 +11,7 @@ require (
 	github.com/nwaples/rardecode/v2 v2.4.3
 	github.com/pdfcpu/pdfcpu v0.16.1
 	github.com/richardlehane/mscfb v1.0.9
+	github.com/ulikunitz/xz v0.5.15
 	golang.org/x/image v0.47.0
 	golang.org/x/net v0.61.0
 	golang.org/x/sys v0.49.0
@@ -35,7 +36,6 @@ require (
 	github.com/richardlehane/msoleps v1.0.3 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/stangelandcl/ppmd v0.1.1 // indirect
-	github.com/ulikunitz/xz v0.5.15 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	go4.org v0.0.0-20260112195520-a5071408f32f // indirect
 	golang.org/x/crypto v0.58.0 // indirect

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -150,7 +151,7 @@ func listZip(p string, fn func(*entry) bool) error {
 		}
 		f := f
 		e := &entry{name: strings.TrimPrefix(decodeZipName(f), "/"), size: int64(f.UncompressedSize64), csize: int64(f.CompressedSize64),
-			mtime: f.Modified.Unix(), encrypted: f.Flags&0x1 != 0, open: f.Open}
+			mtime: f.Modified.Unix(), encrypted: f.Flags&0x1 != 0, open: func() (io.ReadCloser, error) { return zipOpen(f) }}
 		if fn(e) {
 			return nil
 		}
@@ -306,7 +307,7 @@ func (w *walkState) walk(p, kind string, depth int, prefix string, visit visitFn
 		}
 		// 嵌套容器：先把它解到临时文件再展开
 		if e.mail == nil && isNestedContainer(e.name) && depth+1 < w.opt.MaxDepthOrDefault() && !e.encrypted {
-			if tmp, ok := w.spill(e); ok {
+			if tmp, err := w.spill(e); err == nil {
 				if err := w.walk(tmp, containerKind(e.name), depth+1, inner+innerSep, visit); err == errStop {
 					stopped = true
 					return true
@@ -372,7 +373,7 @@ func (w *walkState) walkAttachments(mi *mailInfo, prefix string, depth int, visi
 				return true
 			}
 		case isNestedContainer(a.name) && depth+1 < w.opt.MaxDepthOrDefault():
-			if tmp, ok := w.spill(e); ok {
+			if tmp, err := w.spill(e); err == nil {
 				if w.walk(tmp, kind, depth+1, inner+innerSep, visit) == errStop {
 					return true
 				}
@@ -382,22 +383,31 @@ func (w *walkState) walkAttachments(mi *mailInfo, prefix string, depth int, visi
 	return false
 }
 
+var (
+	errEntryTooBig = errors.New("文件过大")
+	errOverBudget  = errors.New("超过压缩包解压总量上限")
+	errBadRatio    = errors.New("压缩比异常，疑似压缩炸弹")
+)
+
 // spill 把条目内容写到临时文件（ASCII 文件名，保留扩展名），受解压总量和压缩比限制。
-func (w *walkState) spill(e *entry) (string, bool) {
-	if e.size > maxEntryBytes || (e.size > 0 && e.size > w.budget) {
-		return "", false
-	}
-	if e.csize > 0 && w.opt.ArchiveMaxRatio > 0 && e.size/maxInt64(e.csize, 1) > int64(w.opt.ArchiveMaxRatio) && e.size > 1<<20 {
-		return "", false
+// 失败时返回具体原因（不支持的压缩方式、数据损坏、超过上限等），写进失败列表。
+func (w *walkState) spill(e *entry) (string, error) {
+	switch {
+	case e.size > maxEntryBytes:
+		return "", errEntryTooBig
+	case e.size > 0 && e.size > w.budget:
+		return "", errOverBudget
+	case e.csize > 0 && w.opt.ArchiveMaxRatio > 0 && e.size/maxInt64(e.csize, 1) > int64(w.opt.ArchiveMaxRatio) && e.size > 1<<20:
+		return "", errBadRatio
 	}
 	rc, err := e.open()
 	if err != nil {
-		return "", false
+		return "", err
 	}
 	defer rc.Close()
 	dir, err := w.tempDir()
 	if err != nil {
-		return "", false
+		return "", fmt.Errorf("无法创建临时目录: %v", err)
 	}
 	ext := Ext(e.name)
 	if strings.HasSuffix(strings.ToLower(e.name), ".tar.gz") {
@@ -409,7 +419,7 @@ func (w *walkState) spill(e *entry) (string, bool) {
 	}
 	f, err := os.Create(filepath.Join(dir, name))
 	if err != nil {
-		return "", false
+		return "", fmt.Errorf("无法写临时文件: %v", err)
 	}
 	limit := int64(maxEntryBytes)
 	if w.budget < limit {
@@ -417,12 +427,28 @@ func (w *walkState) spill(e *entry) (string, bool) {
 	}
 	n, err := io.Copy(f, io.LimitReader(rc, limit+1))
 	f.Close()
-	if err != nil || n > limit {
+	switch {
+	case err != nil:
 		os.Remove(f.Name())
-		return "", false
+		return "", err
+	case n > limit:
+		os.Remove(f.Name())
+		return "", errOverBudget
 	}
 	w.budget -= n
-	return f.Name(), true
+	return f.Name(), nil
+}
+
+// entryErr 把解压条目时的错误换成看得懂的说法。
+func entryErr(err error) string {
+	switch msg := err.Error(); {
+	case errors.Is(err, zip.ErrChecksum), errors.Is(err, errZipChecksum):
+		return errZipChecksum.Error()
+	case errors.Is(err, zip.ErrFormat), errors.Is(err, io.ErrUnexpectedEOF), strings.Contains(msg, "flate: corrupt"):
+		return "数据已损坏（" + msg + "）"
+	default:
+		return msg
+	}
 }
 
 func maxInt64(a, b int64) int64 {
@@ -534,16 +560,12 @@ func (w *walkState) leafResult(e *entry) doc.Result {
 	if e.size > w.budget && e.size > 0 {
 		return doc.Result{Status: doc.StatusFailed, Err: "超过压缩包解压总量上限"}
 	}
-	tmp, ok := w.spill(e)
-	if !ok {
-		if rc, err := e.open(); err != nil {
-			if msg := strings.ToLower(err.Error()); strings.Contains(msg, "password") || strings.Contains(msg, "encrypt") {
-				return doc.Result{Status: doc.StatusEncrypted, Err: "已加密"}
-			}
-		} else {
-			rc.Close()
+	tmp, err := w.spill(e)
+	if err != nil {
+		if msg := strings.ToLower(err.Error()); strings.Contains(msg, "password") || strings.Contains(msg, "encrypt") {
+			return doc.Result{Status: doc.StatusEncrypted, Err: "已加密"}
 		}
-		return doc.Result{Status: doc.StatusFailed, Err: "无法读取（超过解压总量上限、压缩比异常或数据损坏）"}
+		return doc.Result{Status: doc.StatusFailed, Err: "无法从压缩包里读取：" + entryErr(err)}
 	}
 	defer os.Remove(tmp)
 	inner := w.opt

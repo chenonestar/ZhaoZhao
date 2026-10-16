@@ -27,7 +27,7 @@ var problemRules = []problemRule{
 	{"ocr", "OCR 失败", StateFailed, []string{"%OCR%", "%识别%"}},
 	{"convert", "格式转换失败", StateFailed, []string{"%格式转换%", "%LibreOffice%"}},
 	{"corrupt", "文件损坏或格式不对", StateFailed, []string{"%损坏%", "%不是有效%", "%无法解析%", "%无法解码%", "%解析异常%",
-		"%格式不正确%", "%没有页面%", "%内置解析不支持%", "%压缩比异常%", "%解压总量%", "无法读取:%", "%unexpected EOF%",
+		"%格式不正确%", "%没有页面%", "%内置解析不支持%", "%不支持的压缩方式%", "%压缩比异常%", "%解压总量%", "无法读取:%", "%unexpected EOF%",
 		"%not a valid%", "%invalid%", "%malformed%", "%corrupt%"}},
 	{"other", "其他", StateFailed, nil},
 	{"meta_size", "文件太大", StateMetaOnly, []string{"文件超过%", "文件过大%"}},
