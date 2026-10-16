@@ -286,6 +286,9 @@ func (d *DB) RetryFailed(ids []int64) error {
 	return nil
 }
 
+// RetryCond 把符合条件（代码里写定的 SQL 条件）的文件重新排队，压缩包里的条目重新排队它所在的压缩包。
+func (d *DB) RetryCond(cond string) (int64, error) { return d.retryWhere(cond, nil) }
+
 func (d *DB) retryWhere(cond string, args []any) (int64, error) {
 	var total int64
 	err := d.Tx(func(tx *sql.Tx) error {

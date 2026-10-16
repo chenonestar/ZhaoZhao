@@ -365,3 +365,43 @@ func TestMoveReusesExtraction(t *testing.T) {
 		t.Errorf("复用后回收区应清空：%d", r)
 	}
 }
+
+// 升级后把以前（新版本能处理了的）失败重新排队一次：压缩包里的条目重新排队它所在的压缩包。
+func TestUpgradeRetries(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "a.txt"), "hello")
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	e := newEnv(t, prov)
+	if _, err := e.m.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+	// 造一个压缩包和它里面以前失败的条目
+	for _, q := range []string{
+		`INSERT INTO files(root_id,volume_id,rel_path,inner,name,ext,kind,size,mtime,state,err,prio)
+		SELECT root_id,volume_id,'包.zip','','包.zip','zip','archive',1,1,1,'',1 FROM files WHERE name='a.txt'`,
+		`INSERT INTO files(root_id,volume_id,rel_path,inner,name,ext,kind,size,mtime,state,err,prio)
+		SELECT root_id,volume_id,'包.zip','里/x.doc','x.doc','doc','doc',1,1,2,'无法读取（超过解压总量上限、压缩比异常或数据损坏）',1 FROM files WHERE name='a.txt'`,
+	} {
+		if r, err := e.m.DB.W.Exec(q); err != nil {
+			t.Fatal(err)
+		} else if n, _ := r.RowsAffected(); n != 1 {
+			t.Fatalf("插入了 %d 行", n)
+		}
+	}
+	e.m.PauseAll()                                                // 只看排队，不真去提取（包.zip 并不存在）
+	e.m.DB.W.Exec(`DELETE FROM meta WHERE k='retry_zip_methods'`) // 模拟从旧版本升级
+	e.m.runUpgradeRetries()
+	var st int
+	e.m.DB.R.QueryRow(`SELECT state FROM files WHERE rel_path='包.zip' AND inner=''`).Scan(&st)
+	if st != store.StatePending {
+		t.Fatalf("所在的压缩包应重新排队：state %d", st)
+	}
+	e.m.DB.W.Exec(`UPDATE files SET state=1 WHERE rel_path='包.zip' AND inner=''`)
+	e.m.runUpgradeRetries()
+	e.m.DB.R.QueryRow(`SELECT state FROM files WHERE rel_path='包.zip' AND inner=''`).Scan(&st)
+	if st != store.StateDone {
+		t.Fatal("只应做一次")
+	}
+}

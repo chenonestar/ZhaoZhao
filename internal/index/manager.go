@@ -207,6 +207,7 @@ func (m *Manager) Start() error {
 	m.syncLegacyQueue(m.Config().LegacyLOOnly)
 	m.retryProtectedXls()
 	m.retryProtectedOOXML()
+	m.runUpgradeRetries()
 	m.refreshVolumes(true)
 	m.initWatch()
 	m.startScanners(2)
@@ -281,6 +282,29 @@ func (m *Manager) retryProtectedOOXML() {
 	_ = m.DB.SetMeta("ooxml_default_password", "1")
 	if n > 0 {
 		m.logf("%d 个标记为「已加密」的 docx/xlsx/pptx 重新排队：打开时不要密码的现在能读出内容", n)
+	}
+}
+
+// upgradeRetries：新版本能处理以前失败的文件时，升级后把它们重新排队一次（每项只做一次，记在索引库里）。
+var upgradeRetries = []struct{ key, cond, what string }{
+	{"retry_zip_methods", `state=2 AND inner<>'' AND err='无法读取（超过解压总量上限、压缩比异常或数据损坏）'`,
+		"压缩包里以前读不出的文件（多为 Deflate64 等压缩方式）"},
+}
+
+func (m *Manager) runUpgradeRetries() {
+	for _, u := range upgradeRetries {
+		if v, _ := m.DB.GetMeta(u.key); v == "1" {
+			continue
+		}
+		n, err := m.DB.RetryCond(u.cond)
+		if err != nil {
+			m.logf("重新排队%s失败: %v", u.what, err)
+			continue
+		}
+		_ = m.DB.SetMeta(u.key, "1")
+		if n > 0 {
+			m.logf("%d 个文件重新排队：%s", n, u.what)
+		}
 	}
 }
 
