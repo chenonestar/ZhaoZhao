@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/chenonestar/zhaozhao/internal/awake"
 	"io"
 	"log"
 	"os"
@@ -168,10 +169,12 @@ func (r *loResident) readReply(v any, timeout time.Duration) error {
 		}
 		ch <- json.Unmarshal(line, v)
 	}()
+	tm := awake.NewTimer(timeout) // 只计醒着的时间
+	defer tm.Stop()
 	select {
 	case err := <-ch:
 		return err
-	case <-time.After(timeout):
+	case <-tm.C:
 		return errLOTimeout
 	}
 }

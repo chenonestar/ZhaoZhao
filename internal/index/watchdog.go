@@ -2,6 +2,7 @@ package index
 
 import (
 	"fmt"
+	"github.com/chenonestar/zhaozhao/internal/awake"
 	"runtime/pprof"
 	"strings"
 	"time"
@@ -19,11 +20,17 @@ func (m *Manager) watchdog() {
 	defer t.Stop()
 	s := &m.sched
 	var lastBeat time.Time
+	slept := awake.Slept()
 	for {
 		select {
 		case <-m.ctx.Done():
 			return
 		case <-t.C:
+		}
+		// 电脑睡眠、休眠期间所有程序都暂停：醒来后在日志里记一笔，便于对照进度
+		if d := awake.Slept() - slept; d >= time.Minute {
+			slept += d
+			m.logf("电脑刚从睡眠中恢复（睡了约 %s）；睡眠期间索引暂停，时限和剩余时间不计睡眠的时间", fmtDuration(d))
 		}
 		if d := m.stalled(); d > 0 {
 			if s.stallLogged.IsZero() || time.Since(s.stallLogged) >= 30*time.Minute {

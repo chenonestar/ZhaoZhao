@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/chenonestar/zhaozhao/internal/awake"
 	"io"
 	"log"
 	"os/exec"
@@ -350,6 +351,8 @@ func (p *Pool) Run(ctx context.Context, path, ext string, opts extract.Options, 
 		}
 	}()
 
+	// 时限只计醒着的时间：电脑睡眠时计时器照走，醒来后到期的先看实际过了多久，没到就重新计时
+	idleEnd, totalEnd := awake.Now()+t.Idle, awake.Now()+t.Total
 	idle := time.NewTimer(t.Idle)
 	defer idle.Stop()
 	total := time.NewTimer(t.Total)
@@ -378,6 +381,7 @@ func (p *Pool) Run(ctx context.Context, path, ext string, opts extract.Options, 
 					}
 				}
 				idle.Reset(t.Idle)
+				idleEnd = awake.Now() + t.Idle
 				continue
 			}
 			if r.err != nil {
@@ -386,11 +390,19 @@ func (p *Pool) Run(ctx context.Context, path, ext string, opts extract.Options, 
 			p.put(pr)
 			return r.res
 		case <-idle.C:
+			if rem := awake.Remaining(idleEnd); rem > 0 {
+				idle.Reset(rem)
+				continue
+			}
 			if t.Idle < t.Total {
 				return fail(fmt.Sprintf("提取超时（%s 内没有任何进展）", fmtDur(t.Idle)))
 			}
 			return fail("提取超时")
 		case <-total.C:
+			if rem := awake.Remaining(totalEnd); rem > 0 {
+				total.Reset(rem)
+				continue
+			}
 			return fail(fmt.Sprintf("提取超时（超过 %s）", fmtDur(t.Total)))
 		case <-ctx.Done():
 			p.kill(pr)

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"github.com/chenonestar/zhaozhao/internal/awake"
 	"image"
 	"image/color"
 	"image/png"
@@ -237,7 +238,7 @@ func TestCurrentJobsStableOrder(t *testing.T) {
 	base := time.Now()
 	for i, id := range []int64{5, 3, 9, 7} {
 		m.sched.inflight[id] = &job{f: store.File{ID: id}, path: fmt.Sprint(id), queued: base.Add(time.Duration(i) * time.Millisecond),
-			since: base.Add(time.Duration(i) * 700 * time.Millisecond)}
+			since: awake.Now() - time.Duration(i)*700*time.Millisecond}
 	}
 	m.sched.inflight[7].queued = m.sched.inflight[9].queued // 同时进入：按编号
 	order := func() string {
@@ -250,7 +251,7 @@ func TestCurrentJobsStableOrder(t *testing.T) {
 	if got := order(); got != "5,3,7,9" {
 		t.Fatalf("顺序 %s", got)
 	}
-	m.sched.inflight[5].since = time.Now() // 5 刚从等待变为开始处理
+	m.sched.inflight[5].since = awake.Now() // 5 刚从等待变为开始处理
 	if got := order(); got != "5,3,7,9" {
 		t.Fatalf("开始处理后位置变了: %s", got)
 	}

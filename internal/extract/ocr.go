@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/chenonestar/zhaozhao/internal/awake"
 	"image"
 	"image/png"
 	"io"
@@ -173,6 +174,8 @@ func startOCR(c OCRConfig) (*ocrProc, error) {
 			}
 		}
 	}()
+	startTimer := awake.NewTimer(90 * time.Second) // 只计醒着的时间
+	defer startTimer.Stop()
 	select {
 	case err := <-ready:
 		if err != nil {
@@ -192,7 +195,7 @@ func startOCR(c OCRConfig) (*ocrProc, error) {
 			}
 			return nil, fmt.Errorf("OCR 组件启动失败：%s", DescribeExit(werr, errBuf.String()))
 		}
-	case <-time.After(90 * time.Second):
+	case <-startTimer.C:
 		killOCR(p)
 		return nil, fmt.Errorf("OCR 组件启动超时（90 秒内没有完成初始化）%s", suffix(errBuf.String()))
 	}
@@ -330,10 +333,12 @@ func recognizeWith(p *ocrProc, c OCRConfig, imgPath string) (string, error) {
 			return
 		}
 	}()
+	tm := awake.NewTimer(time.Duration(sec) * time.Second) // 只计醒着的时间
+	defer tm.Stop()
 	select {
 	case r := <-ch:
 		return r.text, r.err
-	case <-time.After(time.Duration(sec) * time.Second):
+	case <-tm.C:
 		return "", fmt.Errorf("%w（单张图片超过 %d 秒）", errOCRTimeout, sec)
 	}
 }

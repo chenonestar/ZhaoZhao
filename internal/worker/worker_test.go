@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/chenonestar/zhaozhao/internal/awake"
 	"log"
 	"os"
 	"path/filepath"
@@ -92,6 +93,19 @@ func TestProgressExtendsTimeout(t *testing.T) {
 	r = p3.Run(context.Background(), "x", "pdf", extract.DefaultOptions(), Timeouts{Idle: 500 * time.Millisecond, Total: 700 * time.Millisecond}, nil)
 	if r.Status != doc.StatusFailed || !strings.Contains(r.Err, "超过") {
 		t.Fatalf("%+v", r)
+	}
+}
+
+// 电脑睡眠的时间不计入时限：一个 0.6 秒的任务，时限 0.4 秒，但期间「睡了」0.5 秒，醒着只过了 0.1 秒多，不算超时。
+func TestTimeoutExcludesSleep(t *testing.T) {
+	p := fakePool(t, 1, "1,600ms") // 0.6 秒后才有进度和结果
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		awake.SimulateSleep(500 * time.Millisecond)
+	}()
+	r := p.Run(context.Background(), "x", "pdf", extract.DefaultOptions(), Timeouts{Idle: 400 * time.Millisecond, Total: 400 * time.Millisecond}, nil)
+	if r.Status != doc.StatusOK {
+		t.Fatalf("睡眠的时间不应算进时限：%+v", r)
 	}
 }
 

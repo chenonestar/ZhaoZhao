@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/chenonestar/zhaozhao/internal/awake"
 	"io"
 	"os"
 	"path"
@@ -45,10 +46,10 @@ var (
 type job struct {
 	f        store.File
 	path     string
-	class    int       // prioFast / prioLegacy / prioOCR：决定提取方式和时限
-	lane     *lane     // 所在通道
-	queued   time.Time // 进入「正在处理」的时间：界面按它排序，顺序不跳动
-	since    time.Time // 开始当前处理的时间（等待时为派发时间）
+	class    int           // prioFast / prioLegacy / prioOCR：决定提取方式和时限
+	lane     *lane         // 所在通道
+	queued   time.Time     // 进入「正在处理」的时间：界面按它排序，顺序不跳动
+	since    time.Duration // 开始当前处理的时间（awake.Now，不含电脑睡眠；等待时为派发时间）
 	stage    string
 	progress string
 	sent     bool // 结果已交给写入协程：写入完成后才从「处理中」移除，避免同一文件被再次派发
@@ -88,7 +89,7 @@ type schedState struct {
 	doneByPri    [4]atomic.Int64
 	startedAt    time.Time
 	idle         atomic.Bool
-	lastActivity atomic.Int64 // 最近一次进展的时间（UnixNano）
+	lastActivity atomic.Int64 // 最近一次进展的时间（awake.Now，不含电脑睡眠）
 	stallLogged  time.Time
 }
 
@@ -137,7 +138,7 @@ func (m *Manager) startScheduler() {
 		s.lanes[p] = &lane{prio: p, name: classNames[p], jobs: make(chan *job), kick: make(chan struct{}, 1), resize: make(chan struct{})}
 	}
 	s.startedAt = time.Now()
-	s.lastActivity.Store(time.Now().UnixNano())
+	s.lastActivity.Store(int64(awake.Now()))
 	m.applyWorkers()
 	m.wg.Add(2)
 	go m.writer()
@@ -274,7 +275,7 @@ func (m *Manager) laneDispatcher(l *lane) {
 		loOnly := m.Config().LegacyLOOnly
 		for _, f := range files {
 			now := time.Now()
-			j := &job{f: f, class: classOf(f, loOnly), lane: l, stage: "等待空闲的提取线程", queued: now, since: now}
+			j := &job{f: f, class: classOf(f, loOnly), lane: l, stage: "等待空闲的提取线程", queued: now, since: awake.Now()}
 			j.path, _ = m.AbsPath(f.VolumeID, f.RelPath)
 			s.mu.Lock()
 			s.inflight[f.ID] = j
@@ -320,11 +321,11 @@ func (m *Manager) laneWorker(l *lane) {
 		}
 		s.mu.Lock()
 		l.running++
-		j.since = time.Now()
+		j.since = awake.Now()
 		s.mu.Unlock()
 		m.activity()
 		m.runJob(j)
-		d := time.Since(j.since)
+		d := awake.Since(j.since) // 不含电脑睡眠的时间，剩余时间的估算才不会被拉长
 		s.mu.Lock()
 		l.running--
 		if j.sent {
@@ -373,7 +374,7 @@ func (m *Manager) laneStat(p int) SlotStatus {
 	return SlotStatus{Used: l.running, Cap: l.target}
 }
 
-func (m *Manager) activity() { m.sched.lastActivity.Store(time.Now().UnixNano()) }
+func (m *Manager) activity() { m.sched.lastActivity.Store(int64(awake.Now())) }
 
 func (m *Manager) setStage(j *job, stage string) {
 	m.sched.mu.Lock()

@@ -289,6 +289,8 @@ func (m *Manager) retryProtectedOOXML() {
 var upgradeRetries = []struct{ key, cond, what string }{
 	{"retry_zip_methods", `state=2 AND inner<>'' AND err='无法读取（超过解压总量上限、压缩比异常或数据损坏）'`,
 		"压缩包里以前读不出的文件（多为 Deflate64 等压缩方式）"},
+	{"retry_sleep_timeouts", `state=2 AND err LIKE '%超时%'`,
+		"以前超时的文件（以前的版本把电脑睡眠的时间也算进时限，醒来后会误判超时）"},
 }
 
 func (m *Manager) runUpgradeRetries() {

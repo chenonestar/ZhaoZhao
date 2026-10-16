@@ -1,6 +1,7 @@
 package index
 
 import (
+	"github.com/chenonestar/zhaozhao/internal/awake"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -96,7 +97,6 @@ func (m *Manager) currentJobs() []CurrentJob {
 	if s.inflight == nil {
 		return out
 	}
-	now := time.Now()
 	type item struct {
 		CurrentJob
 		queued time.Time
@@ -105,7 +105,7 @@ func (m *Manager) currentJobs() []CurrentJob {
 	s.mu.Lock()
 	for _, j := range s.inflight {
 		items = append(items, item{CurrentJob{ID: j.f.ID, Path: j.path, Kind: classNames[j.class], Stage: j.stage, Progress: j.progress,
-			Seconds: int64(now.Sub(j.since).Seconds())}, j.queued})
+			Seconds: int64(awake.Since(j.since).Seconds())}, j.queued})
 	}
 	s.mu.Unlock()
 	sort.Slice(items, func(i, k int) bool {
@@ -133,7 +133,7 @@ func (m *Manager) stalled() time.Duration {
 	if !busy {
 		return 0
 	}
-	d := time.Since(time.Unix(0, s.lastActivity.Load()))
+	d := awake.Since(time.Duration(s.lastActivity.Load())) // 电脑睡眠的时间不算「没有进展」
 	if d < stallAfter {
 		return 0
 	}

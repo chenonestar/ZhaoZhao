@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/chenonestar/zhaozhao/internal/awake"
 	"net/url"
 	"os"
 	"os/exec"
@@ -139,7 +140,7 @@ func convertLegacy(p, ext string, timeout time.Duration, profile string) doc.Res
 		return doc.Result{Status: doc.StatusFailed, Err: err.Error()}
 	}
 	defer os.RemoveAll(tmp)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := awake.WithTimeout(context.Background(), timeout) // 只计醒着的时间
 	defer cancel()
 	// 复制到临时目录并用 ASCII 文件名，规避 LibreOffice 对特殊路径的处理问题
 	src := filepath.Join(tmp, "in."+ext)
