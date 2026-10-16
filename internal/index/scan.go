@@ -3,6 +3,7 @@ package index
 import (
 	"errors"
 	"fmt"
+	"github.com/chenonestar/zhaozhao/internal/volume"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -93,6 +94,11 @@ func (m *Manager) decide(rt *rootRT, cfg Config, abs, ext string, size int64, in
 				why = "未安装 OCR 组件，仅索引文件名"
 			}
 			return store.StateMetaOnly, why, prioOCR, kind
+		}
+		// 本地盘上太小的图片（图标、缩略图）扫描时就排除，不占 OCR 队列。网络盘上不读（每个文件都要走一趟网络）；
+		// TIFF 可能有多页，只看第一页不准
+		if abs != "" && ext != "tif" && ext != "tiff" && !m.onNetwork(rt) && extract.ImageTooSmall(abs, m.ocrCfg) {
+			return store.StateMetaOnly, extract.ErrTooSmall, prioOCR, kind
 		}
 		return state, "", prioOCR, kind
 	case extract.IsLegacy(ext) && cfg.LegacyLOOnly:
@@ -389,4 +395,13 @@ func (w *walker) walk(abs, rel string) {
 		}
 		w.visit(cabs, crel, info)
 	}
+}
+
+// onNetwork：索引根在网络盘上。
+func (m *Manager) onNetwork(rt *rootRT) bool {
+	if rt == nil {
+		return false
+	}
+	info, _, _, _ := m.volSnapshot(rt.VolumeID)
+	return info.Kind == volume.KindNetwork
 }

@@ -1,7 +1,15 @@
 package index
 
 import (
+	"bytes"
 	"fmt"
+	"github.com/chenonestar/zhaozhao/internal/extract"
+	"github.com/chenonestar/zhaozhao/internal/store"
+	"github.com/chenonestar/zhaozhao/internal/volume"
+	"image"
+	"image/png"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -156,5 +164,42 @@ func TestOCRPageCounting(t *testing.T) {
 	m.finishOCRPages(img)
 	if n := m.ocr.pages.Load(); n != 6 {
 		t.Fatalf("5 页的 PDF 加一张图片应为 6 页：%d", n)
+	}
+}
+
+// 本地盘上太小的图片扫描时就排除（不进 OCR 队列），正常大小的照常识别。
+func TestSmallImagesSkippedAtScan(t *testing.T) {
+	dir := t.TempDir()
+	tiny := image.NewGray(image.Rect(0, 0, 30, 30))
+	var b bytes.Buffer
+	png.Encode(&b, tiny)
+	os.WriteFile(filepath.Join(dir, "图标.png"), b.Bytes(), 0o644)
+	writePNG(t, filepath.Join(dir, "扫描.png"), 7) // 120×120，大于假 OCR 的 MinSide 50
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	e := newEnvWith(t, prov, "", func(m *Manager) { useFakeOCR(t, m, "1ms") })
+	e.m.PauseAll() // 先只看扫描的结果
+	if _, err := e.m.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int
+		e.m.DB.R.QueryRow(`SELECT count(*) FROM files WHERE name IN ('扫描.png','图标.png')`).Scan(&n)
+		if n == 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if st, _, msg := fileByName(t, e.m.DB, "图标.png"); st != store.StateMetaOnly || msg != extract.ErrTooSmall {
+		t.Fatalf("太小的图片扫描时就应排除：state %d %q", st, msg)
+	}
+	if st, prio, _ := fileByName(t, e.m.DB, "扫描.png"); st != store.StatePending || prio != prioOCR {
+		t.Fatalf("正常的图片应排进 OCR 队列：state %d prio %d", st, prio)
+	}
+	e.m.ResumeAll()
+	e.waitIdle()
+	if st, _, msg := fileByName(t, e.m.DB, "扫描.png"); st != store.StateDone {
+		t.Fatalf("正常的图片应识别：state %d %s", st, msg)
 	}
 }

@@ -356,6 +356,21 @@ func recognizeWith(p *ocrProc, c OCRConfig, imgPath string) (string, error) {
 
 // ---- 图片 ----
 
+// ImageTooSmall 只读图片的文件头，判断是否太小、不值得 OCR（与识别时的规则相同：宽或高小于 MinSide，
+// 多为图标、缩略图）。扫描时就排除，不进 OCR 队列。读不出尺寸时返回 false（交给识别时再判断）。
+func ImageTooSmall(p string, c OCRConfig) bool {
+	f, err := os.Open(p)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	cfg, _, err := image.DecodeConfig(bufio.NewReaderSize(f, 64<<10))
+	return err == nil && (cfg.Width < minSide(c) || cfg.Height < minSide(c))
+}
+
+// ErrTooSmall 是图片太小时的说明（扫描时排除和识别时跳过用同一句话，失败列表里归为一类）。
+const ErrTooSmall = "图片尺寸过小，已跳过 OCR"
+
 func minSide(c OCRConfig) int {
 	if c.MinSide > 0 {
 		return c.MinSide
@@ -484,7 +499,7 @@ func extractImage(p, ext string, opt Options) doc.Result {
 			}
 		}
 		if small == len(pages) {
-			return doc.Result{Status: doc.StatusSkipped, Err: "图片尺寸过小，已跳过 OCR"}
+			return doc.Result{Status: doc.StatusSkipped, Err: ErrTooSmall}
 		}
 	case "webp", "bmp", "gif":
 		// OCR 组件不一定支持这些格式：统一转成 PNG
@@ -512,7 +527,7 @@ func extractImage(p, ext string, opt Options) doc.Result {
 	return doc.Result{Status: doc.StatusOK, Text: b.String(), Locs: b.Locs, OCR: true}
 }
 
-var errTooSmall = fmt.Errorf("图片尺寸过小，已跳过 OCR")
+var errTooSmall = errors.New(ErrTooSmall)
 
 func imageErr(err error) doc.Result {
 	if err == errTooSmall {

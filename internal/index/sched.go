@@ -260,7 +260,7 @@ func (m *Manager) laneDispatcher(l *lane) {
 			m.waitLane(l, 5*time.Second)
 			continue
 		}
-		files, err := m.DB.NextPending(8, []int{l.prio}, m.offlineVolumes(), m.inflightIDs())
+		files, err := m.DB.NextPending(8, []int{l.prio}, m.offlineVolumes(), m.inflightIDs(), l.prio == prioOCR)
 		if err != nil {
 			m.logf("读取待处理队列失败: %v", err)
 			m.waitLane(l, 2*time.Second)

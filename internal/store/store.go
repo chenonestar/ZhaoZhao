@@ -73,6 +73,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_v USING fts5vocab(fts, 'row');
 const schemaV2 = `
 CREATE INDEX IF NOT EXISTS files_text ON files(text_id) WHERE text_id>0;
 CREATE INDEX IF NOT EXISTS files_problem ON files(id) WHERE state>=2;
+CREATE INDEX IF NOT EXISTS files_queue_size ON files(prio, size) WHERE state=0;
 CREATE TABLE IF NOT EXISTS recycled(id INTEGER PRIMARY KEY, text_id INTEGER NOT NULL UNIQUE, hash TEXT NOT NULL,
   size INTEGER NOT NULL, ocr INTEGER NOT NULL DEFAULT 0, text_len INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS recycled_hash ON recycled(hash, size);
@@ -553,11 +554,11 @@ func (d *DB) GetFile(id int64) (*File, error) {
 	return &f, err
 }
 
-// NextPending 取出待提取的文件，按优先级（数值小者优先）、id 排序。
-// 已暂停的索引根、skipVols 中的卷（离线）、exclude 中的文件（处理中）会被跳过。
 // NextPending 取出待处理的文件：只取 prios 列出的优先级，同一优先级里最近修改的在前
-// （用户最常找的是近期的文件，它们最先可以按内容搜到）。
-func (d *DB) NextPending(limit int, prios []int, skipVols []string, exclude []int64) ([]File, error) {
+// （用户最常找的是近期的文件，它们最先可以按内容搜到）。smallFirst 时改为小文件在前（OCR：
+// 页数少的先做，总用时不变，但同样的时间里能搜到的文件多得多）。
+// 已暂停的索引根、skipVols 中的卷（离线）、exclude 中的文件（处理中）会被跳过。
+func (d *DB) NextPending(limit int, prios []int, skipVols []string, exclude []int64, smallFirst bool) ([]File, error) {
 	if len(prios) == 0 {
 		return nil, nil
 	}
@@ -578,7 +579,11 @@ func (d *DB) NextPending(limit int, prios []int, skipVols []string, exclude []in
 			args = append(args, v)
 		}
 	}
-	q += ` ORDER BY prio, mtime DESC LIMIT ?`
+	if smallFirst {
+		q += ` ORDER BY prio, size LIMIT ?`
+	} else {
+		q += ` ORDER BY prio, mtime DESC LIMIT ?`
+	}
 	args = append(args, limit)
 	rows, err := d.R.Query(q, args...)
 	if err != nil {
