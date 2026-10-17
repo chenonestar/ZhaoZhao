@@ -13,7 +13,6 @@ import (
 	"database/sql"
 	"github.com/chenonestar/zhaozhao/internal/extract"
 	"github.com/chenonestar/zhaozhao/internal/logx"
-	"github.com/chenonestar/zhaozhao/internal/norm"
 	"github.com/chenonestar/zhaozhao/internal/store"
 )
 
@@ -145,7 +144,7 @@ func (m *Manager) ocrEnabled(rt *rootRT) bool {
 }
 
 func (m *Manager) nameFTS(name string) string {
-	return norm.FTSText(norm.Tokenize(m.Norm().Runes(name)))
+	return m.Norm().FTS(name)
 }
 
 func relJoin(rel, name string) string {

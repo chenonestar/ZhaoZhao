@@ -411,21 +411,64 @@ func tiffPages(b []byte) []uint32 {
 	return pages
 }
 
-// tiffPagePNG 把 TIFF 的第 k 页转成 PNG：把文件头里指向首个 IFD 的偏移改成第 k 页的 IFD，
-// 所有数据偏移都是绝对的，因此标准解码器直接解出该页。
+// tiffPagePNG 把 TIFF 的第 k 页转成 PNG：让解码器读到的文件头里，指向首个 IFD 的偏移是第 k 页的 IFD，
+// 所有数据偏移都是绝对的，因此标准解码器直接解出该页。不复制文件（每页复制一遍，100 页就是 100 份拷贝）。
 func tiffPagePNG(b []byte, ifd uint32) ([]byte, error) {
-	cp := append([]byte(nil), b...)
-	if string(cp[:2]) == "II" {
-		binary.LittleEndian.PutUint32(cp[4:8], ifd)
-	} else {
-		binary.BigEndian.PutUint32(cp[4:8], ifd)
+	if len(b) < 8 {
+		return nil, errors.New("TIFF 文件太短")
 	}
-	img, err := tiff.Decode(bytes.NewReader(cp))
+	r := &tiffPage{b: b}
+	copy(r.hdr[:], b[:8])
+	if string(b[:2]) == "II" {
+		binary.LittleEndian.PutUint32(r.hdr[4:8], ifd)
+	} else {
+		binary.BigEndian.PutUint32(r.hdr[4:8], ifd)
+	}
+	img, err := tiff.Decode(r)
 	if err != nil {
 		return nil, err
 	}
+	return encodePNG(img)
+}
+
+// tiffPage 是改了文件头前 8 字节的 TIFF 数据（解码器有 ReadAt 时直接用它，不会整份读进新的缓冲区）。
+type tiffPage struct {
+	b   []byte
+	hdr [8]byte
+	off int64
+}
+
+func (t *tiffPage) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, errors.New("偏移为负")
+	}
+	if off >= int64(len(t.b)) {
+		return 0, io.EOF
+	}
+	n := copy(p, t.b[off:])
+	if off < 8 {
+		copy(p[:n], t.hdr[off:])
+	}
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (t *tiffPage) Read(p []byte) (int, error) {
+	n, err := t.ReadAt(p, t.off)
+	t.off += int64(n)
+	if err == io.EOF && n > 0 {
+		err = nil
+	}
+	return n, err
+}
+
+// encodePNG 用最快的压缩级别编码 PNG（只是交给 OCR 组件的临时图片，不必压得小）。
+func encodePNG(img image.Image) ([]byte, error) {
 	var out bytes.Buffer
-	if err := png.Encode(&out, img); err != nil {
+	enc := png.Encoder{CompressionLevel: png.BestSpeed}
+	if err := enc.Encode(&out, img); err != nil {
 		return nil, err
 	}
 	return out.Bytes(), nil
@@ -507,9 +550,11 @@ func extractImage(p, ext string, opt Options) doc.Result {
 		if err != nil {
 			return doc.Result{Status: doc.StatusFailed, Err: "图片无法解码: " + err.Error()}
 		}
-		var out bytes.Buffer
-		_ = png.Encode(&out, img)
-		if err := ocrOne("", out.Bytes(), ".png"); err != nil {
+		data, err := encodePNG(img)
+		if err != nil {
+			return doc.Result{Status: doc.StatusFailed, Err: "图片无法转换: " + err.Error()}
+		}
+		if err := ocrOne("", data, ".png"); err != nil {
 			return imageErr(err)
 		}
 	default:

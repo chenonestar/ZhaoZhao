@@ -39,6 +39,14 @@ func (o Options) Rune(r rune) rune {
 		}
 		return r
 	}
+	if r >= 0x4E00 && r <= 0x9FFF { // 常用汉字：不是标点、没有大小写，只看繁简
+		if o.Simplify {
+			if s, ok := t2s[r]; ok {
+				return s
+			}
+		}
+		return r
+	}
 	if p, ok := punct[r]; ok {
 		return p
 	}
@@ -69,6 +77,12 @@ func (o Options) String(s string) string { return string(o.Runes(s)) }
 
 // IsCJK 判断字符是否按「单字成词」处理（汉字、假名、谚文）。
 func IsCJK(r rune) bool {
+	if r < 0x1100 {
+		return false
+	}
+	if r >= 0x4E00 && r <= 0x9FFF { // 常用汉字（最常见的情况，不必查表）
+		return true
+	}
 	return unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) ||
 		unicode.Is(unicode.Katakana, r) || unicode.Is(unicode.Hangul, r)
 }
@@ -115,6 +129,36 @@ func FTSText(toks []Token) string {
 			b.WriteByte(' ')
 		}
 		b.WriteString(t.Text)
+	}
+	return b.String()
+}
+
+// FTS 归一化并分词，直接生成 FTS5 的入库文本：与 FTSText(Tokenize(o.Runes(s))) 结果相同，
+// 但一次遍历写完，不产生中间的字符切片和词元切片（几 MB 的中文文本能省下几百 MB 临时内存）。
+func (o Options) FTS(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + len(s)/3) // 汉字之间要插空格：每 3 字节多 1 字节
+	inWord, empty := false, true
+	for _, r := range s {
+		r = o.Rune(r)
+		switch {
+		case IsCJK(r):
+			if !empty {
+				b.WriteByte(' ')
+			}
+			b.WriteRune(r)
+			inWord, empty = false, false
+		case isWord(r):
+			if !inWord {
+				if !empty {
+					b.WriteByte(' ')
+				}
+				inWord, empty = true, false
+			}
+			b.WriteRune(r)
+		default:
+			inWord = false
+		}
 	}
 	return b.String()
 }

@@ -755,9 +755,7 @@ func stateOf(r doc.Result) int {
 	return store.StateMetaOnly
 }
 
-func ftsOf(o norm.Options, text string) string {
-	return norm.FTSText(norm.Tokenize(o.Runes(text)))
-}
+func ftsOf(o norm.Options, text string) string { return o.FTS(text) }
 
 func (m *Manager) prepare(f store.File, res doc.Result) *prepared {
 	o := m.Norm()
