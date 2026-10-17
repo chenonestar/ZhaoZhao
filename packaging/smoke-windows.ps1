@@ -87,6 +87,17 @@ try {
     $ocr = Search "HT-2025-0888" | Where-Object { $_.path -like "*扫描件.png" }
     if ($ocr -and -not $ocr[0].ocr) { $fail.Add("OCR 结果应带 OCR 标记") }
 
+    Write-Host "== OCR 测速（第一次识别图片前自动进行，结果按电脑保存）"
+    $ob = Invoke-RestMethod "$api/api/ocrbench" -WebSession $sess
+    if (-not $ob.bench) { $fail.Add("第一次识别图片前应已测过 OCR 速度：$($ob.note)") }
+    else {
+        foreach ($p in $ob.bench.plans) {
+            Write-Host ("  {0} 个进程 × {1} 线程：每分钟 {2:N1} 页，每个约 {3:N0} MB {4}" -f $p.procs, $p.threads, $p.perMin, ($p.slotMem / 1MB), $p.err)
+        }
+        Write-Host "  现在用 $($ob.plan)，内存允许 $($ob.memCap) 个进程"
+        if ($ob.bench.best -lt 0) { $fail.Add("OCR 测速全部失败") }
+    }
+
     Write-Host "== 组件自检"
     foreach ($c in $st.components) {
         Write-Host "  $($c.name)：$($c.message)"

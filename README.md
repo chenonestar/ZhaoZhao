@@ -93,10 +93,10 @@ iscc packaging\zhaozhao.iss
 | 工作流 | 触发 | 内容 |
 |---|---|---|
 | `.github/workflows/ci.yml` | push、PR | 界面类型检查与构建；Linux：`gofmt`、`go vet`、Windows 交叉编译检查、`go test -race`；Linux 集成测试（装 LibreOffice，真实样本 + OCR + 7z）；**Windows：`go vet` 与 `go test`**；通过后打包精简版便携 zip，可在 Actions 页面的 Artifacts 里下载 |
-| `.github/workflows/bundle.yml` | 手动、改动打包文件、被 release 调用 | **完整版**：choco 安装 LibreOffice，下载 RapidOCR-json（简体中文 V4 模型）和 PDFium，随包放入 VC++ 运行库，在真实 Windows 上冒烟测试（含组件自检、退出后无残留进程）通过后，产出完整版 zip（约 340 MB）和离线安装包 |
+| `.github/workflows/bundle.yml` | 手动、改动打包文件、被 release 调用 | **完整版**：choco 安装 LibreOffice，下载 RapidOCR-json（简体中文 V4 模型）和 PDFium，随包放入 VC++ 运行库，在真实 Windows 上冒烟测试（含组件自检、OCR 测速、退出后无残留进程）通过后，产出完整版 zip（约 340 MB）和离线安装包 |
 | `.github/workflows/release.yml` | 推送 `v*` 标签；或提交信息里带 `[release vX.Y.Z]` | 调用完整版构建，并发布完整版 zip、安装包、精简版 zip 到 GitHub Release |
 
-发布版本：`git tag v0.2.2 && git push origin v0.2.2`，或在推送的提交信息里写 `[release v0.2.2]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice、OCR 和 PDFium 组件**；精简版（主程序 + PDFium）需要按 `components\README.txt` 自行放入 LibreOffice 和 OCR。
+发布版本：`git tag v0.2.3 && git push origin v0.2.3`，或在推送的提交信息里写 `[release v0.2.3]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice、OCR 和 PDFium 组件**；精简版（主程序 + PDFium）需要按 `components\README.txt` 自行放入 LibreOffice 和 OCR。
 
 ### 组件
 
@@ -160,7 +160,7 @@ ZHAOZHAO_SCALE=100000 go test ./internal/search -run TestScale -v -timeout 40m
 | 验证项 | 结论 |
 |---|---|
 | 老格式 | 0.2.0 起内置解析：doc（片段表、页眉页脚、脚注尾注、批注、文本框，去掉域代码）、xls（BIFF8：共享字符串跨 CONTINUE、数字/日期格式、公式结果、批注、隐藏工作表）、ppt（只读当前有效的幻灯片和备注，不读母版占位文字）、rtf（按字体字符集解码 GBK 等，`\uN`）。样本上与 LibreOffice 转换结果的文字覆盖率 100%，每个文件几毫秒；模糊测试 15 万次无崩溃、无卡死。`.wps/.et/.dps` 只用「改扩展名的 doc/xls/ppt」验证过，**没有真实 WPS 样本**（可用「老格式测试」在用户电脑上抽样统计）。内置解析不了的交给常驻 LibreOffice，每个文件约 0.05～1 秒。 |
-| OCR | RapidOCR（PaddleOCR 模型，CPU）经管道协议接入：简体中文 + 英文识别正确，包括 jpg/png/bmp/webp、多页 LZW TIFF、扫描 PDF（逐页）。每张约 1 秒量级（Linux 云主机，含常驻进程摊销），**未做大样本准确率评测**。0.2.2 起指定每个进程的线程数（`--numThread`）：4 核机器上 A4 扫描页实测 1 个进程 × 4 线程每分钟 17 页、2×2 约 10 页、8×4 只有 8 页，线程总数超过核心数反而变慢，所以「自动」时在用户电脑上实测选择搭配。 |
+| OCR | RapidOCR（PaddleOCR 模型，CPU）经管道协议接入：简体中文 + 英文识别正确，包括 jpg/png/bmp/webp、多页 LZW TIFF、扫描 PDF（逐页）。每张约 1 秒量级（Linux 云主机，含常驻进程摊销），**未做大样本准确率评测**。每个进程的线程数用 `--numThread` 指定；0.2.3 起在每台电脑上用随包的 A4 扫描样张实测选择「进程数 × 线程数」（`zhaozhao --ocr-bench 结果.txt` 可单独运行）。4 核云主机上实测每分钟页数：1 个进程 × 4 线程 16、2×2 20、4×1 26；只用 2 个核时 1×2 11、2×1 13；线程总数超过核心数反而变慢（8×4 只有 8）。Windows 测试机（2 核）上用随包的 RapidOCR-json 实测：2×1 每分钟 17.5 页、1×2 14.0 页，每个 OCR 进程连同它的解析进程约 400 MB；完整版打包流程每次都跑一遍。 |
 | PDF | 0.2.0 起用 PDFium（运行时加载 DLL，不需要 cgo）提取文字层；扫描页整页渲染成 200 dpi 灰度图再 OCR，JBIG2、JPEG 2000、CCITT 等格式都能识别（已用 JPEG 2000 扫描页验证）。没有 PDFium 时退回 `ledongthuc/pdf` + `pdfcpu`。 |
 | 压缩包 | zip（含 GBK 文件名）、7z（含加密头检测）、tar/gz/tgz 已验证；rar（`nwaples/rardecode`）因没有样本**未验证**。内部文件逐个读取、用完即删，不会整体解压到磁盘。0.2.2 起 zip 条目支持 Deflate64（自带解码器，由标准库 flate 改写，与 Python inflate64 逐字节核对）、BZip2、LZMA、zstd、xz；PPMd 写明不支持。 |
 | 邮件 | eml（RFC2047 主题、GB2312+base64 正文、附件）、mbox 已验证；`.msg`（`mscfb`）按文件格式实现但**没有真实样本，未验证**；pst/ost（P2）未实现。 |
@@ -245,7 +245,7 @@ ZHAOZHAO_SCALE=100000 go test ./internal/search -run TestScale -v -timeout 40m
 | F-BG-01、02 实时监听、启动对账 | ✅ | |
 | F-BG-03 内容哈希复用 | ✅ | 改名/复制后复用提取与 OCR 结果；移动、改名（含移到别的索引根）时删除的文件的文本保留 3 天，新位置内容相同就直接复用 |
 | F-BG-04 低优先级、用户活动降速 | ⚠ | 子进程低优先级；用户活动检测（`GetLastInputInfo`）仅 Windows，未运行 |
-| F-BG-05、06、07 | ✅ | 默认一半核心；OCR 进程数 × 线程数自动实测选择；电池检测仅 Windows ⚠；全局/单根暂停恢复；建立索引期间（接通电源时）不让电脑自动睡眠（`PowerSetRequest`） |
+| F-BG-05、06、07 | ✅ | 默认一半核心；OCR 进程数 × 线程数在每台电脑上用样张实测选择（结果按电脑保存，进程数受内存限制，队列收尾时空出的线程分给大文件）；电池检测仅 Windows ⚠；全局/单根暂停恢复；建立索引期间（接通电源时）不让电脑自动睡眠（`PowerSetRequest`） |
 | F-BG-08 断点续跑 | ✅ | 待处理状态在库里，重启后继续 |
 | F-BG-09、10 状态面板、OCR 队列预计时间 | ✅ | |
 | F-BG-11 失败列表 | ✅ | 按原因类别、扩展名统计（后台统计），按路径筛选；「失败和已加密」与「仅文件名（不是失败）」分开；每次加载 200 个、滚动自动加载；整类重试、导出 CSV、加入排除规则；每行打开、打开所在文件夹、复制路径 |
