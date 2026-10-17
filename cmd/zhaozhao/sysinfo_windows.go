@@ -5,35 +5,21 @@ package main
 import (
 	"fmt"
 	"path/filepath"
-	"runtime"
 	"unsafe"
 
+	"github.com/chenonestar/zhaozhao/internal/sysinfo"
 	"golang.org/x/sys/windows"
 )
 
-var (
-	procGlobalMemoryStatusEx = windows.NewLazySystemDLL("kernel32.dll").NewProc("GlobalMemoryStatusEx")
-	procGetDriveType         = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetDriveTypeW")
-)
+var procGetDriveType = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetDriveTypeW")
 
-type memoryStatusEx struct {
-	length               uint32
-	memoryLoad           uint32
-	totalPhys, availPhys uint64
-	totalPageFile        uint64
-	availPageFile        uint64
-	totalVirtual         uint64
-	availVirtual         uint64
-	availExtendedVirtual uint64
-}
-
-// sysInfo 返回系统概况：Windows 版本、处理器数、内存。
+// sysInfo 返回系统概况：Windows 版本、处理器、内存。
 func sysInfo() string {
 	v := windows.RtlGetVersion()
-	s := fmt.Sprintf("Windows %d.%d.%d，%d 个逻辑处理器", v.MajorVersion, v.MinorVersion, v.BuildNumber, runtime.NumCPU())
-	m := memoryStatusEx{length: uint32(unsafe.Sizeof(memoryStatusEx{}))}
-	if r, _, _ := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&m))); r != 0 {
-		s += fmt.Sprintf("，内存 %.1f GB（可用 %.1f GB）", float64(m.totalPhys)/(1<<30), float64(m.availPhys)/(1<<30))
+	m := sysinfo.This()
+	s := fmt.Sprintf("Windows %d.%d.%d，%s（%d 个物理核心、%d 个逻辑处理器）", v.MajorVersion, v.MinorVersion, v.BuildNumber, m.CPU, m.Cores, m.Logical)
+	if total, avail := sysinfo.Memory(); total > 0 {
+		s += fmt.Sprintf("，内存 %.1f GB（可用 %.1f GB）", float64(total)/(1<<30), float64(avail)/(1<<30))
 	}
 	return s
 }

@@ -3,6 +3,7 @@ package worker
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"github.com/chenonestar/zhaozhao/internal/awake"
@@ -18,10 +19,17 @@ import (
 
 	"github.com/chenonestar/zhaozhao/internal/doc"
 	"github.com/chenonestar/zhaozhao/internal/extract"
+	"github.com/chenonestar/zhaozhao/internal/testutil"
 )
 
 // 测试二进制自己充当解析子进程，走和生产环境完全相同的管道协议。
 func TestMain(m *testing.M) {
+	for _, a := range os.Args {
+		if d, ok := strings.CutPrefix(a, "-zzfakeocr="); ok {
+			fakeThreadOCR(d)
+			os.Exit(0)
+		}
+	}
 	if os.Getenv("ZZ_AS_WORKER") == "1" {
 		Serve()
 		os.Exit(0)
@@ -31,6 +39,23 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+// fakeThreadOCR 模拟 OCR 组件：每张图片等 delay，识别结果是自己启动时的 --numThread 参数。
+func fakeThreadOCR(delay string) {
+	d, _ := time.ParseDuration(delay)
+	threads := "0"
+	for _, a := range os.Args {
+		if v, ok := strings.CutPrefix(a, "--numThread="); ok {
+			threads = v
+		}
+	}
+	fmt.Println("OCR init completed.")
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		time.Sleep(d)
+		fmt.Printf(`{"code":100,"data":[{"text":"threads=%s"}]}`+"\n", threads)
+	}
 }
 
 // progressWorker 模拟一个慢任务：每隔 gap 报告一次进度，共 n 次，然后返回结果。
@@ -290,5 +315,37 @@ func TestResidentLOLifecycle(t *testing.T) {
 				t.Errorf("残留进程 %s: %q", e.Name(), strings.ReplaceAll(string(b), "\x00", " "))
 			}
 		}
+	}
+}
+
+// 识别途中调整线程数（队列收尾时）：子进程从下一页起用新的线程数重新启动 OCR 组件；任务结束后的调整不再发送。
+func TestCtlChangesOCRThreads(t *testing.T) {
+	t.Setenv("ZZ_AS_WORKER", "1")
+	exe, _ := os.Executable()
+	p := NewPool(exe, 1)
+	t.Cleanup(p.Close)
+	dir := t.TempDir()
+	tif := filepath.Join(dir, "scan.tif")
+	if err := os.WriteFile(tif, testutil.MultiPageTIFF(binary.LittleEndian, 64, 64, []byte{0, 50, 100, 150}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := extract.DefaultOptions()
+	opts.OCR = extract.OCRConfig{Command: exe, Args: []string{"-zzfakeocr=400ms"}, MinSide: 10, PageSec: 30, Threads: 1}
+	ctl := &Ctl{}
+	var once sync.Once
+	r := p.RunCtl(context.Background(), tif, "tif", opts, Timeouts{Idle: 30 * time.Second, Total: time.Minute}, func(string) {
+		// 第 1 页识别到一半时（每页 400 毫秒）改用 3 线程：第 2 页起生效
+		once.Do(func() { time.AfterFunc(200*time.Millisecond, func() { ctl.SetOCRThreads(3) }) })
+	}, ctl)
+	if r.Status != doc.StatusOK {
+		t.Fatalf("%+v", r)
+	}
+	if n1, n3 := strings.Count(r.Text, "threads=1"), strings.Count(r.Text, "threads=3"); n1 != 1 || n3 != 3 {
+		t.Fatalf("第 1 页应是 1 线程、其余 3 线程：%q", r.Text)
+	}
+	ctl.SetOCRThreads(2) // 任务已结束：不再发送，也不影响下一个任务
+	r = p.Run(context.Background(), tif, "tif", opts, Timeouts{Idle: 30 * time.Second, Total: time.Minute}, nil)
+	if strings.Count(r.Text, "threads=1") != 4 {
+		t.Fatalf("下一个任务应按自己的参数（1 线程）：%q", r.Text)
 	}
 }

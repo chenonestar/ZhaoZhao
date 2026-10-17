@@ -109,6 +109,16 @@ jobs:
           go build -o mkscanpdf.exe ./packaging/tools/mkscanpdf
           ./packaging/smoke-network.ps1 -Stage ZhaoZhao -MkScanPdf (Resolve-Path mkscanpdf.exe).Path
 
+      - name: OCR 测速（随包的 RapidOCR-json：各种进程数 × 线程数的速度和每个进程的内存）
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'ocr-bench.txt'
+          $p = Start-Process -FilePath ZhaoZhao\zhaozhao.exe -ArgumentList '--ocr-bench', "`"$out`"" -Wait -PassThru
+          if (Test-Path $out) { Get-Content $out -Encoding utf8 }
+          if ($p.ExitCode -ne 0) { throw "OCR 测速失败（退出码 $($p.ExitCode)）" }
+          $left = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(zhaozhao|RapidOCR)' }
+          if ($left) { $left | Format-Table Name, Id; throw "测速结束后还有进程没有退出" }
+
       - name: 打包完整版 zip
         shell: pwsh
         run: |

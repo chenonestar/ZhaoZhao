@@ -245,6 +245,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	h("/api/space/compact", s.post(func(r *http.Request) (any, error) {
 		return ok(), s.M.StartCompact()
 	}))
+	h("/api/ocrbench", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.M.OCRBenchInfo()) })
+	h("/api/ocrbench/rerun", s.post(func(r *http.Request) (any, error) {
+		return ok(), s.M.RebenchOCR()
+	}))
 	h("/api/legacytest", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.M.LegacyTest()) })
 	h("/api/legacytest/start", s.post(func(r *http.Request) (any, error) {
 		var b struct {

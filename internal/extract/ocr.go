@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "image/gif"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/chenonestar/zhaozhao/internal/doc"
 	"github.com/chenonestar/zhaozhao/internal/logx"
+	"github.com/chenonestar/zhaozhao/internal/sysinfo"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
@@ -143,7 +145,23 @@ var (
 	ocrMu   sync.Mutex
 	ocrCur  *ocrProc
 	ocrFail int
+	// ocrThreads 不为 0 时代替任务参数里的线程数：主程序在识别途中调整（队列收尾时把空出来的线程
+	// 分给还在识别的大文件），从下一张图片起生效（线程数不同要重新启动 OCR 组件，约 1 秒）。
+	ocrThreads atomic.Int32
 )
+
+// SetOCRThreads 调整之后识别用的线程数；0 表示按任务参数。
+func SetOCRThreads(n int) { ocrThreads.Store(int32(n)) }
+
+// OCRPeakMem 返回常驻 OCR 进程的内存峰值（字节）；没有常驻进程时返回 0。
+func OCRPeakMem() uint64 {
+	ocrMu.Lock()
+	defer ocrMu.Unlock()
+	if ocrCur == nil || ocrCur.cmd.Process == nil {
+		return 0
+	}
+	return sysinfo.PeakMem(ocrCur.cmd.Process.Pid)
+}
 
 func (c OCRConfig) key() string { return c.Command + "\x00" + strings.Join(c.args(), "\x00") }
 
@@ -270,9 +288,15 @@ type ocrResp struct {
 
 // ocrImage 识别一张图片，返回按阅读顺序拼接的文字。
 func ocrImage(c OCRConfig, imgPath string) (string, error) {
+	if n := ocrThreads.Load(); n > 0 {
+		c.Threads = int(n)
+	}
 	ocrMu.Lock()
 	defer ocrMu.Unlock()
 	if ocrCur == nil || ocrCur.key != c.key() {
+		if ocrCur != nil {
+			logx.Debugf("OCR 参数改变（每个进程 %d 线程），重新启动 OCR 组件", c.Threads)
+		}
 		killOCR(ocrCur)
 		ocrCur = nil
 		p, err := startOCR(c)

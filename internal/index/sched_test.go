@@ -3,6 +3,7 @@ package index
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"github.com/chenonestar/zhaozhao/internal/awake"
 	"image"
@@ -20,13 +21,29 @@ import (
 	"github.com/chenonestar/zhaozhao/internal/search"
 	"github.com/chenonestar/zhaozhao/internal/store"
 	"github.com/chenonestar/zhaozhao/internal/volume"
+	"github.com/chenonestar/zhaozhao/internal/worker"
 )
 
 // 测试二进制自己充当 OCR 组件（RapidOCR-json 的管道协议），Windows、Linux 都能跑。
+// 也能充当解析子进程（ZZ_AS_WORKER=1；参数里没有 -zzdelay 的才是解析子进程，有的是它启动的假 OCR）。
 func TestMain(m *testing.M) {
+	fakeOCRArg := false
+	for _, a := range os.Args {
+		fakeOCRArg = fakeOCRArg || strings.HasPrefix(a, "-zzdelay=")
+	}
+	if os.Getenv("ZZ_AS_WORKER") == "1" && !fakeOCRArg {
+		worker.Serve()
+		os.Exit(0)
+	}
 	if os.Getenv("ZZ_FAKE_OCR") != "" {
 		fakeOCR(os.Getenv("ZZ_FAKE_OCR"))
 		os.Exit(0)
+	}
+	// OCR 测速默认用模拟的（立即返回，进程越多越快），需要时由测试换掉
+	newOCRBenchRunner = func(m *Manager, pool *worker.Pool, sample string) ocrBenchRunner {
+		return func(ctx context.Context, p ocrPlan, pages int) (float64, uint64, error) {
+			return float64(10*p.procs - p.threads), 200 << 20, nil
+		}
 	}
 	os.Exit(m.Run())
 }

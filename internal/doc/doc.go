@@ -34,6 +34,7 @@ type Result struct {
 	NeedConvert bool   `json:"needConvert,omitempty"`
 	Hash        string `json:"hash,omitempty"`
 	Meta        string `json:"meta,omitempty"` // 邮件头等 JSON 元数据
+	Mem         uint64 `json:"mem,omitempty"`  // 解析进程连同 OCR 进程的内存峰值（字节，选项 ReportMem 时才有）
 	// Children 是容器（压缩包、邮件）里的内部条目，每个条目独立成为搜索结果。
 	Children []Child `json:"children,omitempty"`
 }

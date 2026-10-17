@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
-import type { Config, FailedFilter, FailedItem, FailedSummary, HotkeyState, LegacyTestState, ProblemCat, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
+import type { Config, FailedFilter, FailedItem, FailedSummary, HotkeyState, LegacyTestState, OCRBenchInfo, ProblemCat, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
 import { copyText, fmtDuration, fmtSize, fmtTime } from "./util";
 import { FolderPicker } from "./FolderPicker";
 import { Help } from "./Help";
@@ -60,7 +60,7 @@ function QueueLine({ label, n, eta, lane, paused, extra }: { label: string; n: n
 
 // ocrExtra：OCR 每个进程的线程数和最近的速度，以及正在实测搭配时的说明。
 function ocrExtra(s: Status): string {
-  let x = s.ocrThreads > 0 ? `，每个 ${s.ocrThreads} 线程` : "";
+  let x = s.ocrThreads > 0 ? `，每个进程 ${s.ocrThreads} 线程` : "";
   if (s.ocrPagesPerMin > 0) x += `，最近每分钟 ${s.ocrPagesPerMin.toFixed(1)} 页`;
   if (s.ocrTuning) x += `；${s.ocrTuning}`;
   return x;
@@ -495,7 +495,8 @@ function SettingsTab() {
       {num("legacyWorkers", "老格式转换并发数", "只用于内置解析读不了的老格式文件（LibreOffice 转换）")}
       {chk("legacyLOOnly", "老格式只用 LibreOffice 转换，不用内置解析（较慢；仅在内置解析结果有问题时使用）")}
       {chk("ocrEnabled", "识别图片和扫描 PDF 里的文字（OCR）")}
-      {num("ocrWorkers", "OCR 进程数", "0 = 自动（推荐）：在这台电脑上实测，选出最快的进程数和每个进程的线程数。手动设为 N 时，每个进程用「CPU 核心数 ÷ N」个线程；进程开得多不会更快，每个还占几百 MB 内存")}
+      {num("ocrWorkers", "OCR 进程数", "0 = 自动（推荐）：在这台电脑上用样张实测，选出最快的进程数和每个进程的线程数（通常是每个 CPU 核心一个进程），进程数不超过内存允许的数量。手动设为 N 时，每个进程用「CPU 核心数 ÷ N」个线程")}
+      <OCRSpeed />
       {chk("pauseOnBattery", "使用电池时暂停 OCR 和格式转换")}
       {chk("keepAwake", "建立索引期间不让电脑自动睡眠（只在接通电源时；屏幕保护、关闭显示器不受影响；索引完成后自动恢复）")}
 
@@ -557,6 +558,58 @@ function HotkeyField({ value, onChange, state }: { value: string; onChange: (v: 
         <div className={state.active ? "ok small" : "error small"}>{state.hotkey}：{state.message}</div>
       )}
       <div className="dim small">保存后立即生效。至少包含 Ctrl、Alt 或 Win 之一；与其他程序（如 QQ）冲突时会提示，请换一个组合。</div>
+    </div>
+  );
+}
+
+// 本机 OCR 测速：每台电脑测一次（便携版换了电脑会重新测），按最快的搭配开进程。
+function OCRSpeed() {
+  const [st, setSt] = useState<OCRBenchInfo | null>(null);
+  const [err, setErr] = useState("");
+  const load = () => api.ocrBench().then(setSt).catch(() => {});
+  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (!st?.running && !st?.asked) return;
+    const t = setInterval(load, 1500);
+    return () => clearInterval(t);
+  }, [st?.running, st?.asked]);
+  if (!st || !st.ocr) return null;
+  const b = st.bench;
+  const plans = b?.plans ?? [];
+  const best = b && b.best >= 0 && b.best < plans.length ? plans[b.best] : null;
+  const memNote = st.memCap > 0 && st.memCap < st.cores ? `（内存只够开 ${st.memCap} 个 OCR 进程）` : "";
+  return (
+    <div className="field">
+      <div className="dim small">
+        {st.manual
+          ? `OCR 进程数是手动设置的（现在 ${st.plan}），不测速。`
+          : best && b
+            ? `本机实测（${new Date(b.at * 1000).toLocaleDateString()}，${b.cpu}，${b.cores} 个物理核心）：${best.procs} 个进程 × ${best.threads} 线程最快，约每分钟 ${best.perMin.toFixed(1)} 页 A4 扫描页。现在用 ${st.plan}${memNote}。`
+            : "还没有测过本机的 OCR 速度：第一次有图片要识别时自动测（约 1～2 分钟，期间普通文件暂停）。"}
+      </div>
+      {plans.length > 1 && b && (
+        <table className="grid">
+          <thead><tr><th>搭配</th><th>每分钟页数</th><th>每个进程的内存</th></tr></thead>
+          <tbody>
+            {plans.map((p, i) => (
+              <tr key={i}>
+                <td>{p.procs} 个进程 × {p.threads} 线程{i === b.best ? "（最快）" : ""}</td>
+                <td className="num">{p.err ? `失败：${p.err}` : p.perMin.toFixed(1)}</td>
+                <td className="num">{p.slotMem > 0 ? `${Math.round(p.slotMem / 1048576)} MB` : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {st.note && <div className="small">{st.note}</div>}
+      {!st.manual && (
+        <div className="btns">
+          <button disabled={st.running || st.asked} onClick={() => { setErr(""); api.rerunOCRBench().then(load).catch((e) => setErr(e.message)); }}>
+            {st.running ? "正在测速…" : st.asked ? "等正在识别的文件做完后测速…" : "重新测速"}
+          </button>
+        </div>
+      )}
+      {err && <div className="error small">{err}</div>}
     </div>
   );
 }

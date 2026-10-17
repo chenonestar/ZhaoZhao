@@ -1,5 +1,5 @@
 import type {
-  Config, FailedFilter, FailedPage, FailedSummary, FsListing, HotkeyState, LegacyTestState, Notice, SpaceDetail, Preview, Saved, SearchOpts, SearchResponse, Status,
+  Config, FailedFilter, FailedPage, FailedSummary, FsListing, HotkeyState, LegacyTestState, Notice, OCRBenchInfo, SpaceDetail, Preview, Saved, SearchOpts, SearchResponse, Status,
 } from "./types";
 
 export class ApiError extends Error {
@@ -49,6 +49,8 @@ export const api = {
   uiPending: () => call<{ panel: string }>("/api/ui/pending"),
   spaceStats: () => call<SpaceDetail>("/api/space/stats"),
   compact: () => post("/api/space/compact"),
+  ocrBench: () => call<OCRBenchInfo>("/api/ocrbench"),
+  rerunOCRBench: () => post("/api/ocrbench/rerun"),
   legacyTest: () => call<LegacyTestState>("/api/legacytest"),
   startLegacyTest: (perExt: number) => post("/api/legacytest/start", { perExt }),
   cancelLegacyTest: () => post("/api/legacytest/cancel"),

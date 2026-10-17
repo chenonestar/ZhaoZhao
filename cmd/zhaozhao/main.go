@@ -48,12 +48,19 @@ func main() {
 		port     = flag.Int("port", 0, "界面服务端口（默认优先 17891，被占用时随机）")
 		noUI     = flag.Bool("no-ui", false, "启动时不自动打开界面窗口")
 		showVer  = flag.Bool("version", false, "显示版本")
+		ocrBench = flag.String("ocr-bench", "", "实测本机的 OCR 速度（各种进程数 × 线程数），结果写到这个文件后退出")
 		addRoots multiFlag
 	)
 	flag.Var(&addRoots, "add", "启动后添加索引根（可重复）")
 	flag.Parse()
 	if *showVer {
 		fmt.Println("找找 ZhaoZhao", version)
+		return
+	}
+	if *ocrBench != "" {
+		if err := runOCRBench(*ocrBench); err != nil {
+			fatalf("OCR 测速失败: %v", err)
+		}
 		return
 	}
 

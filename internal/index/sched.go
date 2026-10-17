@@ -54,7 +54,8 @@ type job struct {
 	progress string
 	sent     bool // 结果已交给写入协程：写入完成后才从「处理中」移除，避免同一文件被再次派发
 
-	pagesDone, pagesTotal int // OCR：已识别的页数、总页数（由进度消息得到，用于实测每分钟页数）
+	pagesDone, pagesTotal int         // OCR：已识别的页数、总页数（由进度消息得到，用于实测每分钟页数）
+	ctl                   *worker.Ctl // OCR 识别期间不为 nil：可以调整之后识别用的线程数（队列收尾时）
 }
 
 // lane 是一条处理通道。普通文件、老格式转换、OCR 各一条，各有自己的派发器和提取协程，三条同时进行：
@@ -260,6 +261,15 @@ func (m *Manager) laneDispatcher(l *lane) {
 			m.waitLane(l, 5*time.Second)
 			continue
 		}
+		if l.prio != prioOCR && m.ocrBenching.Load() {
+			s.idle.Store(false) // 正在测试 OCR 速度：暂停派发（约 1 分钟）
+			m.waitLane(l, time.Second)
+			continue
+		}
+		if l.prio == prioOCR && m.ocrBenchAsked() {
+			m.ocrBench() // 用户要求重新测速：没有要识别的文件也测
+			continue
+		}
 		files, err := m.DB.NextPending(8, []int{l.prio}, m.offlineVolumes(), m.inflightIDs(), l.prio == prioOCR)
 		if err != nil {
 			m.logf("读取待处理队列失败: %v", err)
@@ -272,10 +282,17 @@ func (m *Manager) laneDispatcher(l *lane) {
 			m.waitLane(l, 3*time.Second)
 			continue
 		}
+		if l.prio == prioOCR && m.ocrBenchDue() {
+			m.ocrBench() // 本机还没测过 OCR 速度：先测，再按结果开进程
+			continue
+		}
 		l.wantWork.Store(true)
 		s.idle.Store(false)
 		loOnly := m.Config().LegacyLOOnly
 		for _, f := range files {
+			if l.prio != prioOCR && m.ocrBenching.Load() {
+				break // 开始测试 OCR 速度了：剩下的等测完再派发
+			}
 			now := time.Now()
 			j := &job{f: f, class: classOf(f, loOnly), lane: l, stage: "等待空闲的提取线程", queued: now, since: awake.Now()}
 			j.path, _ = m.AbsPath(f.VolumeID, f.RelPath)
@@ -654,7 +671,20 @@ func (m *Manager) runJob(j *job) {
 		t = worker.Timeouts{Idle: 10 * time.Minute, Total: time.Hour}
 	}
 	m.setStage(j, stage)
-	res := pool.Run(m.ctx, src, f.Ext, opts, t, func(p string) { m.setProgress(j, p) })
+	var ctl *worker.Ctl
+	if useOCR {
+		m.ocrTailOff()
+		ctl = &worker.Ctl{}
+		s.mu.Lock()
+		j.ctl = ctl
+		s.mu.Unlock()
+	}
+	res := pool.RunCtl(m.ctx, src, f.Ext, opts, t, func(p string) { m.setProgress(j, p) }, ctl)
+	if useOCR {
+		s.mu.Lock()
+		j.ctl = nil
+		s.mu.Unlock()
+	}
 	if m.ctx.Err() != nil {
 		return
 	}

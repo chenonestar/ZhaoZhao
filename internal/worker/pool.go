@@ -23,6 +23,7 @@ import (
 type proc struct {
 	cmd      *exec.Cmd
 	in       io.WriteCloser
+	wmu      sync.Mutex // 任务和控制消息可能从不同协程写入标准输入
 	out      *bufio.Reader
 	pid      int
 	lastUsed time.Time
@@ -31,6 +32,70 @@ type proc struct {
 	waitOnce sync.Once
 	waitErr  error
 	waited   chan struct{}
+}
+
+// write 向子进程的标准输入写一行。
+func (pr *proc) write(line []byte) error {
+	pr.wmu.Lock()
+	defer pr.wmu.Unlock()
+	_, err := pr.in.Write(line)
+	return err
+}
+
+// Ctl 让调用方在任务进行中给处理它的子进程发消息（目前只有调整 OCR 线程数）。
+// 任务还没开始时先记下，开始后立即发出；任务结束后的调整不再发送。在当前进程内执行时（测试）不起作用。
+type Ctl struct {
+	mu      sync.Mutex
+	pr      *proc
+	id      int64
+	ended   bool
+	threads int // 想要的 OCR 线程数（0：按任务参数）
+	sent    int // 子进程正在用的（0：按任务参数）
+}
+
+// SetOCRThreads 把任务之后识别用的 OCR 线程数改为 n（0 表示按任务参数）。
+func (c *Ctl) SetOCRThreads(n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.threads = n
+	c.flush()
+}
+
+// OCRThreads 返回最近一次设置的线程数（0 表示按任务参数）。
+func (c *Ctl) OCRThreads() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.threads
+}
+
+func (c *Ctl) flush() {
+	if c.pr == nil || c.ended || c.threads == c.sent {
+		return
+	}
+	line, _ := json.Marshal(Control{Job: c.id, OCRThreads: c.threads})
+	if c.pr.write(append(line, '\n')) == nil {
+		c.sent = c.threads
+	}
+}
+
+// attach 在任务发出后调用：之后的调整直接发给子进程。
+func (c *Ctl) attach(pr *proc, id int64) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pr, c.id = pr, id
+	c.flush()
+}
+
+func (c *Ctl) end() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.ended, c.pr = true, nil
+	c.mu.Unlock()
 }
 
 // done 返回子进程退出时关闭的通道（只调用一次 cmd.Wait）。
@@ -274,6 +339,12 @@ func (p *Pool) Extract(ctx context.Context, path, ext string, opts extract.Optio
 // Run 在子进程里提取一个文件。超时、子进程崩溃都会返回失败结果并结束该子进程。
 // onProgress 收到子进程报告的进度（可为 nil）。
 func (p *Pool) Run(ctx context.Context, path, ext string, opts extract.Options, t Timeouts, onProgress func(string)) doc.Result {
+	return p.RunCtl(ctx, path, ext, opts, t, onProgress, nil)
+}
+
+// RunCtl 同 Run，ctl 不为 nil 时可在任务进行中给子进程发消息（见 Ctl）。
+func (p *Pool) RunCtl(ctx context.Context, path, ext string, opts extract.Options, t Timeouts, onProgress func(string), ctl *Ctl) doc.Result {
+	defer ctl.end()
 	if t.Total <= 0 {
 		t.Total = DefaultTimeout
 	}
@@ -322,10 +393,11 @@ func (p *Pool) Run(ctx context.Context, path, ext string, opts extract.Options, 
 				return false
 			}
 		}
-		if _, err := cur.in.Write(line); err != nil {
+		if err := cur.write(line); err != nil {
 			emit(reply{err: err})
 			return
 		}
+		ctl.attach(cur, id)
 		for {
 			b, err := cur.out.ReadBytes('\n')
 			if err != nil {

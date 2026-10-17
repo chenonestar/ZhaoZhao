@@ -13,7 +13,24 @@ from rapidocr_onnxruntime import RapidOCR
 
 # 与 RapidOCR-json 一样接受 --numThread=N（每个进程的线程数）
 threads = [int(a.split("=", 1)[1]) for a in sys.argv[1:] if a.startswith("--numThread=")]
+if threads:
+    # rapidocr_onnxruntime 不把线程数传给 ONNX 会话（默认用全部核心）：创建会话前强制指定
+    try:
+        import onnxruntime as ort
+        import rapidocr_onnxruntime.utils as _u
+
+        class _SessionOptions(ort.SessionOptions):
+            def __init__(self):
+                super().__init__()
+                self.intra_op_num_threads = threads[-1]
+                self.inter_op_num_threads = 1
+
+        _u.SessionOptions = _SessionOptions
+    except Exception:  # noqa: BLE001
+        pass
 engine = RapidOCR(intra_op_num_threads=threads[-1]) if threads else RapidOCR()
+if hasattr(engine, "text_recognizer"):
+    engine.text_recognizer.rec_batch_num = 1  # 逐行识别，与 RapidOCR-json（C++ 版）相同
 sys.stdout.write("OCR init completed.\n")
 sys.stdout.flush()
 for line in sys.stdin:

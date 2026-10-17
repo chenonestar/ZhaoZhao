@@ -86,6 +86,8 @@ type Manager struct {
 	wg     sync.WaitGroup
 
 	ocr ocrState // OCR 进程数 × 线程数的自动调整
+	// ocrBenching：正在测试本机 OCR 速度，普通文件、老格式暂停派发
+	ocrBenching atomic.Bool
 
 	cfgNotes []string // 读取设置时升级旧设置产生的说明，启动后提示一次
 

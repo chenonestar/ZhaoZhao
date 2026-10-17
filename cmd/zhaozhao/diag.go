@@ -59,6 +59,15 @@ func exportDiagnostics(dataDir string, lg *logx.Logger, mgr *index.Manager, anon
 	for _, c := range comps {
 		fmt.Fprintf(&sys, "组件：%s：%s %s\n", c.Name, c.Message, logx.P(c.Path))
 	}
+	oi := mgr.OCRBenchInfo()
+	fmt.Fprintf(&sys, "OCR：现在 %s，内存允许 %d 个进程", oi.Plan, oi.MemCap)
+	if oi.Bench != nil {
+		fmt.Fprintf(&sys, "；本机测速（%s）：%s", time.Unix(oi.Bench.At, 0).Format("2006-01-02 15:04"), oi.Bench.Summary())
+	}
+	if oi.Note != "" {
+		fmt.Fprintf(&sys, "；%s", oi.Note)
+	}
+	sys.WriteString("\n")
 	c := mgr.Config()
 	prefixes := make([]string, len(c.ExcludePrefixes))
 	for i, x := range c.ExcludePrefixes {

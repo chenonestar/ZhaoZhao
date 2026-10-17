@@ -3,16 +3,16 @@ package index
 import (
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 )
 
-// OCR 的进程数 × 每个进程的线程数（S）。
+// OCR 的进程数 × 每个进程的线程数。
 //
-// RapidOCR 每个进程默认 4 个线程。线程总数超过 CPU 核心数后互相争抢，总速度不升反降：
-// 4 核机器上实测 1 个进程 × 4 线程每分钟 17 页，8 个进程 × 4 线程只有 8 页。
-// 最快的搭配因电脑而异（核心数、缓存、内存带宽），所以「自动」时在用户的电脑上实测：
-// 在线程预算内比较几种搭配的每分钟页数，选最快的，之后每 2 小时复查一次。
+// RapidOCR 每个进程默认 4 个线程。实测 A4 扫描页（4 核）：1 个进程 × 4 线程每分钟 16 页，2×2 是 20 页，
+// 4×1 是 26 页；只用 2 个核时 1×2 是 11 页，2×1 是 13 页；线程总数超过核心数反而变慢（8×4 只有 8 页）。
+// 几个进程各识别各的页几乎没有损耗，一个进程里的几个线程却要互相等待，所以通常「每核一个进程」最快。
+// 但最快的搭配因电脑而异（核心数、大小核、缓存、内存带宽），所以在每台电脑上用随包的样张实测
+// （ocrbench.go），结果按电脑保存；进程数还受内存限制（每个 OCR 进程连同它的解析进程占几百 MB）。
 // 线程预算：只剩 OCR 时用全部物理核心；普通文件、老格式还在处理时用一半。
 
 type ocrPlan struct{ procs, threads int }
@@ -20,43 +20,41 @@ type ocrPlan struct{ procs, threads int }
 func (p ocrPlan) String() string { return fmt.Sprintf("%d 个进程 × %d 线程", p.procs, p.threads) }
 
 const (
-	maxOCRProcs     = 4               // 每个 OCR 进程占几百 MB 内存
-	ocrMeasureMin   = 5 * time.Minute // 每种搭配至少测这么久
-	ocrMeasureMax   = 15 * time.Minute
-	ocrMeasurePages = 10          // 且至少识别这么多页（页数太少时延长，最长 ocrMeasureMax）
-	ocrWarmup       = time.Minute // 换搭配后 OCR 进程要重新加载模型：这段时间不计
-	ocrRecheck      = 2 * time.Hour
+	ocrMaxProcs       = 32
+	ocrSlotMemDefault = 600 << 20 // 还没实测时，每个 OCR 名额（OCR 进程 + 解析进程）按这么多内存估算
 )
 
-// ocrCandidates 返回线程预算内可选的搭配：进程数 1、2、4，每个进程至少 2 个线程。
-func ocrCandidates(budget int) []ocrPlan {
-	if budget < 2 {
-		return []ocrPlan{{1, 1}}
-	}
+// ocrCandidates 返回要实测的搭配：线程预算 budget，最多 maxProcs 个进程。每个进程 1、2、4、8 个线程，
+// 预算不超过 8 时再加「1 个进程用全部线程」（以前的默认搭配也在其中，实测不更快就不会换）。
+// 进程数受上限限制时，每个进程多分线程，把预算用满。
+func ocrCandidates(budget, maxProcs int) []ocrPlan {
+	budget, maxProcs = max(1, budget), max(1, min(maxProcs, ocrMaxProcs))
 	var out []ocrPlan
-	for p := 1; p <= maxOCRProcs && budget/p >= 2; p *= 2 {
-		out = append(out, ocrPlan{p, budget / p})
+	add := func(t int) {
+		p := min(max(1, budget/t), maxProcs)
+		c := ocrPlan{p, max(1, budget/p)}
+		for _, x := range out {
+			if x == c {
+				return
+			}
+		}
+		out = append(out, c)
+	}
+	for t := 1; t <= budget && t <= 8; t *= 2 {
+		add(t)
+	}
+	if budget <= 8 {
+		add(budget)
 	}
 	return out
 }
 
-// ocrDefaultPlan 是没有实测数据时的搭配：每个进程约 4 个线程（RapidOCR 的默认值）。
-func ocrDefaultPlan(budget int) ocrPlan {
-	c := ocrCandidates(budget)
-	best := c[0]
-	for _, p := range c {
-		if abs(p.threads-4) < abs(best.threads-4) {
-			best = p
-		}
-	}
-	return best
-}
-
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
+// ocrPlanFor 按实测最快的「每个进程几个线程」（best）给出线程预算 budget 下的搭配：
+// 进程数 ≈ 预算 ÷ 线程数（四舍五入），不超过 maxProcs，每个进程的线程数把预算分完。
+func ocrPlanFor(budget, maxProcs, best int) ocrPlan {
+	budget, maxProcs, best = max(1, budget), max(1, maxProcs), max(1, best)
+	p := min(max(1, (budget+best/2)/best), maxProcs, budget)
+	return ocrPlan{p, max(1, budget/p)}
 }
 
 // ocrManualPlan：手动设了进程数时，每个进程的线程数 = 核心数 ÷ 进程数（不超额）。
@@ -64,101 +62,40 @@ func ocrManualPlan(procs, cores int) ocrPlan {
 	return ocrPlan{procs, max(1, cores/procs)}
 }
 
-// budgetState 是某个线程预算下的实测结果。
-type budgetState struct {
-	scores  map[ocrPlan]float64 // 每分钟页数
-	best    ocrPlan
-	settled time.Duration // 选定的时间（awake）；0 表示还在比较
+// ocrMemSlots 返回内存够开几个 OCR 名额（可以是小数）：可用内存加上 OCR 名额现在占着的（live 个），
+// 扣掉留给用户的部分（至少 1 GB，或总内存的 15%），除以每个名额的内存 slot。取不到内存信息时返回 -1。
+func ocrMemSlots(total, avail, slot uint64, live int) float64 {
+	if total == 0 || slot == 0 {
+		return -1
+	}
+	reserve := max(uint64(1)<<30, total*15/100)
+	usable := float64(avail) + float64(live)*float64(slot) - float64(reserve)
+	return usable / float64(slot)
 }
 
-// ocrTuner 逐步比较各种搭配。step 定时调用，时间用 awake.Now()（不含电脑睡眠）。
-type ocrTuner struct {
-	budget     int
-	byBudget   map[int]*budgetState
-	cur        ocrPlan
-	start      time.Duration // 当前测量窗口的开始
-	startPages int64
-	warmUntil  time.Duration
+// nextMemCap 由 ocrMemSlots 的结果更新内存允许的进程数 cur（0 表示还没算过）：内存紧张时立即减少；
+// 宽裕时要多出半个名额才增加，免得在边界上来回增减进程。
+func nextMemCap(cur int, slots float64) int {
+	if slots < 0 {
+		return ocrMaxProcs
+	}
+	n := min(max(1, int(slots)), ocrMaxProcs)
+	if cur == 0 || n < cur || slots >= float64(cur)+1.5 {
+		return n
+	}
+	return cur
 }
 
-func newOCRTuner() *ocrTuner { return &ocrTuner{byBudget: map[int]*budgetState{}} }
-
-// step 根据线程预算、OCR 通道是否满负荷（所有进程都在忙且还有排队）、累计识别页数，决定当前搭配。
-// 返回当前搭配、是否改变，以及要写进日志的说明（没有则为空）。
-func (t *ocrTuner) step(budget int, saturated bool, pages int64, now time.Duration) (ocrPlan, bool, string) {
-	if budget != t.budget || t.cur.procs == 0 {
-		t.budget = budget
-		bs := t.byBudget[budget]
-		if bs == nil {
-			bs = &budgetState{scores: map[ocrPlan]float64{}}
-			t.byBudget[budget] = bs
-		}
-		next := ocrDefaultPlan(budget)
-		if bs.settled > 0 {
-			next = bs.best
-		}
-		return t.switchTo(next, pages, now), true, ""
+// tailThreads：OCR 队列已经空了、只剩 running 个文件在识别（少于进程数）时，把线程预算平分给它们，
+// 大文件剩下的页能识别得快一些。返回每个文件的线程数；不需要调整时返回 0。
+func tailThreads(p ocrPlan, budget, running int) int {
+	if running <= 0 || running >= p.procs {
+		return 0
 	}
-	bs := t.byBudget[budget]
-	if now < t.warmUntil || !saturated {
-		// 刚换搭配，或者 OCR 不是满负荷（排队的文件不够）：测不准，重新开始计
-		t.start, t.startPages = now, pages
-		return t.cur, false, ""
+	if t := budget / running; t > p.threads {
+		return t
 	}
-	if bs.settled > 0 {
-		if now-bs.settled < ocrRecheck {
-			return t.cur, false, ""
-		}
-		bs.scores, bs.settled = map[ocrPlan]float64{}, 0 // 定期复查：从当前搭配重新比较
-		t.start, t.startPages = now, pages
-		return t.cur, false, ""
-	}
-	elapsed := now - t.start
-	done := pages - t.startPages
-	if elapsed < ocrMeasureMin || (done < ocrMeasurePages && elapsed < ocrMeasureMax) {
-		return t.cur, false, ""
-	}
-	bs.scores[t.cur] = float64(done) / elapsed.Minutes()
-	for _, c := range ocrCandidates(budget) {
-		if _, ok := bs.scores[c]; !ok {
-			return t.switchTo(c, pages, now), true, ""
-		}
-	}
-	// 全部测过：选最快的
-	var parts []string
-	best := t.cur
-	for _, c := range ocrCandidates(budget) {
-		parts = append(parts, fmt.Sprintf("%s 每分钟 %.1f 页", c, bs.scores[c]))
-		if bs.scores[c] > bs.scores[best] {
-			best = c
-		}
-	}
-	bs.best, bs.settled = best, now
-	note := fmt.Sprintf("OCR 搭配实测（%d 个线程）：%s；选用 %s", budget, strings.Join(parts, "，"), best)
-	if best == t.cur {
-		return t.cur, false, note
-	}
-	return t.switchTo(best, pages, now), true, note
-}
-
-func (t *ocrTuner) switchTo(p ocrPlan, pages int64, now time.Duration) ocrPlan {
-	t.cur = p
-	t.warmUntil = now + ocrWarmup
-	t.start, t.startPages = now, pages
-	return p
-}
-
-// describe 返回给界面看的说明：正在比较时写明进度。
-func (t *ocrTuner) describe() string {
-	bs := t.byBudget[t.budget]
-	if bs == nil || bs.settled > 0 {
-		return ""
-	}
-	c := ocrCandidates(t.budget)
-	if len(c) < 2 {
-		return ""
-	}
-	return fmt.Sprintf("正在实测最快的搭配（第 %d/%d 种：%s）", len(bs.scores)+1, len(c), t.cur)
+	return 0
 }
 
 // rateWindow 记录最近的累计页数，算最近每分钟识别多少页（界面显示用）。

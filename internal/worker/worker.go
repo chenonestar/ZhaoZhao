@@ -10,11 +10,13 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chenonestar/zhaozhao/internal/doc"
 	"github.com/chenonestar/zhaozhao/internal/extract"
 	"github.com/chenonestar/zhaozhao/internal/logx"
+	"github.com/chenonestar/zhaozhao/internal/sysinfo"
 )
 
 // Request 是发给子进程的任务。
@@ -23,6 +25,13 @@ type Request struct {
 	Path string          `json:"path"`
 	Ext  string          `json:"ext"`
 	Opts extract.Options `json:"opts"`
+}
+
+// Control 是任务进行中发给子进程的消息：把任务 Job 之后识别用的 OCR 线程数改为 OCRThreads
+// （0 表示按任务参数）。任务已经结束时子进程忽略它。
+type Control struct {
+	Job        int64 `json:"ctlJob"`
+	OCRThreads int   `json:"ocrThreads"`
 }
 
 // Response 是子进程的返回。Progress 非空时是进度消息，任务还没有结束。
@@ -57,18 +66,37 @@ func Serve() {
 		}
 		return w.Flush()
 	}
-	for {
-		line, err := r.ReadBytes('\n')
-		if err != nil {
-			if err != io.EOF {
-				fmt.Fprintln(os.Stderr, "读取任务失败:", err)
+	// 单独的协程读标准输入：任务进行中也能收到控制消息。任务按顺序交给主循环（主程序收到上一个结果后
+	// 才会发下一个任务，所以读到新任务时没有任务在进行）。
+	reqs := make(chan Request)
+	var cur atomic.Int64
+	go func() {
+		defer close(reqs)
+		for {
+			line, err := r.ReadBytes('\n')
+			if err != nil {
+				if err != io.EOF {
+					fmt.Fprintln(os.Stderr, "读取任务失败:", err)
+				}
+				return
 			}
-			return
+			var c Control
+			if json.Unmarshal(line, &c) == nil && c.Job != 0 {
+				if c.Job == cur.Load() {
+					extract.SetOCRThreads(c.OCRThreads)
+				}
+				continue
+			}
+			var req Request
+			if err := json.Unmarshal(line, &req); err != nil {
+				continue
+			}
+			cur.Store(req.ID)
+			extract.SetOCRThreads(0)
+			reqs <- req
 		}
-		var req Request
-		if err := json.Unmarshal(line, &req); err != nil {
-			continue
-		}
+	}()
+	for req := range reqs {
 		logx.SetVerbose(req.Opts.Debug)
 		var last time.Time
 		id := req.ID
@@ -80,6 +108,9 @@ func Serve() {
 			}
 		})
 		res := extract.Extract(req.Path, req.Ext, req.Opts)
+		if req.Opts.ReportMem {
+			res.Mem = sysinfo.PeakMem(os.Getpid()) + extract.OCRPeakMem()
+		}
 		if err := send(Response{ID: req.ID, Result: res}); err != nil {
 			return
 		}
