@@ -109,8 +109,18 @@ try {
     @(Invoke-RestMethod "$api/api/failed" -WebSession $sess) | Where-Object { $_ -and $_.path } | ForEach-Object { Write-Host "  $($_.path)  $($_.reason)"; $fail.Add("失败: $($_.path) $($_.reason)") }
 
     Write-Host "== 导出诊断信息（隐藏路径）"
+    # 0.2.4 起在后台导出：开始后查询进度，直到完成（最多 2 分钟）
     $d = Invoke-RestMethod "$api/api/diagnostics" -Method Post -WebSession $sess -Headers @{ "X-ZhaoZhao" = "1" } -ContentType "application/json" -Body '{"anonymize":true}'
-    if (-not (Test-Path $d.path)) { $fail.Add("诊断信息没有生成") }
+    $steps = @()
+    $until = (Get-Date).AddMinutes(2)
+    while ($d.running -and (Get-Date) -lt $until) {
+        if ($d.step -and $steps -notcontains $d.step) { $steps += $d.step; Write-Host "  进度：$($d.step)" }
+        Start-Sleep -Milliseconds 300
+        $d = Invoke-RestMethod "$api/api/diagnostics/status" -WebSession $sess
+    }
+    if ($d.running) { $fail.Add("导出诊断信息超过 2 分钟还没完成（$($d.step)）") }
+    elseif ($d.err) { $fail.Add("导出诊断信息失败：$($d.err)") }
+    elseif (-not $d.path -or -not (Test-Path $d.path)) { $fail.Add("诊断信息没有生成") }
     else {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $z = [IO.Compression.ZipFile]::OpenRead($d.path)
