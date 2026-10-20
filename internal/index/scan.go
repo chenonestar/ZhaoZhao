@@ -161,7 +161,7 @@ func (m *Manager) runScan(req scanReq) {
 		return
 	}
 	m.mu.RLock()
-	online, mount := rt.vol.online, rt.vol.info.Mount
+	online, mount, kind := rt.vol.online, rt.vol.info.Mount, rt.vol.info.Kind
 	m.mu.RUnlock()
 	if !online {
 		return
@@ -183,7 +183,7 @@ func (m *Manager) runScan(req scanReq) {
 		return
 	}
 	scanStart := time.Now()
-	logx.Debugf("开始扫描 %s（%s，已索引 %d 个文件）", logx.P(startAbs), KindName(rt.vol.info.Kind), len(sigs))
+	logx.Debugf("开始扫描 %s（%s，已索引 %d 个文件）", logx.P(startAbs), KindName(kind), len(sigs))
 	changed := 0
 	seen := make(map[string]struct{}, len(sigs))
 	rootGone := false

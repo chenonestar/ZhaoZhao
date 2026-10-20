@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -18,12 +19,20 @@ import (
 
 // 导出诊断信息：逐步报告进度；空间统计超时就跳过；写完才出现 zip（中途不会留下打不开的文件）。
 func TestExportDiagnostics(t *testing.T) {
-	dir := t.TempDir()
+	// 日志文件和崩溃输出一直开着（Windows 上删不掉）：不用 t.TempDir，结束时尽量删除
+	dir, err := os.MkdirTemp("", "zz-diag-")
+	if err != nil {
+		t.Fatal(err)
+	}
 	lg, err := logx.Setup(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	t.Cleanup(func() {
+		log.SetOutput(os.Stderr)
+		debug.SetCrashOutput(nil, debug.CrashOptions{})
+		os.RemoveAll(dir)
+	})
 	db, err := store.Open(dir)
 	if err != nil {
 		t.Fatal(err)
