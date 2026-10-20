@@ -69,3 +69,11 @@ function legacyCopy(s: string) {
   }
   document.body.removeChild(ta);
 }
+
+// folderOf：文件所在的文件夹（压缩包里的条目按压缩包所在的文件夹）。
+export function folderOf(p: string): string {
+  const c = p.split(" › ")[0];
+  const i = Math.max(c.lastIndexOf("\\"), c.lastIndexOf("/"));
+  return i > 0 ? c.slice(0, i) : c;
+}
+

@@ -5,9 +5,11 @@ import type { FsListing } from "./types";
 interface Props {
   onPick: (path: string) => void;
   onClose: () => void;
+  title?: string; // 默认「选择要建立索引的目录」
+  start?: string; // 从这个目录开始浏览
 }
 
-export function FolderPicker({ onPick, onClose }: Props) {
+export function FolderPicker({ onPick, onClose, title, start }: Props) {
   const [cur, setCur] = useState<FsListing | null>(null);
   const [err, setErr] = useState("");
   const [typed, setTyped] = useState("");
@@ -15,12 +17,12 @@ export function FolderPicker({ onPick, onClose }: Props) {
   const load = (p: string) =>
     api.fs(p).then((l) => { setCur(l); setTyped(l.path); setErr(""); }).catch((e) => setErr(e.message));
 
-  useEffect(() => { load(""); }, []);
+  useEffect(() => { load(start ?? ""); }, []);
 
   return (
     <div className="modal-back" onClick={onClose}>
       <div className="modal picker" onClick={(e) => e.stopPropagation()}>
-        <h3>选择要建立索引的目录</h3>
+        <h3>{title ?? "选择要建立索引的目录"}</h3>
         <div className="picker-path">
           <input
             value={typed}

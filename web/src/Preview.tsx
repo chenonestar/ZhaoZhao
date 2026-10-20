@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Preview as PV, Result } from "./types";
-import { copyText } from "./util";
+import { api } from "./api";
+import { copyText, folderOf } from "./util";
 
 interface Props {
   result: Result | null;
@@ -41,7 +42,7 @@ export function Preview({ result, data, loading, hitIdx, setHitIdx, onOpen, msg 
   const hit = n > 0 ? data!.hits[Math.min(hitIdx, n - 1)] : null;
   const flash = (s: string) => {
     setCopied(s);
-    setTimeout(() => setCopied(""), 1200);
+    setTimeout(() => setCopied(""), s.length > 10 ? 5000 : 1200);
   };
 
   return (
@@ -57,6 +58,12 @@ export function Preview({ result, data, loading, hitIdx, setHitIdx, onOpen, msg 
             disabled={!result.snippets?.length}
             onClick={() => { copyText(result.snippets![0].text.trim()); flash("已复制片段"); }}
           >复制片段</button>
+          <button title="把这个文件所在的文件夹加入排除规则：文件夹里的全部文件移出索引，以后也不再索引"
+            onClick={() => {
+              const dir = folderOf(result.path);
+              if (!confirm(`把「${dir}」加入排除规则？\n\n这个文件夹里的全部文件（含子文件夹）会移出索引，以后也不再索引。\n需要时可以在「设置 → 排除规则」里删掉这一条。`)) return;
+              api.excludeFolders([result.id]).then((r) => flash(`已排除 ${r.folders.join("、")}，重新搜索后不再出现`)).catch((e) => flash(e.message));
+            }}>排除所在文件夹</button>
           {copied && <span className="flash">{copied}</span>}
         </div>
         <div className="pv-nav">

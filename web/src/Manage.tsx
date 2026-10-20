@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import type { Config, DiagState, FailedFilter, FailedItem, FailedSummary, HotkeyState, LegacyTestState, OCRBenchInfo, ProblemCat, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
-import { copyText, fmtDuration, fmtSize, fmtTime } from "./util";
+import { copyText, fmtDuration, fmtSize, fmtTime, folderOf } from "./util";
 import { FolderPicker } from "./FolderPicker";
 import { Help } from "./Help";
 
@@ -263,6 +263,7 @@ function RootOptsDialog({ root, onClose, onSave }: { root: RootStatus; onClose: 
   const [exc, setExc] = useState((root.opts?.excludeGlobs ?? []).join("\n"));
   const [follow, setFollow] = useState(root.opts?.followLinks ?? false);
   const [ocr, setOcr] = useState(root.opts?.ocr ?? true);
+  const [picking, setPicking] = useState(false);
   return (
     <div className="modal-back" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -270,8 +271,11 @@ function RootOptsDialog({ root, onClose, onSave }: { root: RootStatus; onClose: 
         <div className="dim small">{root.path}</div>
         <label className="field"><span>只提取这些类型的内容（扩展名，空格分隔；留空为不限）</span>
           <input value={inc} onChange={(e) => setInc(e.target.value)} placeholder="docx xlsx pdf txt" /></label>
-        <label className="field"><span>附加排除规则（每行一条，支持 * ? 通配符）</span>
+        <label className="field"><span>附加排除规则（每行一条：文件夹路径，或带 * ? 通配符的文件名）</span>
           <textarea rows={4} value={exc} onChange={(e) => setExc(e.target.value)} /></label>
+        <div className="btns"><button onClick={() => setPicking(true)}>选择要排除的子文件夹…</button></div>
+        {picking && <FolderPicker title="选择要排除的文件夹（里面的文件不再索引）" start={root.path} onClose={() => setPicking(false)}
+          onPick={(p) => { setPicking(false); setExc((exc.trim() ? exc.trim() + "\n" : "") + p); }} />}
         <label className="check"><input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} />跟随符号链接和目录联接</label>
         <label className="check"><input type="checkbox" checked={ocr} onChange={(e) => setOcr(e.target.checked)} />对该索引根里的图片和扫描 PDF 做 OCR（需要 OCR 组件）</label>
         <div className="modal-foot">
@@ -304,6 +308,7 @@ function FailedTab({ refresh }: { refresh: () => void }) {
   const [allExts, setAllExts] = useState(false);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(""); // 正在进行的操作（重试、导出、排除）：按钮暂时不能再点
   const seq = useRef(0);
   const end = useRef<HTMLDivElement>(null);
 
@@ -343,8 +348,14 @@ function FailedTab({ refresh }: { refresh: () => void }) {
     return () => io.disconnect();
   });
 
-  const run = (p: Promise<unknown>, done?: (r: any) => void) =>
-    p.then((r) => { done?.(r); reload(f); refresh(); }).catch((e) => setErr(e.message));
+  // label：操作名称，点下后立即显示「正在……」，完成前按钮不能再点
+  const run = (p: Promise<unknown>, done?: (r: any) => void, label?: string) => {
+    setErr("");
+    if (label) { setBusy(label); setMsg(label + "…"); }
+    return p.then((r) => { done?.(r); reload(f); refresh(); })
+      .catch((e) => { setErr(e.message); if (label) setMsg(""); })
+      .finally(() => setBusy(""));
+  };
   // 打开、打开所在文件夹：不用刷新列表
   const act = (p: Promise<unknown>) => p.then(() => setErr("")).catch((e) => setErr(e.message));
   if (!sum || !items) return <div className="dim pad">{err ? <span className="error">{err}</span> : "加载中…"}</div>;
@@ -397,17 +408,25 @@ function FailedTab({ refresh }: { refresh: () => void }) {
         </div>
       </div>
       <div className="btns">
-        <button disabled={!shown || isMeta}
+        <button disabled={!shown || isMeta || !!busy}
           title={isMeta ? "这些文件按设置只索引文件名。放宽设置（大小上限、OCR 等）后在「索引」页点「扫描」会自动处理" : "把筛选出的全部文件重新排队处理"}
-          onClick={() => { if (confirm(`重新处理「${scope}」中筛选出的 ${shown} 个文件？`)) run(api.retryFiltered(f), (r) => setMsg(`已重新排队 ${r.count} 个文件`)); }}>
-          重试这一类（{shown}）</button>
-        <button disabled={!shown} onClick={() => { setMsg("正在导出…"); run(api.exportFailed(f), (r) => setMsg(`已导出 ${r.count} 行：${r.path}`)); }}>导出这一类为 CSV</button>
-        <button disabled={!ids.length || isMeta} onClick={() => run(api.retry(ids), () => setMsg(`已重新排队所选的 ${ids.length} 个文件`))}>重试所选</button>
+          onClick={() => { if (confirm(`重新处理「${scope}」中筛选出的 ${shown} 个文件？`)) run(api.retryFiltered(f), (r) => setMsg(`已重新排队 ${r.count} 个文件`), "正在重新排队"); }}>
+          {busy === "正在重新排队" && !ids.length ? "正在重试…" : `重试这一类（${shown}）`}</button>
+        <button disabled={!shown || !!busy} onClick={() => run(api.exportFailed(f), (r) => setMsg(`已导出 ${r.count} 行：${r.path}`), "正在导出")}>
+          {busy === "正在导出" ? "正在导出…" : "导出这一类为 CSV"}</button>
+        <button disabled={!ids.length || isMeta || !!busy} onClick={() => run(api.retry(ids), () => setMsg(`已重新排队所选的 ${ids.length} 个文件`), "正在重新排队")}>
+          {busy === "正在重新排队" && ids.length ? "正在重试…" : "重试所选"}</button>
         <button disabled={!ids.length} onClick={() => {
           copyText(items.filter((x) => sel.has(x.id)).map((x) => x.path).join("\r\n"));
           setMsg(`已复制所选 ${ids.length} 个文件的路径`);
         }}>复制所选路径</button>
-        <button disabled={!ids.length} onClick={() => { if (confirm("把所选文件加入排除规则并从索引移除？")) run(api.exclude(ids)); }}>加入排除规则</button>
+        <button disabled={!ids.length || !!busy} onClick={() => { if (confirm("把所选文件加入排除规则并从索引移除？")) run(api.exclude(ids), undefined, "正在排除"); }}>加入排除规则</button>
+        <button disabled={!ids.length || !!busy} title="把所选文件所在的文件夹加入排除规则：文件夹里的全部文件移出索引，以后也不再索引"
+          onClick={() => {
+            const fs = [...new Set(items.filter((x) => sel.has(x.id)).map((x) => folderOf(x.path)))];
+            if (confirm(`把所选文件所在的 ${fs.length} 个文件夹加入排除规则？\n\n${fs.slice(0, 10).join("\n")}${fs.length > 10 ? "\n……" : ""}\n\n文件夹里的全部文件（含子文件夹）会移出索引，以后也不再索引。`))
+              run(api.excludeFolders(ids), (r) => setMsg(`已排除 ${r.folders.length} 个文件夹：${r.folders.join("、")}`), "正在排除");
+          }}>排除所在文件夹</button>
       </div>
       {msg && <div className="small ok">{msg}</div>}
       {err && <div className="error">{err}</div>}
@@ -451,6 +470,7 @@ const lines = (s: string) => s.split("\n").map((x) => x.trim()).filter(Boolean);
 
 function SettingsTab() {
   const [c, setC] = useState<Config | null>(null);
+  const [picking, setPicking] = useState(false);
   const [msg, setMsg] = useState("");
   const [hk, setHk] = useState<HotkeyState | null>(null);
   useEffect(() => { api.config().then(setC); api.hotkey().then(setHk).catch(() => {}); }, []);
@@ -471,7 +491,11 @@ function SettingsTab() {
     <div className="settings">
       <h4>排除规则</h4>
       {listField("excludeDirNames", "排除的目录名（任意层级）")}
-      {listField("excludePrefixes", "排除的路径前缀")}
+      {listField("excludePrefixes", "排除的文件夹（路径前缀，里面的文件和子文件夹都不索引）")}
+      <div className="btns"><button onClick={() => setPicking(true)}>选择要排除的文件夹…</button>
+        <span className="dim small">选好后点页面底部的「保存设置」生效，已索引的文件会在重新扫描时移出索引</span></div>
+      {picking && <FolderPicker title="选择要排除的文件夹（里面的文件不再索引）" onClose={() => setPicking(false)}
+        onPick={(p) => { setPicking(false); if (!(c.excludePrefixes ?? []).includes(p)) setC({ ...c, excludePrefixes: [...(c.excludePrefixes ?? []), p] }); }} />}
       {listField("excludeGlobs", "排除的通配符（匹配文件名或完整路径）")}
       {listField("excludeExts", "排除的扩展名")}
       <button onClick={() => api.defaults().then((d) => setC({ ...c, excludeDirNames: d.excludeDirNames, excludePrefixes: d.excludePrefixes, excludeGlobs: [], excludeExts: [] }))}>恢复默认排除清单</button>

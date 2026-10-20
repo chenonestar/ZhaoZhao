@@ -49,6 +49,7 @@ export const api = {
   uiPending: () => call<{ panel: string }>("/api/ui/pending"),
   spaceStats: () => call<SpaceDetail>("/api/space/stats"),
   compact: () => post("/api/space/compact"),
+  excludeFolders: (ids: number[]) => post<{ folders: string[] }>("/api/exclude/folders", { ids }),
   ocrBench: () => call<OCRBenchInfo>("/api/ocrbench"),
   rerunOCRBench: () => post("/api/ocrbench/rerun"),
   legacyTest: () => call<LegacyTestState>("/api/legacytest"),

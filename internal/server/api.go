@@ -196,6 +196,20 @@ func (s *Server) routes(mux *http.ServeMux) {
 		}
 		return map[string]any{"path": p, "count": n}, nil
 	}))
+	// 排除所在文件夹（失败列表、搜索结果）：加入排除规则，文件夹里的文件立即移出索引
+	h("/api/exclude/folders", s.post(func(r *http.Request) (any, error) {
+		var b struct {
+			IDs []int64 `json:"ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+			return nil, err
+		}
+		fs, err := s.M.ExcludeFolders(b.IDs)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"folders": fs}, nil
+	}))
 	h("/api/failed/exclude", s.post(func(r *http.Request) (any, error) {
 		var b struct {
 			IDs []int64 `json:"ids"`

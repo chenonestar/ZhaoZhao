@@ -541,6 +541,33 @@ func deleteChildren(tx *sql.Tx, vol, rel string) error {
 	return nil
 }
 
+// DeleteUnder 删除卷 vol 上目录 rel（卷内相对路径）里的全部文件，含子目录和压缩包里的条目，不放进回收区
+// （排除了的文件夹以后不再索引，留着文本没有用）。返回删除的记录数。
+func (d *DB) DeleteUnder(vol, rel string) (int64, error) {
+	if rel == "" {
+		return 0, fmt.Errorf("不能删除整个卷的索引")
+	}
+	lo, hi := rel+"/", rel+"0" // "0" 紧跟在 "/" 后面：rel_path 落在 [lo, hi) 里的就在这个目录下（用得上索引）
+	var n int64
+	err := d.Tx(func(tx *sql.Tx) error {
+		var last int64
+		if err := tx.QueryRow(`SELECT ifnull(max(id),0) FROM recycled`).Scan(&last); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM fts WHERE rowid IN (SELECT id FROM files WHERE volume_id=? AND rel_path>=? AND rel_path<?)`, vol, lo, hi); err != nil {
+			return err
+		}
+		r, err := tx.Exec(`DELETE FROM files WHERE volume_id=? AND rel_path>=? AND rel_path<?`, vol, lo, hi)
+		if err != nil {
+			return err
+		}
+		n, _ = r.RowsAffected()
+		_, err = tx.Exec(`DELETE FROM recycled WHERE id>?`, last)
+		return err
+	})
+	return n, err
+}
+
 // DeleteOrphans 删除不属于任何索引根的文件（旧版本删除索引根时可能残留），返回删除数量。
 func (d *DB) DeleteOrphans() (int64, error) {
 	var n int64
