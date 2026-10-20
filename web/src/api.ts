@@ -1,5 +1,5 @@
 import type {
-  Config, FailedFilter, FailedPage, FailedSummary, FsListing, HotkeyState, LegacyTestState, Notice, OCRBenchInfo, SpaceDetail, Preview, Saved, SearchOpts, SearchResponse, Status,
+  Config, FailedFilter, FailedPage, FailedSummary, FsListing, DiagState, HotkeyState, LegacyTestState, Notice, OCRBenchInfo, SpaceDetail, Preview, Saved, SearchOpts, SearchResponse, Status,
 } from "./types";
 
 export class ApiError extends Error {
@@ -54,7 +54,8 @@ export const api = {
   legacyTest: () => call<LegacyTestState>("/api/legacytest"),
   startLegacyTest: (perExt: number) => post("/api/legacytest/start", { perExt }),
   cancelLegacyTest: () => post("/api/legacytest/cancel"),
-  diagnostics: (anonymize: boolean) => post<{ path: string }>("/api/diagnostics", { anonymize }),
+  diagnostics: (anonymize: boolean) => post<DiagState>("/api/diagnostics", { anonymize }),
+  diagnosticsStatus: () => call<DiagState>("/api/diagnostics/status"),
   pause: (root?: number) => post("/api/pause", { root: root ?? 0 }),
   resume: (root?: number) => post("/api/resume", { root: root ?? 0 }),
   addRoot: (path: string) => post("/api/roots/add", { path }),

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -292,5 +293,43 @@ func TestFailedListAPI(t *testing.T) {
 	}
 	if do("POST", "/api/failed/retry", `{"filter":{"cat":"corrupt","ext":"xlsx"}}`, &rt) != 200 || rt.Count != 1 {
 		t.Fatalf("整类重试: %+v", rt)
+	}
+}
+
+// 导出诊断信息在后台进行：开始后立即返回，界面轮询进度；进行中再点不会重复开始；完成后打开所在文件夹。
+func TestDiagnosticsAsync(t *testing.T) {
+	release := make(chan struct{})
+	var calls, revealed atomic.Int32
+	s := &Server{Actions: Actions{
+		Diagnostics: func(anon bool, progress func(string)) (string, error) {
+			calls.Add(1)
+			progress("日志 1/3")
+			<-release
+			return "/data/zhaozhao-diagnostics.zip", nil
+		},
+		RevealFile: func(string) error { revealed.Add(1); return nil },
+	}}
+	if st := s.startDiagnostics(true); !st.Running {
+		t.Fatalf("%+v", st)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for s.diagStatus().Step != "日志 1/3" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st := s.startDiagnostics(true); !st.Running || st.Step != "日志 1/3" {
+		t.Fatalf("进行中应返回进度：%+v", st)
+	}
+	close(release)
+	for s.diagStatus().Running && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st := s.diagStatus(); st.Running || st.Path != "/data/zhaozhao-diagnostics.zip" || st.Err != "" || calls.Load() != 1 {
+		t.Fatalf("%+v，导出 %d 次", st, calls.Load())
+	}
+	for revealed.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if revealed.Load() != 1 {
+		t.Fatal("完成后应打开所在文件夹")
 	}
 }

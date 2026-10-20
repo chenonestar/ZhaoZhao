@@ -2,7 +2,9 @@ package main
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,16 +24,22 @@ func environment(dataDir string) string {
 		logx.P(exe), driveKind(exe), logx.P(dataDir), driveKind(dataDir))
 }
 
+// diagSpaceLimit：导出诊断信息时空间统计最多花多久（大索引库要读遍整个文件），超时就跳过这一项。
+var diagSpaceLimit = 30 * time.Second
+
 // exportDiagnostics 把日志、当前状态、设置和运行环境打包成 zip，放在数据目录下。
-// anonymize 为真时，所有文件名和路径替换成代号（保留盘符、层级和扩展名）。
-func exportDiagnostics(dataDir string, lg *logx.Logger, mgr *index.Manager, anonymize bool) (string, error) {
+// anonymize 为真时，所有文件名和路径替换成代号（保留盘符、层级和扩展名）。progress 报告进行到哪一步。
+// 先写成 .part 文件，全部写完才改名：中途出错不会留下打不开的 zip。
+func exportDiagnostics(dataDir string, lg *logx.Logger, mgr *index.Manager, anonymize bool, progress func(string)) (string, error) {
+	progress("整理日志")
 	lg.Flush()
 	name := "zhaozhao-diagnostics-" + time.Now().Format("20060102-150405") + ".zip"
 	p := filepath.Join(dataDir, name)
-	f, err := os.Create(p)
+	f, err := os.Create(p + ".part")
 	if err != nil {
 		return "", err
 	}
+	defer os.Remove(p + ".part") // 成功时已改名，删除不到
 	zw := zip.NewWriter(f)
 	clean := func(s string) string {
 		if anonymize {
@@ -48,6 +56,7 @@ func exportDiagnostics(dataDir string, lg *logx.Logger, mgr *index.Manager, anon
 		return err
 	}
 
+	progress("系统与设置")
 	var sys strings.Builder
 	fmt.Fprintf(&sys, "导出时间：%s\n运行环境：%s\nGo：%s\n", time.Now().Format("2006-01-02 15:04:05"), environment(dataDir), runtime.Version())
 	hk := currentHotkey()
@@ -82,6 +91,7 @@ func exportDiagnostics(dataDir string, lg *logx.Logger, mgr *index.Manager, anon
 		return "", err
 	}
 
+	progress("当前状态和失败列表")
 	st := mgr.Status()
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n\n索引根：\n", mgr.Snapshot())
@@ -107,11 +117,22 @@ func exportDiagnostics(dataDir string, lg *logx.Logger, mgr *index.Manager, anon
 		return "", err
 	}
 
-	if sp, err := mgr.SpaceStats(); err == nil {
-		if err := add("索引空间.txt", index.SpaceText(sp)); err != nil {
-			f.Close()
-			return "", err
-		}
+	progress(fmt.Sprintf("索引库空间统计（最多 %d 秒）", int(diagSpaceLimit.Seconds())))
+	ctx, cancel := context.WithTimeout(context.Background(), diagSpaceLimit)
+	sp, err := mgr.SpaceStatsContext(ctx)
+	cancel()
+	space := ""
+	switch {
+	case err == nil:
+		space = index.SpaceText(sp)
+	case errors.Is(err, context.DeadlineExceeded):
+		space = fmt.Sprintf("空间统计超过 %d 秒，已跳过。\n", int(diagSpaceLimit.Seconds()))
+	default:
+		space = "空间统计失败：" + err.Error() + "\n"
+	}
+	if err := add("索引空间.txt", space); err != nil {
+		f.Close()
+		return "", err
 	}
 	if lt := mgr.LegacyTest(); lt.Report != nil {
 		if err := add("老格式测试.txt", index.LegacyTestText(lt.Report, false)); err != nil {
@@ -120,7 +141,9 @@ func exportDiagnostics(dataDir string, lg *logx.Logger, mgr *index.Manager, anon
 		}
 	}
 
-	for _, lp := range lg.AllLogs() {
+	logs := lg.AllLogs()
+	for i, lp := range logs {
+		progress(fmt.Sprintf("日志 %d/%d", i+1, len(logs)))
 		data, err := logx.ReadLog(lp) // 旧日志是压缩的：解压后才能隐藏路径
 		if err != nil {
 			continue
@@ -134,5 +157,8 @@ func exportDiagnostics(dataDir string, lg *logx.Logger, mgr *index.Manager, anon
 		f.Close()
 		return "", err
 	}
-	return p, f.Close()
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	return p, os.Rename(p+".part", p)
 }

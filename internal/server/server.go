@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -36,6 +37,56 @@ type Server struct {
 	ln  net.Listener
 
 	pendingPanel atomic.Value // 托盘菜单要求界面打开的面板（如 "index"），界面取走后清空
+
+	diagMu sync.Mutex
+	diag   DiagState
+}
+
+// DiagState 是正在进行或最近一次的诊断信息导出。
+type DiagState struct {
+	Running bool   `json:"running"`
+	Step    string `json:"step,omitempty"`    // 正在做哪一步
+	Seconds int    `json:"seconds,omitempty"` // 已用秒数
+	Path    string `json:"path,omitempty"`    // 生成的文件
+	Err     string `json:"err,omitempty"`
+
+	started time.Time
+}
+
+// startDiagnostics 在后台开始导出（已经在导出时不重复开始），返回当前状态。
+func (s *Server) startDiagnostics(anonymize bool) DiagState {
+	s.diagMu.Lock()
+	if !s.diag.Running {
+		s.diag = DiagState{Running: true, Step: "开始", started: time.Now()}
+		go func() {
+			p, err := s.Actions.Diagnostics(anonymize, func(step string) {
+				s.diagMu.Lock()
+				s.diag.Step = step
+				s.diagMu.Unlock()
+			})
+			s.diagMu.Lock()
+			s.diag.Running, s.diag.Step, s.diag.Path = false, "", p
+			if err != nil {
+				s.diag.Err, s.diag.Path = err.Error(), ""
+			}
+			s.diagMu.Unlock()
+			if err == nil && s.Actions.RevealFile != nil {
+				_ = s.Actions.RevealFile(p)
+			}
+		}()
+	}
+	s.diagMu.Unlock()
+	return s.diagStatus()
+}
+
+func (s *Server) diagStatus() DiagState {
+	s.diagMu.Lock()
+	defer s.diagMu.Unlock()
+	d := s.diag
+	if d.Running {
+		d.Seconds = int(time.Since(d.started).Seconds())
+	}
+	return d
 }
 
 // RequestPanel 让界面下次检查时打开指定面板（托盘菜单「索引与设置」）。
@@ -61,8 +112,8 @@ type Actions struct {
 	// ApplyHotkey 立即启用新的全局快捷键（空表示不使用），返回结果；Hotkey 返回当前状态。
 	ApplyHotkey func(spec string) HotkeyState
 	Hotkey      func() HotkeyState
-	// Diagnostics 导出诊断信息，返回生成的文件路径。
-	Diagnostics func(anonymize bool) (string, error)
+	// Diagnostics 导出诊断信息，返回生成的文件路径；progress 报告进行到哪一步。
+	Diagnostics func(anonymize bool, progress func(string)) (string, error)
 }
 
 func newToken() string {

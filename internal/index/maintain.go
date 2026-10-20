@@ -1,6 +1,7 @@
 package index
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -335,7 +336,12 @@ type SpaceDetail struct {
 
 // SpaceStats 统计索引库空间（读遍整个索引库，较慢）。
 func (m *Manager) SpaceStats() (*SpaceDetail, error) {
-	st, err := m.DB.Stats()
+	return m.SpaceStatsContext(context.Background())
+}
+
+// SpaceStatsContext 同 SpaceStats，ctx 结束时中止。
+func (m *Manager) SpaceStatsContext(ctx context.Context) (*SpaceDetail, error) {
+	st, err := m.DB.StatsContext(ctx)
 	if err != nil {
 		return nil, err
 	}

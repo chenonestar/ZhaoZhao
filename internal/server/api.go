@@ -261,6 +261,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 		s.M.CancelLegacyTest()
 		return ok(), nil
 	}))
+	// 导出诊断信息在后台进行（大索引库要几十秒）：界面轮询进度，完成后打开所在文件夹
 	h("/api/diagnostics", s.post(func(r *http.Request) (any, error) {
 		var b struct {
 			Anonymize bool `json:"anonymize"`
@@ -269,15 +270,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 		if s.Actions.Diagnostics == nil {
 			return nil, fmt.Errorf("不支持导出诊断信息")
 		}
-		p, err := s.Actions.Diagnostics(b.Anonymize)
-		if err != nil {
-			return nil, err
-		}
-		if s.Actions.RevealFile != nil {
-			_ = s.Actions.RevealFile(p)
-		}
-		return map[string]string{"path": p}, nil
+		return s.startDiagnostics(b.Anonymize), nil
 	}))
+	h("/api/diagnostics/status", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.diagStatus()) })
 	h("/api/config/defaults", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, index.DefaultConfig(s.M.DataDir)) })
 	h("/api/notices", func(w http.ResponseWriter, r *http.Request) {
 		after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)

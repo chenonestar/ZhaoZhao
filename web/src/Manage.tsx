@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
-import type { Config, FailedFilter, FailedItem, FailedSummary, HotkeyState, LegacyTestState, OCRBenchInfo, ProblemCat, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
+import type { Config, DiagState, FailedFilter, FailedItem, FailedSummary, HotkeyState, LegacyTestState, OCRBenchInfo, ProblemCat, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
 import { copyText, fmtDuration, fmtSize, fmtTime } from "./util";
 import { FolderPicker } from "./FolderPicker";
 import { Help } from "./Help";
@@ -691,19 +691,29 @@ function LegacyTest() {
 
 function Diagnostics() {
   const [anon, setAnon] = useState(true);
-  const [out, setOut] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [st, setSt] = useState<DiagState | null>(null);
+  const [err, setErr] = useState("");
+  const load = () => api.diagnosticsStatus().then(setSt).catch(() => {});
+  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (!st?.running) return;
+    const t = setInterval(load, 1000);
+    return () => clearInterval(t);
+  }, [st?.running]);
   return (
     <div className="field">
       <div className="dim small">遇到问题时导出诊断信息（日志、当前状态、设置、运行环境），把生成的 zip 文件发给开发者。</div>
       <label className="check"><input type="checkbox" checked={anon} onChange={(e) => setAnon(e.target.checked)} />隐藏文件名和路径（替换成代号，保留扩展名和目录层级）</label>
       <div className="btns">
-        <button disabled={busy} onClick={() => {
-          setBusy(true); setOut("");
-          api.diagnostics(anon).then((r) => setOut("已生成：" + r.path)).catch((e) => setOut("导出失败：" + e.message)).finally(() => setBusy(false));
-        }}>{busy ? "正在导出…" : "导出诊断信息"}</button>
+        <button disabled={!!st?.running} onClick={() => {
+          setErr("");
+          api.diagnostics(anon).then(setSt).catch((e) => setErr(e.message));
+        }}>{st?.running ? "正在导出…" : "导出诊断信息"}</button>
       </div>
-      {out && <div className="small">{out}</div>}
+      {st?.running && <div className="small">正在导出：{st.step}（已用 {st.seconds ?? 0} 秒）</div>}
+      {!st?.running && st?.path && <div className="small">已生成：{st.path}</div>}
+      {!st?.running && st?.err && <div className="error small">导出失败：{st.err}</div>}
+      {err && <div className="error small">{err}</div>}
     </div>
   );
 }

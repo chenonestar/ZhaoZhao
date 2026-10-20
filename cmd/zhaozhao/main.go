@@ -136,8 +136,8 @@ func main() {
 		OpenInner:   func(container, inner string) (string, error) { return tmp.Open(container, inner, mgr.Config()) },
 		ApplyHotkey: applyHotkey,
 		Hotkey:      currentHotkey,
-		Diagnostics: func(anonymize bool) (string, error) {
-			p, err := exportDiagnostics(dataDir, lg, mgr, anonymize)
+		Diagnostics: func(anonymize bool, progress func(string)) (string, error) {
+			p, err := exportDiagnostics(dataDir, lg, mgr, anonymize, progress)
 			if err == nil {
 				log.Printf("已导出诊断信息 %s（隐藏路径 %v）", logx.P(p), anonymize)
 			}

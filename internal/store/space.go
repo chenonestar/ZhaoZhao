@@ -129,9 +129,12 @@ func partName(n string) string {
 }
 
 // Stats 统计索引库空间。
-func (d *DB) Stats() (*SpaceStats, error) {
+func (d *DB) Stats() (*SpaceStats, error) { return d.StatsContext(context.Background()) }
+
+// StatsContext 统计索引库空间；ctx 结束时中止（大索引库要读遍整个文件）。
+func (d *DB) StatsContext(ctx context.Context) (*SpaceStats, error) {
 	st := &SpaceStats{SpaceInfo: d.Space()}
-	rows, err := d.R.Query(`SELECT name, sum(pgsize) FROM dbstat GROUP BY name`)
+	rows, err := d.R.QueryContext(ctx, `SELECT name, sum(pgsize) FROM dbstat GROUP BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -154,11 +157,11 @@ func (d *DB) Stats() (*SpaceStats, error) {
 	if st.FreeBytes > 0 {
 		st.Parts = append(st.Parts, SpaceItem{Name: "空闲（可回收）", Bytes: st.FreeBytes})
 	}
-	_ = d.R.QueryRow(`SELECT count(*), ifnull(sum((flags & 2)=0),0) FROM texts`).Scan(&st.Texts, &st.Legacy)
-	_ = d.R.QueryRow(`SELECT count(*), ifnull(sum(text_len),0) FROM files WHERE text_id>0`).Scan(&st.TextFiles, &st.RawChars)
+	_ = d.R.QueryRowContext(ctx, `SELECT count(*), ifnull(sum((flags & 2)=0),0) FROM texts`).Scan(&st.Texts, &st.Legacy)
+	_ = d.R.QueryRowContext(ctx, `SELECT count(*), ifnull(sum(text_len),0) FROM files WHERE text_id>0`).Scan(&st.TextFiles, &st.RawChars)
 
 	// 各扩展名：共用的文本只算给其中一个文件
-	rows, err = d.R.Query(`SELECT f.ext, count(*), sum(length(t.data)+ifnull(length(t.locs),0)) FROM texts t
+	rows, err = d.R.QueryContext(ctx, `SELECT f.ext, count(*), sum(length(t.data)+ifnull(length(t.locs),0)) FROM texts t
 JOIN files f ON f.id=(SELECT min(id) FROM files WHERE text_id=t.id AND text_id>0) GROUP BY f.ext`)
 	if err != nil {
 		return nil, err
@@ -180,7 +183,7 @@ JOIN files f ON f.id=(SELECT min(id) FROM files WHERE text_id=t.id AND text_id>0
 		st.ByExt = st.ByExt[:20]
 	}
 
-	rows, err = d.R.Query(`SELECT t.id, length(t.data)+ifnull(length(t.locs),0) b FROM texts t ORDER BY b DESC LIMIT 20`)
+	rows, err = d.R.QueryContext(ctx, `SELECT t.id, length(t.data)+ifnull(length(t.locs),0) b FROM texts t ORDER BY b DESC LIMIT 20`)
 	if err != nil {
 		return nil, err
 	}
@@ -198,10 +201,10 @@ JOIN files f ON f.id=(SELECT min(id) FROM files WHERE text_id=t.id AND text_id>0
 	}
 	rows.Close()
 	for i, id := range ids {
-		_ = d.R.QueryRow(`SELECT min(id), count(*), max(text_len) FROM files WHERE text_id=? AND text_id>0`, id).Scan(&big[i].FileID, &big[i].Sharers, &big[i].Chars)
+		_ = d.R.QueryRowContext(ctx, `SELECT min(id), count(*), max(text_len) FROM files WHERE text_id=? AND text_id>0`, id).Scan(&big[i].FileID, &big[i].Sharers, &big[i].Chars)
 	}
 	st.Biggest = big
-	return st, nil
+	return st, ctx.Err()
 }
 
 // randomTextIDs 随机取最多 n 个文本编号（按编号范围随机探测，不用 ORDER BY random() 扫全表）。

@@ -279,6 +279,15 @@ export interface LegacyTestCase {
   coverage: number;
 }
 
+// 诊断信息导出（后台进行）。
+export interface DiagState {
+  running: boolean;
+  step?: string;
+  seconds?: number;
+  path?: string;
+  err?: string;
+}
+
 export interface OCRBenchPlan {
   procs: number;
   threads: number;
