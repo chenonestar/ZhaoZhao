@@ -266,7 +266,7 @@ func (m *Manager) laneDispatcher(l *lane) {
 			continue
 		}
 		if l.prio != prioOCR && m.ocrBenching.Load() {
-			s.idle.Store(false) // 正在测试 OCR 速度：暂停派发（约 1 分钟）
+			s.idle.Store(false) // 正在测试 OCR 速度：暂停派发（约 1～2 分钟）
 			m.waitLane(l, time.Second)
 			continue
 		}

@@ -363,7 +363,7 @@ func (m *Manager) runOCRBench() bool {
 		m.setBenchNote("")
 		m.kick()
 	}()
-	m.setBenchNote("正在测试本机 OCR 速度，其他文件暂停约 1 分钟")
+	m.setBenchNote("正在测试本机 OCR 速度，其他文件暂停约 1～2 分钟")
 	for end := awake.Now() + time.Minute; (running(prioFast) > 0 || running(prioLegacy) > 0) && awake.Now() < end; {
 		if !m.sleepCtx(time.Second) {
 			return false
@@ -394,10 +394,10 @@ func (m *Manager) runOCRBench() bool {
 	if pool == nil {
 		pool = m.Pool
 	}
-	m.logf("测试本机 OCR 速度：比较 %d 种搭配（%s），普通文件暂停约 1 分钟", len(cands), planList(cands))
+	m.logf("测试本机 OCR 速度：比较 %d 种搭配（%s），普通文件暂停约 1～2 分钟", len(cands), planList(cands))
 	t0 := awake.Now()
 	b := runOCRBench(m.ctx, cores, cands, newOCRBenchRunner(m, pool, sample), func(i, n int, p ocrPlan) {
-		m.setBenchNote(fmt.Sprintf("正在测试本机 OCR 速度（第 %d/%d 种：%s），其他文件暂停约 1 分钟", i+1, n, p))
+		m.setBenchNote(fmt.Sprintf("正在测试本机 OCR 速度（第 %d/%d 种：%s），其他文件暂停约 1～2 分钟", i+1, n, p))
 		m.activity()
 	})
 	if m.ctx.Err() != nil {
