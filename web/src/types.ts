@@ -169,6 +169,7 @@ export interface SpaceDetail extends SpaceStatus {
   textFiles: number;
   rawChars: number;
   legacy: number;
+  fts?: { segments: number; pages: number; largest: number; entries: number; deleted: number; merging: number };
 }
 
 export interface HotkeyState {

@@ -228,6 +228,9 @@ function SpaceSection({ status, run }: { status: Status; run: (p: Promise<unknow
             <div className="dim">
               提取文本 {detail.texts} 份，{detail.textFiles} 个文件引用（{detail.textFiles - detail.texts} 个与其他内容相同的文件共用），共 {detail.rawChars.toLocaleString()} 字
               {detail.legacy > 0 && `；${detail.legacy} 份还是旧格式，后台正在重新压缩`}
+              {detail.fts && <div title="全文索引由若干段组成，空闲时会自动合并成一个段，清掉已删除、已重新提取的文件留下的残留条目">
+                全文索引 {detail.fts.segments} 个段（最大的占 {pct(detail.fts.largest, detail.fts.pages)}）{detail.fts.deleted > 0 && `，已删除的残留条目 ${detail.fts.deleted} 个`}
+              </div>}
             </div>
             <table className="grid">
               <thead><tr><th>扩展名</th><th>提取文本份数</th><th>大小（压缩后）</th></tr></thead>

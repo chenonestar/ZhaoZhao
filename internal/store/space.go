@@ -113,6 +113,7 @@ type SpaceStats struct {
 	TextFiles int64       `json:"textFiles"` // 有文本的文件数（多于份数的部分是共用的）
 	RawChars  int64       `json:"rawChars"`  // 全部文本的文字数
 	Legacy    int64       `json:"legacy"`    // 还是旧格式（未重新压缩）的文本份数
+	FTS       *FTSInfo    `json:"fts,omitempty"`
 }
 
 // partName 把 SQLite 内部对象名翻译成能看懂的类别。
@@ -156,6 +157,9 @@ func (d *DB) StatsContext(ctx context.Context) (*SpaceStats, error) {
 	}
 	if st.FreeBytes > 0 {
 		st.Parts = append(st.Parts, SpaceItem{Name: "空闲（可回收）", Bytes: st.FreeBytes})
+	}
+	if fi, err := d.FTSInfo(); err == nil {
+		st.FTS = &fi
 	}
 	_ = d.R.QueryRowContext(ctx, `SELECT count(*), ifnull(sum((flags & 2)=0),0) FROM texts`).Scan(&st.Texts, &st.Legacy)
 	_ = d.R.QueryRowContext(ctx, `SELECT count(*), ifnull(sum(text_len),0) FROM files WHERE text_id>0`).Scan(&st.TextFiles, &st.RawChars)

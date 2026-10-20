@@ -107,6 +107,9 @@ func (m *Manager) maintainLoop() {
 		m.recheckPDFs()
 		m.migrateTexts()
 		if m.sched.idle.Load() {
+			m.mergeFTS()
+		}
+		if m.sched.idle.Load() {
 			m.housekeeping()
 		}
 		if !m.sleep(time.Minute) {
@@ -246,6 +249,97 @@ func (m *Manager) recheckPDFs() {
 	}
 }
 
+// 全文索引的段（store/fts.go）：FTS5 写入时会自动合并，平时段数不多，但已删除、已重新提取的文件在旧段里
+// 留下的条目要等合并到那个段才清掉。空闲时把所有段合成一个：清掉这些残留，搜索也快一些（实测快约一成）。
+// 要把整个全文索引重写一遍，所以只在值得时做（ftsNeedsMerge），并且至少隔一天。
+const (
+	ftsMergeEvery = 24 * time.Hour
+	ftsMergeStep  = 1000 // 每步写入的页数（每页约 4 KB）：一步不到一秒，提取结果的写入只需稍等
+)
+
+// ftsMergeMin：全文索引不到这么多页（约 10 MB）时不必整理；测试里调小。
+var ftsMergeMin int64 = 2560
+
+// ftsNeedsMerge：最大的段以外的数据占一成以上，或者已删除的残留条目占 5% 以上。
+func ftsNeedsMerge(fi store.FTSInfo) bool {
+	if fi.Pages < ftsMergeMin {
+		return false
+	}
+	return (fi.Pages-fi.Largest)*10 >= fi.Pages || fi.Deleted*20 >= fi.Entries
+}
+
+// mergeFTS 空闲时把全文索引合并成一个段：分小步做，索引忙起来就停下，下次空闲接着做（进度在索引库里）。
+func (m *Manager) mergeFTS() {
+	db := m.DB
+	// 进行中的整理：「开始前索引库已用的字节数 要合并的页数」
+	state, _ := db.GetMeta("fts_merge")
+	var usedBefore, total int64
+	resumed := state != ""
+	if resumed {
+		_, _ = fmt.Sscan(state, &usedBefore, &total)
+	} else {
+		if v, _ := db.GetMeta("fts_merged_at"); v != "" {
+			if t, _ := strconv.ParseInt(v, 10, 64); time.Since(time.Unix(t, 0)) < ftsMergeEvery {
+				return
+			}
+		}
+		fi, err := db.FTSInfo()
+		if err != nil {
+			logx.Debugf("读取全文索引结构失败: %v", err)
+			return
+		}
+		if !ftsNeedsMerge(fi) {
+			return
+		}
+		_ = db.Checkpoint()
+		sp := db.Space()
+		usedBefore, total = sp.DBBytes-sp.FreeBytes, fi.Pages
+		_ = db.SetMeta("fts_merge", fmt.Sprint(usedBefore, total))
+		m.logf("开始整理全文索引：%d 个段、约 %s，其中已删除的残留条目 %d 个；空闲时分步合并成一个段",
+			fi.Segments, fmtBytes(fi.Pages*4096), fi.Deleted)
+	}
+	defer m.setMaint("")
+	done := func() {
+		_ = db.SetMeta("fts_merge", "")
+		_ = db.SetMeta("fts_merged_at", strconv.FormatInt(time.Now().Unix(), 10))
+	}
+	start := time.Now()
+	for first := !resumed; m.ctx.Err() == nil && m.sched.idle.Load(); first = false {
+		if fi, err := db.FTSInfo(); err == nil && total > 0 {
+			m.setMaint(fmt.Sprintf("正在整理全文索引（%d%%）", min(99, max(0, 100-fi.Merging*100/total))))
+		}
+		more, err := db.MergeFTS(ftsMergeStep, first)
+		if err != nil {
+			m.logf("整理全文索引失败: %v", err)
+			done() // 一天后再试
+			return
+		}
+		if !more {
+			done()
+			_ = db.Checkpoint()
+			sp := db.Space()
+			msg := "全文索引整理完成"
+			if fi, err := db.FTSInfo(); err == nil {
+				msg += fmt.Sprintf("：%d 个段、约 %s", fi.Segments, fmtBytes(fi.Pages*4096))
+			}
+			if !resumed {
+				msg += "，用时 " + fmtDuration(time.Since(start))
+			}
+			if saved := usedBefore - (sp.DBBytes - sp.FreeBytes); saved > 1<<20 {
+				msg += "，索引库小了约 " + fmtBytes(saved)
+			}
+			m.logf("%s", msg)
+			return
+		}
+		if _, _, err := db.CheckpointIfLarge(store.WALLimit, time.Second); err != nil {
+			logx.Debugf("WAL 检查点失败: %v", err)
+		}
+		if !m.sleep(20 * time.Millisecond) {
+			return
+		}
+	}
+}
+
 // housekeeping 空闲时：WAL 写回主文件并截短；增量回收模式下把空闲页还给磁盘。
 func (m *Manager) housekeeping() {
 	db := m.DB
@@ -369,6 +463,10 @@ func SpaceText(d *SpaceDetail) string {
 		map[bool]string{true: "增量回收模式", false: "需手动压缩才能归还"}[d.Incremental])
 	for _, p := range d.Parts {
 		fmt.Fprintf(&b, "  %s：%s\n", p.Name, fmtBytes(p.Bytes))
+	}
+	if f := d.FTS; f != nil {
+		fmt.Fprintf(&b, "全文索引：%d 个段，最大的段占 %d%%，已删除的残留条目 %d 个（共 %d 个）\n",
+			f.Segments, f.Largest*100/max(1, f.Pages), f.Deleted, f.Entries)
 	}
 	fmt.Fprintf(&b, "提取文本 %d 份，%d 个文件引用（%d 个与其他文件共用），共 %d 字；旧格式（待重新压缩）%d 份\n",
 		d.Texts, d.TextFiles, d.TextFiles-d.Texts, d.RawChars, d.Legacy)
