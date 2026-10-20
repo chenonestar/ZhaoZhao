@@ -47,58 +47,142 @@ func TestOCRCandidates(t *testing.T) {
 	}
 }
 
-// 按实测最快的「每个进程几个线程」换算各种线程预算下的搭配。
-func TestOCRPlanFor(t *testing.T) {
+// 按实测效率估算各种搭配的速度，选出线程预算下最快的，把预算用满。
+func TestOCRBestPlan(t *testing.T) {
+	// 6 核：6×1 每分钟 30 页，3×2 36 页，1×6 20 页 → 每线程 5、6、3.33 页
+	b := &OCRBench{Budget: 6, Logical: 6, Plans: []OCRBenchPlan{
+		{Procs: 6, Threads: 1, PerMin: 30}, {Procs: 3, Threads: 2, PerMin: 36}, {Procs: 1, Threads: 6, PerMin: 20}, {Procs: 2, Threads: 3, Err: "内存不足"},
+	}}
+	phys, smt := b.curves()
+	if len(phys) != 3 || len(smt) != 0 || phys.at(2) != 6 || phys.at(1) != 5 {
+		t.Fatalf("效率曲线：%+v %+v", phys, smt)
+	}
+	if e := phys.at(4); e < 4.66 || e > 4.67 { // 2 线程和 6 线程之间插值
+		t.Fatalf("插值：%v", e)
+	}
+	if e := phys.at(12); e != phys.at(6)/2 { // 比测过的都多：多出来的线程不再加快
+		t.Fatalf("外推：%v", e)
+	}
 	for _, c := range []struct {
-		budget, maxProcs, best int
-		want                   ocrPlan
+		budget, maxProcs int
+		want             ocrPlan
 	}{
-		{4, 32, 1, ocrPlan{4, 1}},
-		{2, 32, 1, ocrPlan{2, 1}}, // 普通文件还在处理：预算减半，仍是每个进程 1 线程
-		{8, 32, 2, ocrPlan{4, 2}},
-		{6, 32, 4, ocrPlan{2, 3}}, // 6 ÷ 4 四舍五入是 2 个进程
-		{8, 3, 1, ocrPlan{3, 2}},  // 内存只够 3 个进程
-		{1, 32, 1, ocrPlan{1, 1}},
-		{4, 32, 8, ocrPlan{1, 4}},
+		{6, 32, ocrPlan{3, 2}}, // 只剩 OCR：实测最快的
+		{3, 32, ocrPlan{1, 3}}, // 普通文件还在处理：预算 3，1×3（估计 16 页）比 3×1（15 页）快，以前是 2×1，只用 2 个线程
+		{6, 2, ocrPlan{2, 3}},  // 内存只够 2 个进程：每个进程 3 线程，把预算用满
+		{1, 32, ocrPlan{1, 1}},
 	} {
-		if got := ocrPlanFor(c.budget, c.maxProcs, c.best); got != c.want {
-			t.Errorf("预算 %d、最多 %d 个进程、最快 %d 线程：%v，应为 %v", c.budget, c.maxProcs, c.best, got, c.want)
+		if got := phys.bestPlan(c.budget, c.maxProcs); got != c.want {
+			t.Errorf("预算 %d、最多 %d 个进程：%v，应为 %v", c.budget, c.maxProcs, got, c.want)
 		}
+	}
+	// 每个进程 1 线程效率最高时，预算 3 是 3×1
+	b1 := &OCRBench{Budget: 4, Plans: []OCRBenchPlan{{Procs: 4, Threads: 1, PerMin: 26}, {Procs: 2, Threads: 2, PerMin: 20}, {Procs: 1, Threads: 4, PerMin: 16}}}
+	if p1, _ := b1.curves(); p1.bestPlan(3, 32) != (ocrPlan{3, 1}) || p1.bestPlan(2, 32) != (ocrPlan{2, 1}) {
+		t.Fatal("每个进程 1 线程最快时应多开进程")
+	}
+	// 还没测速：每个进程 1 线程，进程数受限时多分线程
+	var none effCurve
+	if none.bestPlan(4, 32) != (ocrPlan{4, 1}) || none.bestPlan(8, 3) != (ocrPlan{3, 2}) {
+		t.Fatal("还没测速时的搭配")
 	}
 	if ocrBudget(8, true) != 4 || ocrBudget(8, false) != 8 || ocrBudget(2, true) != 2 || ocrBudget(1, true) != 1 {
 		t.Fatal("线程预算")
 	}
 }
 
-// 进程数按内存限制：留给用户至少 1 GB（或总内存的 15%），OCR 进程现在占着的加回来；
-// 内存紧张时立即减少，宽裕时要多出半个名额才增加。
-func TestOCRMemCap(t *testing.T) {
-	const gb = 1 << 30
-	if s := ocrMemSlots(16*gb, 10*gb, gb/2, 0); s < 15 || s > 16 {
-		t.Fatalf("16 GB、可用 10 GB、每个 0.5 GB：%.1f", s) // (10 - 2.4) / 0.5 = 15.2
+// 有超线程的电脑：测速时再比较用上全部逻辑处理器的搭配；明显更快时只剩 OCR 时用它，预算减半时仍只用物理核心。
+func TestOCRSMT(t *testing.T) {
+	for _, c := range []struct {
+		cores, logical, maxProcs int
+		want                     string
+	}{
+		{6, 12, 32, "[{6 1} {3 2} {1 6} {12 1} {6 2}]"},
+		{4, 8, 32, "[{4 1} {2 2} {1 4} {8 1} {4 2}]"},
+		{6, 6, 32, "[{6 1} {3 2} {1 6}]"},               // 没有超线程
+		{6, 12, 10, "[{6 1} {3 2} {1 6} {10 1} {6 2}]"}, // 内存只够 10 个进程
+		{6, 12, 6, "[{6 1} {3 2} {1 6} {6 2}]"},         // 只够 6 个进程：12×1 变成 6×2，不重复
+	} {
+		if got := sprint(ocrBenchCandidates(c.cores, c.logical, c.maxProcs)); got != c.want {
+			t.Errorf("%d 核 %d 线程、最多 %d 个进程：%s，应为 %s", c.cores, c.logical, c.maxProcs, got, c.want)
+		}
 	}
-	if s := ocrMemSlots(4*gb, 1*gb+gb/2, gb/2, 0); s != 1 {
-		t.Fatalf("4 GB、可用 1.5 GB：%.1f", s) // (1.5 - 1) / 0.5
+	b := &OCRBench{Budget: 4, Logical: 8, Plans: []OCRBenchPlan{
+		{Procs: 4, Threads: 1, PerMin: 20}, {Procs: 2, Threads: 2, PerMin: 18}, {Procs: 1, Threads: 4, PerMin: 12},
+		{Procs: 8, Threads: 1, PerMin: 26}, {Procs: 4, Threads: 2, PerMin: 22},
+	}}
+	if !b.smtFaster() {
+		t.Fatal("8×1 比 4×1 快 30%，应用上超线程")
 	}
-	if s := ocrMemSlots(4*gb, gb/2, gb/2, 2); s != 1 {
-		t.Fatalf("两个 OCR 进程占着 1 GB：%.1f", s) // (0.5 + 1 - 1) / 0.5
+	e := newEnvWith(t, &fakeProv{}, "", nil)
+	m := e.m
+	m.ocr.mu.Lock()
+	m.ocrBenchLocked()
+	m.ocr.bench = b
+	full, fb := m.autoPlanLocked(4, false, 0)
+	half, hb := m.autoPlanLocked(4, true, 0)
+	m.ocr.mu.Unlock()
+	if full != (ocrPlan{8, 1}) || fb != 8 || hb != 2 || half.procs*half.threads != 2 {
+		t.Fatalf("只剩 OCR：%v（预算 %d）；预算减半：%v（预算 %d）", full, fb, half, hb)
 	}
-	if ocrMemSlots(0, 0, gb, 0) != -1 || nextMemCap(3, -1) != ocrMaxProcs {
-		t.Fatal("取不到内存信息时不限制")
+	b.Plans[3].PerMin, b.Plans[4].PerMin = 20.5, 19 // 只快一点：不值得
+	if b.smtFaster() {
+		t.Fatal("超线程只快 2.5% 时不用")
 	}
-	if nextMemCap(0, 3.2) != 3 || nextMemCap(3, 2.9) != 2 || nextMemCap(3, 4.4) != 3 || nextMemCap(3, 4.6) != 4 || nextMemCap(0, 0.3) != 1 {
-		t.Fatal("内存上限的回差不对")
+	if !strings.Contains(b.Summary(), "超线程对 OCR 没有明显帮助") {
+		t.Fatal(b.Summary())
 	}
 }
 
-func TestTailThreads(t *testing.T) {
-	p := ocrPlan{4, 1}
-	if tailThreads(p, 4, 1) != 4 || tailThreads(p, 4, 2) != 2 || tailThreads(p, 4, 3) != 0 || tailThreads(p, 4, 4) != 0 || tailThreads(p, 4, 0) != 0 {
-		t.Fatal("4×1")
+// 用户正在用电脑：OCR 只用一半核心，正在识别的文件从下一页起减少线程；离开后恢复。
+func TestOCRHalfWhileUserActive(t *testing.T) {
+	idle := time.Hour
+	old := userIdleTime
+	userIdleTime = func() time.Duration { return idle }
+	t.Cleanup(func() { userIdleTime = old })
+	e := newEnvWith(t, &fakeProv{}, "", func(m *Manager) {
+		useFakeOCR(t, m, "10ms")
+		m.ocr.cores = 6
+	})
+	m := e.m
+	m.ocr.mu.Lock()
+	m.ocrBenchLocked()
+	// 6 核：3×2 最快；预算减半为 3 时 3×1 最快
+	m.ocr.bench = &OCRBench{Budget: 6, Logical: 6, Plans: []OCRBenchPlan{
+		{Procs: 6, Threads: 1, PerMin: 33}, {Procs: 3, Threads: 2, PerMin: 36}, {Procs: 1, Threads: 6, PerMin: 18}}}
+	m.ocr.othersIdle = -time.Hour // 普通文件早就空闲了
+	m.ocr.mu.Unlock()
+	m.ocrTuneStep()
+	if p := m.ocrPlanNow(); p != (ocrPlan{3, 2}) {
+		t.Fatalf("没人用电脑时应用全部核心：%v", p)
 	}
-	if tailThreads(ocrPlan{2, 2}, 4, 1) != 4 || tailThreads(ocrPlan{1, 4}, 4, 1) != 0 {
-		t.Fatal("2×2 / 1×4")
+	// 一个文件正在按 2 线程识别，队列里还有文件（不是收尾）
+	ctl := &worker.Ctl{}
+	s := &m.sched
+	s.mu.Lock()
+	s.inflight[-1] = &job{ctl: ctl, ocrThreads: 2, path: "大文件.pdf"}
+	s.mu.Unlock()
+	s.lanes[prioOCR].wantWork.Store(true)
+	defer s.lanes[prioOCR].wantWork.Store(false)
+	idle = 10 * time.Second
+	m.ocrTuneStep()
+	if p := m.ocrPlanNow(); p != (ocrPlan{3, 1}) {
+		t.Fatalf("用户正在用电脑时应只用一半：%v", p)
 	}
+	if _, _, note := m.ocrStatus(); !strings.Contains(note, "正在用电脑") {
+		t.Fatalf("界面应说明：%q", note)
+	}
+	if ctl.OCRThreads() != 1 {
+		t.Fatalf("正在识别的文件应从下一页起减到 1 线程：%d", ctl.OCRThreads())
+	}
+	idle = time.Hour
+	m.ocrTuneStep()
+	if p := m.ocrPlanNow(); p != (ocrPlan{3, 2}) || ctl.OCRThreads() != 0 {
+		t.Fatalf("离开后应恢复：%v，正在识别的文件 %d 线程", p, ctl.OCRThreads())
+	}
+	s.mu.Lock()
+	delete(s.inflight, -1)
+	s.mu.Unlock()
 }
 
 func sprint(ps []ocrPlan) string {
@@ -187,6 +271,9 @@ func TestOCRBenchSavedPerMachine(t *testing.T) {
 	}
 }
 
+// testMachine：测速测试用固定的电脑（4 核、没有超线程），比较的搭配不随运行测试的电脑变化。
+var testMachine = sysinfo.Machine{CPU: "测试用处理器", Cores: 4, Logical: 4, MemTotal: 16 << 30}
+
 // fakeBench 记录测速调用，速度按 speed（没有的搭配：进程越多越快）。
 type fakeBench struct {
 	mu    sync.Mutex
@@ -254,6 +341,7 @@ func TestOCRBenchBeforeFirstOCR(t *testing.T) {
 		m := New(db, prov, nil, data)
 		useFakeOCR(t, m, "10ms")
 		m.ocr.cores = 4
+		m.ocr.machine = testMachine
 		if err := m.Start(); err != nil {
 			t.Fatal(err)
 		}
@@ -302,6 +390,7 @@ func TestOCRBenchBeforeFirstOCR(t *testing.T) {
 	m2 := New(db, prov, nil, data)
 	useFakeOCR(t, m2, "11ms")
 	m2.ocr.cores = 4
+	m2.ocr.machine = testMachine
 	if m2.OCRBenchInfo().Bench != nil {
 		t.Fatal("OCR 组件变了应没有结果")
 	}

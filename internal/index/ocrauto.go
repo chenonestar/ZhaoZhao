@@ -35,6 +35,7 @@ type ocrState struct {
 	memCap    int       // 内存允许的 OCR 进程数（0 表示还没算）
 	tail      int       // 队列收尾时每个文件的线程数（0 表示没有在收尾）
 	tailSeen  int       // 连续几次看到队列已空、有进程空闲
+	userBusy  bool      // 用户正在用电脑：OCR 只用一半核心
 }
 
 // ocrTuneEvery：多久调整一次。
@@ -42,6 +43,10 @@ var ocrTuneEvery = 30 * time.Second
 
 // othersIdleFor：普通文件、老格式空闲这么久后，OCR 才用全部核心（避免偶尔来一个文件就来回切换）。
 const othersIdleFor = 2 * time.Minute
+
+// userActiveFor：这么久之内用过键盘、鼠标，就算用户正在用电脑，OCR 只用一半核心，电脑不卡；
+// 离开这么久后再用全部核心。
+const userActiveFor = 2 * time.Minute
 
 // newOCRBenchRunner 返回实测一种搭配的函数（测试里换成模拟的）。
 var newOCRBenchRunner = func(m *Manager, pool *worker.Pool, sample string) ocrBenchRunner {
@@ -57,9 +62,10 @@ func (m *Manager) physCores() int {
 	return m.ocr.cores
 }
 
-// ocrBudget 返回 OCR 的线程预算：只剩 OCR 时用全部物理核心，普通文件、老格式还在处理时用一半。
-func ocrBudget(cores int, othersBusy bool) int {
-	if !othersBusy {
+// ocrBudget 返回 OCR 的线程预算：只剩 OCR 时用全部物理核心；half（普通文件、老格式还在处理，或者用户
+// 正在用电脑）时用一半。实测超线程更快时，只剩 OCR 时用全部逻辑处理器（见 autoPlanLocked）。
+func ocrBudget(cores int, half bool) int {
+	if !half {
 		return cores
 	}
 	return min(cores, max(2, cores/2))
@@ -87,19 +93,22 @@ func (m *Manager) ocrLive() int {
 	return live
 }
 
-// autoPlanLocked 返回自动时的搭配：每个进程的线程数按本机测速结果（还没测时按 1），进程数受内存限制。
-// 调用时持有 m.ocr.mu。
-func (m *Manager) autoPlanLocked(budget, live int) ocrPlan {
-	best, slot := 1, uint64(ocrSlotMemDefault)
-	if bp, ok := m.ocrBenchLocked().best(); ok {
-		best = bp.Threads
-		if bp.SlotMem > 0 {
-			slot = bp.SlotMem * 5 / 4 // 留些余量：大页面、大 PDF 占得更多
-		}
+// autoPlanLocked 返回自动时的搭配和线程预算：按本机测速结果估算各种搭配的速度，选最快的（还没测时每个进程
+// 1 线程），进程数受内存限制。half 见 ocrBudget。调用时持有 m.ocr.mu。
+func (m *Manager) autoPlanLocked(cores int, half bool, live int) (ocrPlan, int) {
+	b := m.ocrBenchLocked()
+	slot := uint64(ocrSlotMemDefault)
+	if bp, ok := b.best(); ok && bp.SlotMem > 0 {
+		slot = bp.SlotMem * 5 / 4 // 留些余量：大页面、大 PDF 占得更多
 	}
 	total, avail := sysinfo.Memory()
 	m.ocr.memCap = nextMemCap(m.ocr.memCap, ocrMemSlots(total, avail, slot, live))
-	return ocrPlanFor(budget, m.ocr.memCap, best)
+	budget := ocrBudget(cores, half)
+	phys, smt := b.curves()
+	if !half && b.smtFaster() {
+		return smt.bestPlan(b.Logical, m.ocr.memCap), b.Logical
+	}
+	return phys.bestPlan(budget, m.ocr.memCap), budget
 }
 
 // ocrPlanNow 返回当前搭配；还没调整过时按设置给出初值。
@@ -113,7 +122,7 @@ func (m *Manager) ocrPlanNow() ocrPlan {
 		if cfg.OCRWorkers > 0 {
 			m.ocr.plan = ocrManualPlan(cfg.OCRWorkers, cores)
 		} else {
-			m.ocr.plan = m.autoPlanLocked(ocrBudget(cores, true), live)
+			m.ocr.plan, _ = m.autoPlanLocked(cores, true, live)
 		}
 	}
 	return m.ocr.plan
@@ -164,6 +173,7 @@ func (m *Manager) ocrTuneStep() {
 	pages := m.ocr.pages.Load()
 	busy := m.othersBusy()
 	live := m.ocrLive()
+	userBusy := userIdleTime() < userActiveFor
 
 	m.ocr.mu.Lock()
 	m.ocr.rate.add(now, pages)
@@ -173,19 +183,24 @@ func (m *Manager) ocrTuneStep() {
 	case m.ocr.othersIdle == 0:
 		m.ocr.othersIdle = now
 	}
-	budget := ocrBudget(cores, busy || now-m.ocr.othersIdle < othersIdleFor)
 	var next ocrPlan
+	var budget int
 	if cfg.OCRWorkers > 0 {
 		next = ocrManualPlan(cfg.OCRWorkers, cores)
 		budget = next.procs * next.threads
+		userBusy = false // 手动设的不自动调整
 	} else {
-		next = m.autoPlanLocked(budget, live)
+		next, budget = m.autoPlanLocked(cores, busy || now-m.ocr.othersIdle < othersIdleFor || userBusy, live)
 	}
 	changed := next != m.ocr.plan
-	m.ocr.plan = next
+	userChanged := userBusy != m.ocr.userBusy
+	m.ocr.plan, m.ocr.userBusy = next, userBusy
 	memCap := m.ocr.memCap
 	m.ocr.mu.Unlock()
 
+	if userChanged {
+		logx.Debugf("%s", map[bool]string{true: "用户正在用电脑：OCR 只用一半核心", false: "用户离开了：OCR 恢复用全部核心"}[userBusy])
+	}
 	if changed {
 		logx.Debugf("OCR 改用 %s（线程预算 %d，物理核心 %d，内存允许 %d 个进程）", next, budget, cores, memCap)
 		m.applyWorkers()
@@ -195,6 +210,8 @@ func (m *Manager) ocrTuneStep() {
 
 // ocrTail：OCR 队列已经空了、正在识别的文件比进程少时（多半是排在最后的大文件），把空出来的线程平分给
 // 它们，从下一页起生效；队列里又有文件时恢复。连续两次（约 1 分钟）都这样才调整，免得队列偶尔见底时来回切换。
+// 不在收尾时，正在识别的文件用的线程比现在的搭配多（预算刚减半：用户开始用电脑、来了普通文件），也从下一页起
+// 减到现在的线程数，不等这个文件识别完。
 func (m *Manager) ocrTail(p ocrPlan, budget int) {
 	s := &m.sched
 	l := s.lanes[prioOCR]
@@ -202,14 +219,15 @@ func (m *Manager) ocrTail(p ocrPlan, budget int) {
 		return
 	}
 	type running struct {
-		ctl  *worker.Ctl
-		path string
+		ctl     *worker.Ctl
+		path    string
+		threads int // 开始识别时的线程数
 	}
 	var rs []running
 	s.mu.Lock()
 	for _, j := range s.inflight {
 		if j.ctl != nil {
-			rs = append(rs, running{j.ctl, j.path})
+			rs = append(rs, running{j.ctl, j.path, j.ocrThreads})
 		}
 	}
 	s.mu.Unlock()
@@ -226,11 +244,18 @@ func (m *Manager) ocrTail(p ocrPlan, budget int) {
 	m.ocr.tail = t
 	m.ocr.mu.Unlock()
 	for _, r := range rs {
-		if r.ctl.OCRThreads() != t {
-			if t > 0 {
+		want := t
+		if want == 0 && r.threads > p.threads {
+			want = p.threads
+		}
+		if r.ctl.OCRThreads() != want {
+			switch {
+			case t > 0:
 				logx.Debugf("OCR 队列已空，%s 剩下的页改用 %d 线程", logx.P(r.path), t)
+			case want > 0:
+				logx.Debugf("OCR 线程预算减少，%s 剩下的页改用 %d 线程", logx.P(r.path), want)
 			}
-			r.ctl.SetOCRThreads(t)
+			r.ctl.SetOCRThreads(want)
 		}
 	}
 }
@@ -352,7 +377,7 @@ func (m *Manager) runOCRBench() bool {
 	key, mc := m.ocr.key, m.ocr.machine
 	m.ocr.mu.Unlock()
 	total, avail := sysinfo.Memory()
-	cands := ocrCandidates(cores, nextMemCap(0, ocrMemSlots(total, avail, ocrSlotMemDefault, m.ocrLive())))
+	cands := ocrBenchCandidates(cores, mc.Logical, nextMemCap(0, ocrMemSlots(total, avail, ocrSlotMemDefault, m.ocrLive())))
 	fail := func(why string) bool {
 		m.ocr.mu.Lock()
 		m.ocr.benchFail = why
@@ -378,7 +403,7 @@ func (m *Manager) runOCRBench() bool {
 	if m.ctx.Err() != nil {
 		return false
 	}
-	b.Machine, b.CPU, b.Cores, b.MemGB = key, mc.CPU, mc.Cores, float64(mc.MemTotal)/(1<<30)
+	b.Machine, b.CPU, b.Cores, b.Logical, b.MemGB = key, mc.CPU, mc.Cores, mc.Logical, float64(mc.MemTotal)/(1<<30)
 	if _, ok := b.best(); !ok {
 		return fail(b.Err)
 	}
@@ -483,8 +508,12 @@ func (m *Manager) ocrStatus() (threads int, perMin float64, note string) {
 	m.ocr.mu.Lock()
 	defer m.ocr.mu.Unlock()
 	note = m.ocr.benchNote
-	if note == "" && m.ocr.tail > 0 {
+	switch {
+	case note != "":
+	case m.ocr.tail > 0:
 		note = fmt.Sprintf("队列已空，正在识别的文件每个改用 %d 线程", m.ocr.tail)
+	case m.ocr.userBusy:
+		note = "正在用电脑，OCR 只用一半核心"
 	}
 	return p.threads, m.ocr.rate.perMin(), note
 }

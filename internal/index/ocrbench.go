@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,7 @@ type OCRBench struct {
 	Machine string         `json:"machine"` // 电脑（处理器、核心数、内存）连同 OCR 组件的指纹
 	CPU     string         `json:"cpu"`
 	Cores   int            `json:"cores"`
+	Logical int            `json:"logical,omitempty"` // 逻辑处理器数（多于 Cores 表示有超线程）
 	MemGB   float64        `json:"memGB"`
 	At      int64          `json:"at"`     // 测速时间（Unix 秒）
 	Budget  int            `json:"budget"` // 测速时的线程预算（物理核心数）
@@ -60,6 +62,55 @@ func (b *OCRBench) best() (OCRBenchPlan, bool) {
 	return b.Plans[b.Best], true
 }
 
+// smt：这种搭配的总线程数超过物理核心数 cores（用上了超线程）。
+func (p OCRBenchPlan) smt(cores int) bool { return p.Procs*p.Threads > cores }
+
+// curves 由测速结果得到两条效率曲线：总线程数不超过物理核心的搭配（phys）和用上超线程的搭配（smt）。
+func (b *OCRBench) curves() (phys, smt effCurve) {
+	if b == nil {
+		return nil, nil
+	}
+	eff := [2]map[int]float64{{}, {}}
+	for _, p := range b.Plans {
+		if p.Err != "" || p.PerMin <= 0 || p.Procs < 1 || p.Threads < 1 {
+			continue
+		}
+		k := 0
+		if p.smt(b.Budget) {
+			k = 1
+		}
+		eff[k][p.Threads] = max(eff[k][p.Threads], p.PerMin/float64(p.Procs*p.Threads))
+	}
+	curve := func(m map[int]float64) effCurve {
+		var c effCurve
+		for t, e := range m {
+			c = append(c, effPoint{t, e})
+		}
+		sort.Slice(c, func(i, j int) bool { return c[i].threads < c[j].threads })
+		return c
+	}
+	return curve(eff[0]), curve(eff[1])
+}
+
+// smtFaster：用上超线程的搭配实测比只用物理核心的最快搭配快 5% 以上（差不多时不用：进程多、占内存、发热）。
+func (b *OCRBench) smtFaster() bool {
+	if b == nil || b.Logical <= b.Budget {
+		return false
+	}
+	var phys, smt float64
+	for _, p := range b.Plans {
+		if p.Err != "" {
+			continue
+		}
+		if p.smt(b.Budget) {
+			smt = max(smt, p.PerMin)
+		} else {
+			phys = max(phys, p.PerMin)
+		}
+	}
+	return phys > 0 && smt > phys*1.05
+}
+
 // Summary 是写进日志、诊断信息的一行说明。
 func (b *OCRBench) Summary() string {
 	var parts []string
@@ -77,18 +128,25 @@ func (b *OCRBench) Summary() string {
 	s := strings.Join(parts, "，")
 	if bp, ok := b.best(); ok {
 		s += "；最快：" + bp.plan().String()
+		if b.Logical > b.Budget {
+			s += map[bool]string{true: "（超线程对 OCR 有用）", false: "（超线程对 OCR 没有明显帮助，只用物理核心）"}[b.smtFaster()]
+		}
 	}
 	return s
 }
 
-// ocrMachineKey 是电脑连同 OCR 组件的指纹：处理器、核心数、内存（GB）、OCR 程序及其参数。
+// ocrBenchVersion：测速方法变了（比较的搭配不同）时加一，各台电脑都重新测一次。
+// 2：0.2.4 起有超线程的电脑还比较用上全部逻辑处理器的搭配。
+const ocrBenchVersion = 2
+
+// ocrMachineKey 是电脑连同 OCR 组件的指纹：处理器、核心数、内存（GB）、OCR 程序及其参数、测速方法。
 // 任何一项变了（换了电脑、加了内存、升级了 OCR 组件）都要重新测速。
 func ocrMachineKey(m sysinfo.Machine, c extract.OCRConfig) string {
 	comp := filepath.Base(c.Command)
 	if st, err := os.Stat(c.Command); err == nil {
 		comp += fmt.Sprintf("/%d", st.Size())
 	}
-	s := fmt.Sprintf("%s|%d|%d|%d|%s|%s", m.CPU, m.Cores, m.Logical, (m.MemTotal+(1<<29))>>30, comp, strings.Join(c.Args, " "))
+	s := fmt.Sprintf("%s|%d|%d|%d|%s|%s|b%d", m.CPU, m.Cores, m.Logical, (m.MemTotal+(1<<29))>>30, comp, strings.Join(c.Args, " "), ocrBenchVersion)
 	h := sha1.Sum([]byte(s))
 	return hex.EncodeToString(h[:8])
 }
@@ -254,12 +312,12 @@ func BenchOCR(ctx context.Context, pool *worker.Pool, cfg extract.OCRConfig, pro
 	mc := sysinfo.This()
 	total, avail := sysinfo.Memory()
 	budget := mc.Cores
-	cands := ocrCandidates(budget, nextMemCap(0, ocrMemSlots(total, avail, ocrSlotMemDefault, 0)))
+	cands := ocrBenchCandidates(budget, mc.Logical, nextMemCap(0, ocrMemSlots(total, avail, ocrSlotMemDefault, 0)))
 	opts := extract.DefaultOptions()
 	opts.OCR = cfg
 	b := runOCRBench(ctx, budget, cands, poolBench(pool, opts, sample), func(i, n int, p ocrPlan) {
 		progress(fmt.Sprintf("第 %d/%d 种：%s", i+1, n, p))
 	})
-	b.Machine, b.CPU, b.Cores, b.MemGB = ocrMachineKey(mc, cfg), mc.CPU, mc.Cores, float64(mc.MemTotal)/(1<<30)
+	b.Machine, b.CPU, b.Cores, b.Logical, b.MemGB = ocrMachineKey(mc, cfg), mc.CPU, mc.Cores, mc.Logical, float64(mc.MemTotal)/(1<<30)
 	return b, nil
 }

@@ -13,7 +13,8 @@ import (
 // 几个进程各识别各的页几乎没有损耗，一个进程里的几个线程却要互相等待，所以通常「每核一个进程」最快。
 // 但最快的搭配因电脑而异（核心数、大小核、缓存、内存带宽），所以在每台电脑上用随包的样张实测
 // （ocrbench.go），结果按电脑保存；进程数还受内存限制（每个 OCR 进程连同它的解析进程占几百 MB）。
-// 线程预算：只剩 OCR 时用全部物理核心；普通文件、老格式还在处理时用一半。
+// 线程预算：只剩 OCR 时用全部物理核心（实测超线程更快时用全部逻辑处理器）；普通文件、老格式还在处理，
+// 或者用户正在用电脑时，用物理核心的一半。
 
 type ocrPlan struct{ procs, threads int }
 
@@ -24,37 +25,100 @@ const (
 	ocrSlotMemDefault = 600 << 20 // 还没实测时，每个 OCR 名额（OCR 进程 + 解析进程）按这么多内存估算
 )
 
-// ocrCandidates 返回要实测的搭配：线程预算 budget，最多 maxProcs 个进程。每个进程 1、2、4、8 个线程，
+// ocrCandidates 返回线程预算 budget 下要实测的搭配：最多 maxProcs 个进程。每个进程 1、2、4、8 个线程，
 // 预算不超过 8 时再加「1 个进程用全部线程」（以前的默认搭配也在其中，实测不更快就不会换）。
 // 进程数受上限限制时，每个进程多分线程，把预算用满。
 func ocrCandidates(budget, maxProcs int) []ocrPlan {
 	budget, maxProcs = max(1, budget), max(1, min(maxProcs, ocrMaxProcs))
 	var out []ocrPlan
-	add := func(t int) {
-		p := min(max(1, budget/t), maxProcs)
-		c := ocrPlan{p, max(1, budget/p)}
-		for _, x := range out {
-			if x == c {
-				return
-			}
-		}
-		out = append(out, c)
-	}
 	for t := 1; t <= budget && t <= 8; t *= 2 {
-		add(t)
+		out = appendPlan(out, fillPlan(t, budget, maxProcs))
 	}
 	if budget <= 8 {
-		add(budget)
+		out = appendPlan(out, fillPlan(budget, budget, maxProcs))
 	}
 	return out
 }
 
-// ocrPlanFor 按实测最快的「每个进程几个线程」（best）给出线程预算 budget 下的搭配：
-// 进程数 ≈ 预算 ÷ 线程数（四舍五入），不超过 maxProcs，每个进程的线程数把预算分完。
-func ocrPlanFor(budget, maxProcs, best int) ocrPlan {
-	budget, maxProcs, best = max(1, budget), max(1, maxProcs), max(1, best)
-	p := min(max(1, (budget+best/2)/best), maxProcs, budget)
+// fillPlan：每个进程 t 个线程、用满预算 budget 的搭配；进程数超过 maxProcs 时每个进程多分线程。
+func fillPlan(t, budget, maxProcs int) ocrPlan {
+	p := min(max(1, budget/t), maxProcs)
 	return ocrPlan{p, max(1, budget/p)}
+}
+
+// appendPlan 把 c 加进 out（已有的不重复加）。
+func appendPlan(out []ocrPlan, c ocrPlan) []ocrPlan {
+	for _, x := range out {
+		if x == c {
+			return out
+		}
+	}
+	return append(out, c)
+}
+
+// ocrBenchCandidates 返回测速要比较的搭配：线程预算为物理核心数 cores 的各种搭配；有超线程（逻辑处理器
+// logical 多于物理核心）时，再加两种用上全部逻辑处理器的（每个进程 1 线程、2 线程），看超线程对 OCR 有没有用。
+func ocrBenchCandidates(cores, logical, maxProcs int) []ocrPlan {
+	out := ocrCandidates(cores, maxProcs)
+	maxProcs = max(1, min(maxProcs, ocrMaxProcs))
+	if logical > cores {
+		for _, t := range []int{1, 2} {
+			if c := fillPlan(t, logical, maxProcs); c.procs*c.threads > cores {
+				out = appendPlan(out, c)
+			}
+		}
+	}
+	return out
+}
+
+// effPoint：每个进程 threads 个线程时，平均每个线程每分钟识别 perThread 页（由测速结果算出）。
+type effPoint struct {
+	threads   int
+	perThread float64
+}
+
+// effCurve 是按线程数排好序的实测效率，用来估算没测过的搭配的速度：没测过的线程数按相邻两个测过的线性
+// 插值；比测过的都少时取最少的那个；比测过的都多时按「多出来的线程不再加快」估计（偏保守）。
+type effCurve []effPoint
+
+func (c effCurve) at(t int) float64 {
+	switch {
+	case len(c) == 0:
+		return 0
+	case t <= c[0].threads:
+		return c[0].perThread
+	}
+	for i := 1; i < len(c); i++ {
+		if t <= c[i].threads {
+			a, b := c[i-1], c[i]
+			return a.perThread + (b.perThread-a.perThread)*float64(t-a.threads)/float64(b.threads-a.threads)
+		}
+	}
+	last := c[len(c)-1]
+	return last.perThread * float64(last.threads) / float64(t)
+}
+
+// bestPlan 返回线程预算 budget、最多 maxProcs 个进程时估计最快的搭配：每个进程 t 个线程时开
+// min(budget÷t, maxProcs) 个进程，速度 ≈ 总线程数 × at(t)；差不多快时选进程多的（各识别各的，最稳）。
+// 没有实测数据时每个进程 1 线程（进程数受限时每个进程多分线程，把预算用满）。
+//
+// 以前按「最快的那种搭配每个进程几个线程」换算：比如 6 核的电脑实测 3 个进程 × 2 线程最快，普通文件
+// 还在处理、预算是 3 时换算成 2 个进程 × 1 线程，只用了 2 个线程。现在比较 3×1、1×3 等，把预算用满。
+func (c effCurve) bestPlan(budget, maxProcs int) ocrPlan {
+	budget, maxProcs = max(1, budget), max(1, maxProcs)
+	if len(c) == 0 {
+		p := min(budget, maxProcs)
+		return ocrPlan{p, max(1, budget/p)}
+	}
+	var best ocrPlan
+	bestRate := -1.0
+	for t := 1; t <= budget; t++ {
+		p := min(budget/t, maxProcs)
+		if r := float64(p*t) * c.at(t); r > bestRate*1.001 {
+			best, bestRate = ocrPlan{p, t}, r
+		}
+	}
+	return best
 }
 
 // ocrManualPlan：手动设了进程数时，每个进程的线程数 = 核心数 ÷ 进程数（不超额）。

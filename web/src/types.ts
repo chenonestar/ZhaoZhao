@@ -309,7 +309,7 @@ export interface OCRBenchPlan {
 
 // 本机的 OCR 测速情况（每台电脑测一次，按电脑保存）。
 export interface OCRBenchInfo {
-  bench: { cpu: string; cores: number; memGB: number; at: number; budget: number; plans: OCRBenchPlan[] | null; best: number } | null;
+  bench: { cpu: string; cores: number; logical?: number; memGB: number; at: number; budget: number; plans: OCRBenchPlan[] | null; best: number } | null;
   running: boolean;
   asked: boolean;
   note?: string;

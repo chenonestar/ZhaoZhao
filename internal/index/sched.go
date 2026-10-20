@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,6 +57,7 @@ type job struct {
 
 	pagesDone, pagesTotal int         // OCR：已识别的页数、总页数（由进度消息得到，用于实测每分钟页数）
 	ctl                   *worker.Ctl // OCR 识别期间不为 nil：可以调整之后识别用的线程数（队列收尾时）
+	ocrThreads            int         // OCR：开始识别时每个进程的线程数
 }
 
 // lane 是一条处理通道。普通文件、老格式转换、OCR 各一条，各有自己的派发器和提取协程，三条同时进行：
@@ -69,7 +71,9 @@ type lane struct {
 
 	// 以下由 schedState.mu 保护
 	n, target, running int
-	durs               []time.Duration // 最近完成的单个文件耗时，估算剩余时间用
+	durs               []time.Duration // 最近完成的单个文件耗时，还没有完成足够多的文件时估算剩余时间用
+	done               []time.Duration // 最近一小时里每个文件完成的时间（awake），按实际速度估算剩余时间
+	busySince          time.Duration   // 这次开始忙的时间（awake）：之前空闲（暂停、没有文件）的时间不算进速度
 
 	wantWork atomic.Bool // 派发器手里有可处理的文件
 }
@@ -339,8 +343,11 @@ func (m *Manager) laneWorker(l *lane) {
 			return
 		}
 		s.mu.Lock()
-		l.running++
 		j.since = awake.Now()
+		if l.running == 0 && (len(l.done) == 0 || j.since-l.done[len(l.done)-1] > laneIdleGap) {
+			l.busySince, l.done = j.since, l.done[:0]
+		}
+		l.running++
 		s.mu.Unlock()
 		m.activity()
 		m.runJob(j)
@@ -352,6 +359,12 @@ func (m *Manager) laneWorker(l *lane) {
 			if len(l.durs) > 50 {
 				l.durs = l.durs[len(l.durs)-50:]
 			}
+			now := awake.Now()
+			l.done = append(l.done, now)
+			if l.done[0] < now-etaWindow {
+				i := sort.Search(len(l.done), func(i int) bool { return l.done[i] >= now-etaWindow })
+				l.done = append(l.done[:0], l.done[i:]...)
+			}
 		} else {
 			delete(s.inflight, j.f.ID)
 		}
@@ -361,8 +374,28 @@ func (m *Manager) laneWorker(l *lane) {
 	}
 }
 
-// laneEta 估算一条通道把 queue 个文件处理完还要多久：最近单个文件的平均耗时 × 数量 ÷ 并发数。
-// 还没有处理过文件时无法估算，返回 0。
+// 剩余时间按最近一小时实际完成了多少个文件估算（throughputEta）：自然算进了并发数、文件大小、排队收尾时
+// 进程空闲等因素。以前按「最近单个文件的平均耗时 × 数量 ÷ 并发数」估算，OCR 的大文件排在后面、
+// 并发数又时常变化，估计的往往只有实际的一半。
+const (
+	etaWindow   = time.Hour
+	laneIdleGap = time.Minute // 通道没有文件在处理、也有这么久没完成文件：算作空闲过，重新开始计速度
+)
+
+// throughputEta：从 since（这次开始忙的时间）和一小时前两者中较晚的时候起到 now，完成了 n 个文件，
+// 按这个速度算 queue 个文件还要多少秒。完成的文件太少（不到 5 个或不到 2 分钟）时返回 -1。
+func throughputEta(done []time.Duration, since, now time.Duration, queue int64) int64 {
+	start := max(since, now-etaWindow)
+	n := len(done) - sort.Search(len(done), func(i int) bool { return done[i] >= start })
+	span := now - start
+	if n < 5 || span < 2*time.Minute {
+		return -1
+	}
+	return int64(float64(queue) * span.Seconds() / float64(n))
+}
+
+// laneEta 估算一条通道把 queue 个文件处理完还要多久（秒）：按最近实际完成的速度；刚开始、完成的文件还少时，
+// 按最近单个文件的平均耗时 × 数量 ÷ 并发数。还没有处理过文件时无法估算，返回 0。
 func (m *Manager) laneEta(p int, queue int64) int64 {
 	s := &m.sched
 	l := s.lanes[p]
@@ -371,6 +404,9 @@ func (m *Manager) laneEta(p int, queue int64) int64 {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if eta := throughputEta(l.done, l.busySince, awake.Now(), queue); eta >= 0 {
+		return eta
+	}
 	if len(l.durs) < 3 || l.target < 1 {
 		return 0
 	}
@@ -676,7 +712,7 @@ func (m *Manager) runJob(j *job) {
 		m.ocrTailOff()
 		ctl = &worker.Ctl{}
 		s.mu.Lock()
-		j.ctl = ctl
+		j.ctl, j.ocrThreads = ctl, opts.OCR.Threads
 		s.mu.Unlock()
 	}
 	res := pool.RunCtl(m.ctx, src, f.Ext, opts, t, func(p string) { m.setProgress(j, p) }, ctl)

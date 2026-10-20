@@ -39,6 +39,8 @@ func TestMain(m *testing.M) {
 		fakeOCR(os.Getenv("ZZ_FAKE_OCR"))
 		os.Exit(0)
 	}
+	// 当作没人在用电脑（OCR 不因此减半），需要时由测试换掉
+	userIdleTime = func() time.Duration { return time.Hour }
 	// OCR 测速默认用模拟的（立即返回，进程越多越快），需要时由测试换掉
 	newOCRBenchRunner = func(m *Manager, pool *worker.Pool, sample string) ocrBenchRunner {
 		return func(ctx context.Context, p ocrPlan, pages int) (float64, uint64, error) {
