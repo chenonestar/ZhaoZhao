@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
-import type { Config, DiagState, FailedFilter, FailedItem, FailedSummary, HotkeyState, LegacyTestState, OCRBenchInfo, ProblemCat, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
+import type { Config, DiagState, FailedFilter, FailedFolders, FailedItem, FailedSummary, HotkeyState, LegacyTestState, OCRBenchInfo, ProblemCat, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
 import { copyText, fmtDuration, fmtSize, fmtTime, folderOf } from "./util";
 import { FolderPicker } from "./FolderPicker";
 import { Help } from "./Help";
@@ -309,6 +309,8 @@ function FailedTab({ refresh }: { refresh: () => void }) {
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(""); // 正在进行的操作（重试、导出、排除）：按钮暂时不能再点
+  const [folders, setFolders] = useState<FailedFolders | null>(null);
+  const [allFolders, setAllFolders] = useState(false);
   const seq = useRef(0);
   const end = useRef<HTMLDivElement>(null);
 
@@ -334,6 +336,12 @@ function FailedTab({ refresh }: { refresh: () => void }) {
       .finally(() => { if (n === seq.current) setLoading(false); });
   };
   useEffect(() => { reload(f); }, [f]);
+  // 选了索引根：按文件夹查看（当前文件夹下一级子文件夹各有多少）
+  useEffect(() => {
+    setAllFolders(false);
+    if (!f.root) { setFolders(null); return; }
+    api.failedFolders(f).then(setFolders).catch(() => setFolders(null));
+  }, [f]);
   // 关键字输入停顿后再查
   useEffect(() => {
     const t = setTimeout(() => { if (qInput !== f.q) setF({ ...f, q: qInput }); }, 300);
@@ -407,6 +415,41 @@ function FailedTab({ refresh }: { refresh: () => void }) {
           )}
         </div>
       </div>
+      {sum.roots.some((r) => r.count > 0 || r.id === f.root) && (
+        <div className="failed-facet"><span className="dim">位置</span>
+          <div className="chips">
+            <span className={"chip" + (!f.root ? " on" : "")} onClick={() => setF({ ...f, root: undefined, dir: undefined })}>全部索引根</span>
+            {sum.roots.filter((r) => r.count > 0 || r.id === f.root).map((r) => (
+              <span key={r.id} className={"chip" + (f.root === r.id ? " on" : "")} title={r.name}
+                onClick={() => setF({ ...f, root: r.id, dir: undefined })}>{r.name} {r.count}</span>
+            ))}
+          </div>
+        </div>
+      )}
+      {f.root && folders && (() => {
+        const root = sum.roots.find((r) => r.id === f.root);
+        const base = root?.rel ?? "";
+        const rest = folders.dir.length > base.length ? folders.dir.slice(base ? base.length + 1 : 0).split("/") : [];
+        const go = (i: number) => setF({ ...f, dir: [base, ...rest.slice(0, i)].filter(Boolean).join("/") || undefined });
+        const list = folders.folders.length > 40 && !allFolders ? folders.folders.slice(0, 40) : folders.folders;
+        return (
+          <div className="failed-facet"><span className="dim">文件夹</span>
+            <div className="chips">
+              <span className="crumbs">
+                <a onClick={() => go(0)}>{root?.name}</a>
+                {rest.map((seg, i) => <span key={i}> › <a onClick={() => go(i + 1)}>{seg}</a></span>)}
+              </span>
+              {folders.here > 0 && folders.folders.length > 0 && <span className="dim small">（直接在这里的 {folders.here} 个）</span>}
+              {list.map((x) => (
+                <span key={x.name} className="chip" onClick={() => setF({ ...f, dir: (folders.dir ? folders.dir + "/" : "") + x.name })}>📁 {x.name} {x.count}</span>
+              ))}
+              {folders.folders.length > 40 && (
+                <span className="chip" onClick={() => setAllFolders(!allFolders)}>{allFolders ? "收起" : `更多（${folders.folders.length - 40}）`}</span>
+              )}
+            </div>
+          </div>
+        );
+      })()}
       <div className="btns">
         <button disabled={!shown || isMeta || !!busy}
           title={isMeta ? "这些文件按设置只索引文件名。放宽设置（大小上限、OCR 等）后在「索引」页点「扫描」会自动处理" : "把筛选出的全部文件重新排队处理"}

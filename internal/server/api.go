@@ -162,12 +162,30 @@ func (s *Server) routes(mux *http.ServeMux) {
 		writeJSON(w, out)
 	})
 	h("/api/failed/summary", func(w http.ResponseWriter, r *http.Request) {
-		cats, exts, err := s.M.DB.ProblemSummary(problemFilter(r.URL.Query()))
+		f := problemFilter(r.URL.Query())
+		cats, exts, err := s.M.DB.ProblemSummary(f)
 		if err != nil {
 			writeErr(w, 500, err)
 			return
 		}
-		writeJSON(w, map[string]any{"cats": cats, "exts": exts})
+		roots, err := s.M.ProblemRoots(f)
+		if err != nil {
+			writeErr(w, 500, err)
+			return
+		}
+		writeJSON(w, map[string]any{"cats": cats, "exts": exts, "roots": roots})
+	})
+	// 按文件夹查看：某个索引根里，文件夹 dir 下一级子文件夹各有多少（dir 为空从索引根开始）
+	h("/api/failed/folders", func(w http.ResponseWriter, r *http.Request) {
+		dir, fs, here, err := s.M.ProblemFolders(problemFilter(r.URL.Query()))
+		if err != nil {
+			writeErr(w, 400, err)
+			return
+		}
+		if fs == nil {
+			fs = []store.FolderCount{}
+		}
+		writeJSON(w, map[string]any{"dir": dir, "folders": fs, "here": here})
 	})
 	// 重试：给了 filter 就重试符合条件的全部文件，否则重试 ids（ids 为空：全部失败的）
 	h("/api/failed/retry", s.post(func(r *http.Request) (any, error) {
@@ -550,5 +568,6 @@ func (s *Server) handleFS(w http.ResponseWriter, r *http.Request) {
 }
 
 func problemFilter(q url.Values) store.ProblemFilter {
-	return store.ProblemFilter{Cat: q.Get("cat"), Ext: q.Get("ext"), Q: q.Get("q")}
+	root, _ := strconv.ParseInt(q.Get("root"), 10, 64)
+	return store.ProblemFilter{Cat: q.Get("cat"), Ext: q.Get("ext"), Q: q.Get("q"), Root: root, Dir: q.Get("dir")}
 }

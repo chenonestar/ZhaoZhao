@@ -1,5 +1,5 @@
 import type {
-  Config, FailedFilter, FailedPage, FailedSummary, FsListing, DiagState, HotkeyState, LegacyTestState, Notice, OCRBenchInfo, SpaceDetail, Preview, Saved, SearchOpts, SearchResponse, Status,
+  Config, FailedFilter, FailedPage, FailedSummary, FsListing, DiagState, FailedFolders, HotkeyState, LegacyTestState, Notice, OCRBenchInfo, SpaceDetail, Preview, Saved, SearchOpts, SearchResponse, Status,
 } from "./types";
 
 export class ApiError extends Error {
@@ -67,6 +67,7 @@ export const api = {
   deleteVolume: (id: string) => post("/api/volumes/delete", { id }),
   failed: (f: FailedFilter, after: number, limit = 200) => call<FailedPage>("/api/failed?" + qs({ ...f, after, limit })),
   failedSummary: (f: FailedFilter) => call<FailedSummary>("/api/failed/summary?" + qs({ ...f })),
+  failedFolders: (f: FailedFilter) => call<FailedFolders>("/api/failed/folders?" + qs({ ...f })),
   retry: (ids: number[]) => post("/api/failed/retry", { ids }),
   retryFiltered: (filter: FailedFilter) => post<{ count: number }>("/api/failed/retry", { filter }),
   exportFailed: (f: FailedFilter) => post<{ path: string; count: number }>("/api/failed/export", f),

@@ -196,3 +196,43 @@ func TestRetryProblems(t *testing.T) {
 		t.Fatalf("全部重试: %v", err)
 	}
 }
+
+// 按索引根、文件夹筛选；统计各索引根的数量、某个文件夹下一级子文件夹的数量（中文文件夹名按字符切分）。
+func TestProblemRootsAndFolders(t *testing.T) {
+	d, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	add := func(root int64, rel string) {
+		if _, err := d.W.Exec(`INSERT INTO files(root_id,volume_id,rel_path,name,ext,state,err) VALUES(?,'v',?,'n','pdf',2,'文件已损坏')`, root, rel); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, rel := range []string{"资料/合同/a.pdf", "资料/合同/2024/b.pdf", "资料/发票/c.pdf", "资料/d.pdf", "其他/e.pdf"} {
+		add(1, rel)
+	}
+	add(2, "网盘/f.pdf")
+	rc, err := d.ProblemRoots(ProblemFilter{})
+	if err != nil || len(rc) != 2 || rc[0].Count+rc[1].Count != 6 {
+		t.Fatalf("%+v %v", rc, err)
+	}
+	fs, here, err := d.ProblemFolders(ProblemFilter{Root: 1})
+	if err != nil || here != 0 || len(fs) != 2 || fs[0] != (FolderCount{"资料", 4}) || fs[1] != (FolderCount{"其他", 1}) {
+		t.Fatalf("最上层：%+v %d %v", fs, here, err)
+	}
+	fs, here, _ = d.ProblemFolders(ProblemFilter{Root: 1, Dir: "资料"})
+	if here != 1 || len(fs) != 2 || fs[0] != (FolderCount{"合同", 2}) || fs[1] != (FolderCount{"发票", 1}) {
+		t.Fatalf("资料：%+v %d", fs, here)
+	}
+	ps, _ := d.ListProblems(ProblemFilter{Root: 1, Dir: "资料/合同"}, 0, 100)
+	if len(ps) != 2 {
+		t.Fatalf("资料/合同 里应有 2 个（含子文件夹）：%d", len(ps))
+	}
+	if n, _ := d.RetryProblems(ProblemFilter{Root: 1, Dir: "资料/发票"}); n != 1 {
+		t.Fatalf("重试这个文件夹：%d", n)
+	}
+	if _, _, err := d.ProblemFolders(ProblemFilter{}); err == nil {
+		t.Fatal("没选索引根应报错")
+	}
+}

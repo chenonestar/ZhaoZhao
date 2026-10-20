@@ -205,6 +205,15 @@ export interface FailedFilter {
   cat: string;
   ext: string;
   q: string;
+  root?: number; // 索引根
+  dir?: string; // 文件夹（卷内相对路径，含子文件夹）
+}
+
+// 失败列表按文件夹查看：dir 下一级子文件夹各有多少，here 是直接放在 dir 里的
+export interface FailedFolders {
+  dir: string;
+  folders: { name: string; count: number }[];
+  here: number;
 }
 
 export interface ProblemCat {
@@ -217,6 +226,7 @@ export interface ProblemCat {
 export interface FailedSummary {
   cats: ProblemCat[];
   exts: { ext: string; count: number }[];
+  roots: { id: number; name: string; rel: string; count: number }[];
 }
 
 export interface Config {

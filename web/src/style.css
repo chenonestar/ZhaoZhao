@@ -147,6 +147,9 @@ table.grid .actions button { margin-left: 4px; padding: 2px 8px; }
 .failed-facet { display: flex; gap: 10px; align-items: flex-start; margin: 6px 0; }
 .failed-facet > span { width: 56px; flex: none; padding-top: 3px; font-size: 12.5px; }
 .failed-facet .chip { font-size: 12.5px; }
+.crumbs { font-size: 12.5px; padding: 3px 4px 0 0; }
+.crumbs a { color: var(--accent); cursor: pointer; }
+.crumbs a:hover { text-decoration: underline; }
 .failed table.grid { table-layout: fixed; }
 .failed table.grid th:first-child { width: 32px; }
 .failed-path > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

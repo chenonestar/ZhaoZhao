@@ -65,9 +65,11 @@ var problemCat = func() string {
 
 // ProblemFilter 是失败列表的筛选条件。
 type ProblemFilter struct {
-	Cat string `json:"cat"` // ""：失败和已加密；"meta"：全部仅文件名；其他：某一类原因
-	Ext string `json:"ext"` // 扩展名；"."：没有扩展名；""：不限
-	Q   string `json:"q"`   // 路径关键字
+	Cat  string `json:"cat"`            // ""：失败和已加密；"meta"：全部仅文件名；其他：某一类原因
+	Ext  string `json:"ext"`            // 扩展名；"."：没有扩展名；""：不限
+	Q    string `json:"q"`              // 路径关键字
+	Root int64  `json:"root,omitempty"` // 索引根；0 表示不限
+	Dir  string `json:"dir,omitempty"`  // 只看这个文件夹（卷内相对路径，含子文件夹）；要同时指定 Root
 }
 
 // ProblemCat 是一类原因及其文件数。Meta 表示属于「仅文件名」。
@@ -103,8 +105,23 @@ func pathLike(q string) string {
 }
 
 // where 返回筛选条件。总是带 state>=2，好让查询用上部分索引 files_problem。
-// withCat、withExt 为 false 时不按类别、扩展名筛选（统计各类别、各扩展名的数量时用）。
+// withCat、withExt 为 false 时不按类别、扩展名筛选（统计各类别、各扩展名的数量时用）；
+// 索引根、文件夹另由 whereRoot 加上（统计各索引根的数量时不加）。
 func (f ProblemFilter) where(withCat, withExt bool) (string, []any) {
+	w, args := f.whereNoRoot(withCat, withExt)
+	if f.Root > 0 {
+		w += " AND root_id=?"
+		args = append(args, f.Root)
+		if f.Dir != "" {
+			// 「dir/」开头的都在这个文件夹里（"0" 紧跟在 "/" 后面）
+			w += " AND rel_path>=? AND rel_path<?"
+			args = append(args, f.Dir+"/", f.Dir+"0")
+		}
+	}
+	return w, args
+}
+
+func (f ProblemFilter) whereNoRoot(withCat, withExt bool) (string, []any) {
 	w := []string{"state>=2"}
 	var args []any
 	if withCat {
@@ -144,6 +161,74 @@ func inGroup(cat, key string) bool {
 		return catState(key) == StateMetaOnly
 	}
 	return cat == key
+}
+
+// RootCount 是一个索引根里符合条件的文件数。
+type RootCount struct {
+	Root  int64 `json:"root"`
+	Count int64 `json:"count"`
+}
+
+// ProblemRoots 统计各索引根里符合条件（类别、扩展名、关键字；不看索引根和文件夹）的文件数。
+func (d *DB) ProblemRoots(f ProblemFilter) ([]RootCount, error) {
+	w, args := f.whereNoRoot(true, true)
+	rows, err := d.R.Query(`SELECT root_id, count(*) FROM files INDEXED BY files_problem WHERE `+w+` GROUP BY root_id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RootCount
+	for rows.Next() {
+		var rc RootCount
+		if err := rows.Scan(&rc.Root, &rc.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, rc)
+	}
+	return out, rows.Err()
+}
+
+// FolderCount 是文件夹 f.Dir 下一级子文件夹里（含更深的子文件夹）符合条件的文件数。
+type FolderCount struct {
+	Name  string `json:"name"`
+	Count int64  `json:"count"`
+}
+
+// ProblemFolders 按 f.Dir（要指定 Root；空表示卷的最上层）的下一级子文件夹统计符合条件的文件数，
+// here 是直接放在 f.Dir 里的文件数。子文件夹按文件数从多到少。
+func (d *DB) ProblemFolders(f ProblemFilter) (folders []FolderCount, here int64, err error) {
+	if f.Root <= 0 {
+		return nil, 0, fmt.Errorf("要先选索引根")
+	}
+	w, args := f.where(true, true)
+	start := 1 // substr 从 1 起，文本按字符计：跳过「dir/」
+	if f.Dir != "" {
+		start = len([]rune(f.Dir)) + 2
+	}
+	rows, err := d.R.Query(`SELECT CASE WHEN instr(rest,'/')>0 THEN substr(rest,1,instr(rest,'/')-1) ELSE '' END AS seg, count(*)
+FROM (SELECT substr(rel_path, ?) AS rest FROM files INDEXED BY files_problem WHERE `+w+`) GROUP BY seg`, append([]any{start}, args...)...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var fc FolderCount
+		if err := rows.Scan(&fc.Name, &fc.Count); err != nil {
+			return nil, 0, err
+		}
+		if fc.Name == "" {
+			here = fc.Count
+			continue
+		}
+		folders = append(folders, fc)
+	}
+	sort.Slice(folders, func(i, j int) bool {
+		if folders[i].Count != folders[j].Count {
+			return folders[i].Count > folders[j].Count
+		}
+		return folders[i].Name < folders[j].Name
+	})
+	return folders, here, rows.Err()
 }
 
 // ProblemSummary 统计各类原因和各扩展名的文件数：类别数按扩展名、关键字筛选，扩展名数按类别、关键字筛选。

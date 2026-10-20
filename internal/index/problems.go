@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -82,4 +83,52 @@ func (m *Manager) ExportProblems(f store.ProblemFilter) (string, int, error) {
 		return "", 0, err
 	}
 	return p, n, nil
+}
+
+// ProblemRoot 是失败列表里一个索引根的文件数。
+type ProblemRoot struct {
+	ID    int64  `json:"id"`
+	Name  string `json:"name"` // 显示用的路径
+	Rel   string `json:"rel"`  // 卷内相对路径：按文件夹查看时从这里开始
+	Count int64  `json:"count"`
+}
+
+// ProblemRoots 返回各索引根里符合条件的文件数（按索引根的显示路径排序）。
+func (m *Manager) ProblemRoots(f store.ProblemFilter) ([]ProblemRoot, error) {
+	counts, err := m.DB.ProblemRoots(f)
+	if err != nil {
+		return nil, err
+	}
+	n := map[int64]int64{}
+	for _, c := range counts {
+		n[c.Root] = c.Count
+	}
+	roots, err := m.DB.ListRoots()
+	if err != nil {
+		return nil, err
+	}
+	out := []ProblemRoot{}
+	for _, r := range roots {
+		out = append(out, ProblemRoot{ID: r.ID, Name: m.rootDisplay(r), Rel: r.RelPath, Count: n[r.ID]})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// ProblemFolders 按文件夹统计（f.Root 必填；f.Dir 为空时从索引根所在的文件夹开始），返回实际统计的文件夹。
+func (m *Manager) ProblemFolders(f store.ProblemFilter) (dir string, folders []store.FolderCount, here int64, err error) {
+	if f.Dir == "" {
+		for _, r := range m.listRootsQuiet() {
+			if r.ID == f.Root {
+				f.Dir = r.RelPath
+			}
+		}
+	}
+	folders, here, err = m.DB.ProblemFolders(f)
+	return f.Dir, folders, here, err
+}
+
+func (m *Manager) listRootsQuiet() []store.Root {
+	rs, _ := m.DB.ListRoots()
+	return rs
 }
