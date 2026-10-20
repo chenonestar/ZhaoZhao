@@ -320,6 +320,9 @@ var upgradeRetries = []struct{ key, cond, what string }{
 		"压缩包里以前读不出的文件（多为 Deflate64 等压缩方式）"},
 	{"retry_sleep_timeouts", `state=2 AND err LIKE '%超时%'`,
 		"以前超时的文件（以前的版本把电脑睡眠的时间也算进时限，醒来后会误判超时）"},
+	{"retry_wic_sniff", `state=2 AND (err LIKE 'TIFF 第 % 页无法解码%' OR err='TIFF 文件已损坏' OR err LIKE '图片无法解码%'
+		OR err LIKE '%RAR signature not found%')`,
+		"以前解不开的 TIFF、BMP 等图片（现在改用 Windows 自带的解码组件）和改过扩展名的压缩包"},
 }
 
 func (m *Manager) runUpgradeRetries() {

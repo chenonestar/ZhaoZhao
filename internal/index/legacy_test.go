@@ -405,3 +405,39 @@ func TestUpgradeRetries(t *testing.T) {
 		t.Fatal("只应做一次")
 	}
 }
+
+// 升级后，以前解不开的 TIFF、BMP 和改过扩展名的压缩包重新排队一次；别的失败不动。
+func TestRetryWICAndSniffOnUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "a.txt"), "x")
+	prov := &fakeProv{}
+	prov.add("v1", "数据", dir, true)
+	e := newEnv(t, prov)
+	if _, err := e.m.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+	errs := map[string]string{
+		"a.tif": "TIFF 第 1 页无法解码: tiff: unsupported feature: compression value 7",
+		"b.tif": "TIFF 第 1 页无法解码: unexpected EOF",
+		"c.bmp": "图片无法解码: bmp: unsupported BMP image",
+		"d.rar": "无法读取: rardecode: RAR signature not found",
+		"e.doc": "文件已损坏",
+	}
+	for name, msg := range errs {
+		if _, err := e.m.DB.W.Exec(`INSERT INTO files(root_id,volume_id,rel_path,inner,name,ext,kind,size,mtime,state,err,prio)
+			SELECT root_id,volume_id,?,'',?,'x','',1,1,2,?,1 FROM files WHERE name='a.txt'`, name, name, msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.m.PauseAll()
+	e.m.DB.W.Exec(`DELETE FROM meta WHERE k='retry_wic_sniff'`)
+	e.m.runUpgradeRetries()
+	for name := range errs {
+		var st int
+		e.m.DB.R.QueryRow(`SELECT state FROM files WHERE rel_path=?`, name).Scan(&st)
+		if want := map[bool]int{true: store.StateFailed, false: store.StatePending}[name == "e.doc"]; st != want {
+			t.Fatalf("%s：state %d，应为 %d", name, st, want)
+		}
+	}
+}

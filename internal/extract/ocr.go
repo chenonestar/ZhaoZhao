@@ -456,6 +456,9 @@ func tiffPagePNG(b []byte, ifd uint32) ([]byte, error) {
 }
 
 // tiffPage 是改了文件头前 8 字节的 TIFF 数据（解码器有 ReadAt 时直接用它，不会整份读进新的缓冲区）。
+//
+// 有些扫描软件写的 TIFF，最后一个条带声明的字节数比文件里实际剩下的多（多为补齐用的空白），
+// Windows 照片查看器照样打开，标准解码器却报「unexpected EOF」：读到文件末尾之后的部分补 0。
 type tiffPage struct {
 	b   []byte
 	hdr [8]byte
@@ -473,18 +476,16 @@ func (t *tiffPage) ReadAt(p []byte, off int64) (int, error) {
 	if off < 8 {
 		copy(p[:n], t.hdr[off:])
 	}
-	if n < len(p) {
-		return n, io.EOF
-	}
-	return n, nil
+	clear(p[n:])
+	return len(p), nil
 }
 
 func (t *tiffPage) Read(p []byte) (int, error) {
+	if rest := int64(len(t.b)) - t.off; rest < int64(len(p)) {
+		p = p[:max(0, rest)]
+	}
 	n, err := t.ReadAt(p, t.off)
 	t.off += int64(n)
-	if err == io.EOF && n > 0 {
-		err = nil
-	}
 	return n, err
 }
 
@@ -543,18 +544,63 @@ func extractImage(p, ext string, opt Options) doc.Result {
 		return nil
 	}
 
+	// viaWindows 用 Windows 自带的解码组件从第 from 页起读图片（Go 的解码器解不开时）。
+	// 返回值：识别了几页、其中几页太小；Windows 也解不开时 err 说明原因。
+	viaWindows := func(from int, multi bool) (pages, small int, err error) {
+		err = wicDecode(p, from, func(i, n int, img *image.Gray) error {
+			pages++
+			if multi {
+				opt.Progress("第 %d/%d 页", i+1, n)
+			}
+			data, err := encodePNG(img)
+			if err != nil {
+				return err
+			}
+			label := ""
+			if multi {
+				label = "第" + strconv.Itoa(i+1) + "页"
+			}
+			if err := ocrOne(label, data, ".png"); err == errTooSmall {
+				small++
+			} else if err != nil {
+				return err
+			}
+			return nil
+		})
+		if err == nil {
+			logx.Debugf("%s：用 Windows 自带的图片解码组件读取（从第 %d 页起）", logx.P(p), from+1)
+		}
+		return
+	}
+	// windowsFallback：Go 的解码器出错（goErr）时改用 Windows 的；Windows 也不行时两个原因都写上。
+	windowsFallback := func(goErr error, from int, multi bool) (pages, small int, res *doc.Result) {
+		pages, small, err := viaWindows(from, multi)
+		switch {
+		case err == nil:
+			return pages, small, nil
+		case errors.Is(err, errNoWIC):
+			return 0, 0, &doc.Result{Status: doc.StatusFailed, Err: goErr.Error()}
+		case errors.Is(err, errOCRDead), errors.Is(err, errOCRTimeout), strings.HasPrefix(err.Error(), "OCR"):
+			return 0, 0, &doc.Result{Status: doc.StatusFailed, Err: err.Error()}
+		}
+		return 0, 0, &doc.Result{Status: doc.StatusFailed, Err: goErr.Error() + "；" + err.Error()}
+	}
+
 	switch ext {
 	case "tif", "tiff":
 		pages := tiffPages(raw)
-		if len(pages) == 0 {
-			return doc.Result{Status: doc.StatusFailed, Err: "TIFF 文件已损坏"}
-		}
-		small := 0
+		total, small := len(pages), 0
 		for i, off := range pages {
 			opt.Progress("第 %d/%d 页", i+1, len(pages))
 			pngData, err := tiffPagePNG(raw, off)
 			if err != nil {
-				return doc.Result{Status: doc.StatusFailed, Err: fmt.Sprintf("TIFF 第 %d 页无法解码: %v", i+1, err)}
+				// JPEG 压缩、2/4 位色深等 Go 的解码器不支持：这一页起改用 Windows 自带的解码组件
+				n, sm, res := windowsFallback(fmt.Errorf("TIFF 第 %d 页无法解码: %v", i+1, err), i, true)
+				if res != nil {
+					return *res
+				}
+				total, small = i+n, small+sm
+				break
 			}
 			err = ocrOne("第"+strconv.Itoa(i+1)+"页", pngData, ".png")
 			if err == errTooSmall {
@@ -565,14 +611,28 @@ func extractImage(p, ext string, opt Options) doc.Result {
 				return doc.Result{Status: doc.StatusFailed, Err: err.Error()}
 			}
 		}
-		if small == len(pages) {
+		if len(pages) == 0 {
+			n, sm, res := windowsFallback(errors.New("TIFF 文件已损坏"), 0, true)
+			if res != nil {
+				return *res
+			}
+			total, small = n, sm
+		}
+		if total > 0 && small == total {
 			return doc.Result{Status: doc.StatusSkipped, Err: ErrTooSmall}
 		}
 	case "webp", "bmp", "gif":
 		// OCR 组件不一定支持这些格式：统一转成 PNG
 		img, _, err := image.Decode(bytes.NewReader(raw))
 		if err != nil {
-			return doc.Result{Status: doc.StatusFailed, Err: "图片无法解码: " + err.Error()}
+			n, small, res := windowsFallback(errors.New("图片无法解码: "+err.Error()), 0, false)
+			if res != nil {
+				return *res
+			}
+			if n > 0 && small == n {
+				return doc.Result{Status: doc.StatusSkipped, Err: ErrTooSmall}
+			}
+			break
 		}
 		data, err := encodePNG(img)
 		if err != nil {
@@ -597,6 +657,12 @@ func extractImage(p, ext string, opt Options) doc.Result {
 }
 
 var errTooSmall = errors.New(ErrTooSmall)
+
+// errNoWIC：没有 Windows 自带的图片解码组件（不是 Windows）。
+var errNoWIC = errors.New("没有 Windows 图片解码组件")
+
+// wicDecode 用 Windows 自带的图片解码组件逐页读图片（测试里可以换掉）。
+var wicDecode = wicDecodeImpl
 
 func imageErr(err error) doc.Result {
 	if err == errTooSmall {
