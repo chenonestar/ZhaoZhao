@@ -40,6 +40,15 @@ type LegacyTestRow struct {
 	LOMs        float64 `json:"loMs"`
 }
 
+// loCrashed：LibreOffice 转换时崩溃或连接断开（与文件内容无关的失败）。
+func loCrashed(r doc.Result) bool {
+	if r.Status != doc.StatusFailed {
+		return false
+	}
+	e := strings.ToLower(r.Err)
+	return strings.Contains(e, "连接已断开") || strings.Contains(e, "disposed") || strings.Contains(e, "崩溃")
+}
+
 // LegacyTestCase 是一个需要关注的文件：两者结果不一致或覆盖率低。
 type LegacyTestCase struct {
 	ID          int64   `json:"id"`
@@ -63,6 +72,8 @@ type LegacyTestReport struct {
 	Canceled   bool             `json:"canceled,omitempty"`
 	Rows       []LegacyTestRow  `json:"rows"`
 	Problems   []LegacyTestCase `json:"problems"`
+	// LOCrashes 是内置解析成功、LibreOffice 转换时崩溃（重试一次仍然崩溃）的文件：索引用的是内置解析的结果，不受影响。
+	LOCrashes []LegacyTestCase `json:"loCrashes"`
 }
 
 // LegacyTestState 是老格式测试的进度和最近一次结果。
@@ -238,8 +249,15 @@ func (m *Manager) runLegacyTest(ctx context.Context, samples []legacySample) *Le
 		}
 		opts.LegacyMode = extract.LegacyLO
 		t0 = time.Now()
-		lr := pool.Run(ctx, path, s.ext, opts, worker.Timeouts{Total: extract.LegacyTimeout(opts.Timeout) + 30*time.Second}, nil)
+		loTimeout := worker.Timeouts{Total: extract.LegacyTimeout(opts.Timeout) + 30*time.Second}
+		lr := pool.Run(ctx, path, s.ext, opts, loTimeout, nil)
 		ld := time.Since(t0)
+		if loCrashed(lr) && ctx.Err() == nil {
+			// LibreOffice 崩溃或连接断开：可能是上一个文件把它弄崩了，这个文件碰上。重新启动后再试一次
+			t0 = time.Now()
+			lr = pool.Run(ctx, path, s.ext, opts, loTimeout, nil)
+			ld = time.Since(t0)
+		}
 		if ctx.Err() != nil {
 			r.Canceled = true
 			break
@@ -275,6 +293,12 @@ func (m *Manager) runLegacyTest(ctx context.Context, samples []legacySample) *Le
 		case nOK:
 			row.NativeOK++
 			row.OnlyNative++
+			if loCrashed(lr) {
+				if len(r.LOCrashes) < 100 {
+					r.LOCrashes = append(r.LOCrashes, c)
+				}
+				break
+			}
 			problem = lr.Status != doc.StatusEncrypted
 		case lOK:
 			row.LOOK++
@@ -380,6 +404,12 @@ func LegacyTestText(r *LegacyTestReport, brief bool) string {
 	}
 	if brief {
 		return strings.TrimSpace(b.String())
+	}
+	if len(r.LOCrashes) > 0 {
+		b.WriteString("\nLibreOffice 转换时崩溃、内置解析正常（不影响索引）：\n")
+		for _, c := range r.LOCrashes {
+			fmt.Fprintf(&b, "#%d %s（%s）内置 %d 字 ｜ LibreOffice：%s\n", c.ID, logx.P(c.Path), fmtBytes(c.Size), c.NativeChars, c.LOErr)
+		}
 	}
 	if len(r.Problems) > 0 {
 		b.WriteString("\n需要关注的文件：\n")

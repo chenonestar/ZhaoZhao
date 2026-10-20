@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chenonestar/zhaozhao/internal/doc"
 	"github.com/chenonestar/zhaozhao/internal/extract"
 	"github.com/chenonestar/zhaozhao/internal/scanpdf"
 	"github.com/chenonestar/zhaozhao/internal/store"
@@ -439,5 +440,26 @@ func TestRetryWICAndSniffOnUpgrade(t *testing.T) {
 		if want := map[bool]int{true: store.StateFailed, false: store.StatePending}[name == "e.doc"]; st != want {
 			t.Fatalf("%s：state %d，应为 %d", name, st, want)
 		}
+	}
+}
+
+// LibreOffice 崩溃、连接断开算「LibreOffice 出错」（重试一次后单独列出，不影响索引），文件本身的问题不算。
+func TestLOCrashedSeparated(t *testing.T) {
+	for err, want := range map[string]bool{
+		"格式转换失败：LibreOffice 连接已断开: Binary URP bridge already disposed": true,
+		"解析进程崩溃: EOF":      true,
+		"文件已损坏":            false,
+		"无法打开（文件可能已加密或损坏）": false,
+	} {
+		if got := loCrashed(doc.Result{Status: doc.StatusFailed, Err: err}); got != want {
+			t.Errorf("%q：%v", err, got)
+		}
+	}
+	if loCrashed(doc.Result{Status: doc.StatusOK, Err: "连接已断开"}) {
+		t.Error("成功的不算")
+	}
+	r := &LegacyTestReport{LOCrashes: []LegacyTestCase{{ID: 7, Path: `D:\汇报.ppt`, Native: "成功", NativeChars: 120, LO: "失败", LOErr: "连接已断开"}}}
+	if txt := LegacyTestText(r, false); !strings.Contains(txt, "不影响索引") || !strings.Contains(txt, "#7") || strings.Contains(txt, "需要关注") {
+		t.Fatal(txt)
 	}
 }

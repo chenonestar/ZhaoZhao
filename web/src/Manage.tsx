@@ -683,6 +683,24 @@ function LegacyTest() {
               </table>
             </details>
           )}
+          {(r.loCrashes ?? []).length > 0 && (
+            <details>
+              <summary className="small">LibreOffice 转换时崩溃、内置解析正常的文件（{r.loCrashes!.length} 个，不影响索引）</summary>
+              <div className="dim small">这些文件建索引时用的是内置解析的结果，可以正常搜到。只是对照用的 LibreOffice 处理它们时崩溃了（重试一次仍然崩溃）。</div>
+              <table className="grid">
+                <thead><tr><th>文件</th><th>内置</th><th>LibreOffice</th></tr></thead>
+                <tbody>
+                  {r.loCrashes!.map((c) => (
+                    <tr key={c.id}>
+                      <td className="small">{c.path}</td>
+                      <td className="small">{c.native}，{c.nativeChars} 字</td>
+                      <td className="small">{c.loErr}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          )}
         </>
       )}
     </div>

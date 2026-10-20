@@ -321,6 +321,7 @@ export interface LegacyTestState {
     canceled?: boolean;
     rows: LegacyTestRow[] | null;
     problems: LegacyTestCase[] | null;
+    loCrashes?: LegacyTestCase[] | null;
   };
 }
 
