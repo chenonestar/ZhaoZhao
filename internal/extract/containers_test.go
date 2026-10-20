@@ -329,3 +329,33 @@ func TestSevenZip(t *testing.T) {
 		t.Fatalf("加密 7z 应标记已加密: %+v", enc)
 	}
 }
+
+// 改了扩展名的压缩包（zip 改成 .rar、tar 改成 .zip 等）按内容识别；真的认不出时写明原因。
+func TestArchiveSniffedByContent(t *testing.T) {
+	dir := t.TempDir()
+	zipAsRar := filepath.Join(dir, "资料.rar")
+	writeZip(t, zipAsRar, map[string][]byte{"说明.txt": []byte("改名的压缩包 pangolin")}, false)
+	var tb bytes.Buffer
+	tw := tar.NewWriter(&tb)
+	body := []byte("tar 里的文件 narwhal")
+	tw.WriteHeader(&tar.Header{Name: "a.txt", Mode: 0o644, Size: int64(len(body))})
+	tw.Write(body)
+	tw.Close()
+	tarAsZip := filepath.Join(dir, "打包.zip")
+	os.WriteFile(tarAsZip, tb.Bytes(), 0o644)
+	for p, want := range map[string]string{zipAsRar: "pangolin", tarAsZip: "narwhal"} {
+		r := Extract(p, Ext(p), DefaultOptions())
+		if len(r.Children) != 1 || !strings.Contains(r.Children[0].Text, want) {
+			t.Fatalf("%s：%+v", filepath.Base(p), r)
+		}
+	}
+	out, err := ExtractInner(zipAsRar, "说明.txt", t.TempDir(), DefaultOptions())
+	if b, _ := os.ReadFile(out); err != nil || !strings.Contains(string(b), "pangolin") {
+		t.Fatalf("按内容识别后也能取出单个条目：%q %v", b, err)
+	}
+	junk := filepath.Join(dir, "坏的.rar")
+	os.WriteFile(junk, bytes.Repeat([]byte("not an archive "), 100), 0o644)
+	if r := Extract(junk, "rar", DefaultOptions()); r.Status != doc.StatusFailed || !strings.Contains(r.Err, "不是 RAR") {
+		t.Fatalf("%+v", r)
+	}
+}

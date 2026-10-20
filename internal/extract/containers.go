@@ -17,6 +17,7 @@ import (
 
 	"github.com/bodgit/sevenzip"
 	"github.com/chenonestar/zhaozhao/internal/doc"
+	"github.com/chenonestar/zhaozhao/internal/logx"
 	"github.com/nwaples/rardecode/v2"
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
@@ -87,8 +88,40 @@ func containerKind(name string) string {
 	return Ext(name)
 }
 
+// archiveKinds 是按文件内容识别格式的压缩包类型。
+var archiveKinds = map[string]bool{"zip": true, "7z": true, "rar": true, "tar": true, "gz": true, "tgz": true}
+
+// sniffArchive 按文件开头的标记判断压缩包的实际格式（zip、7z、rar、gz、tar）；认不出时返回空。
+// 改了扩展名的压缩包很常见（比如 zip 改名成 .rar），7-Zip 也是按内容识别的。
+func sniffArchive(p string) string {
+	head, err := readHead(p, 512)
+	if err != nil {
+		return ""
+	}
+	b := string(head)
+	switch {
+	case strings.HasPrefix(b, "PK\x03\x04"), strings.HasPrefix(b, "PK\x05\x06"), strings.HasPrefix(b, "PK\x07\x08"):
+		return "zip"
+	case strings.HasPrefix(b, "7z\xBC\xAF\x27\x1C"):
+		return "7z"
+	case strings.HasPrefix(b, "Rar!\x1A\x07"):
+		return "rar"
+	case strings.HasPrefix(b, "\x1F\x8B"):
+		return "gz"
+	case len(b) >= 262 && b[257:262] == "ustar":
+		return "tar"
+	}
+	return ""
+}
+
 // listEntries 列出（或枚举）一个容器文件里的条目，对每个条目调用 fn。
 func listEntries(p, kind string, opt Options, fn func(*entry) bool) error {
+	if archiveKinds[kind] {
+		if real := sniffArchive(p); real != "" && real != kind && !(real == "gz" && kind == "tgz") {
+			logx.Debugf("%s 扩展名是 %s，实际是 %s 格式，按 %s 读取", logx.P(p), kind, real, real)
+			kind = real
+		}
+	}
 	switch kind {
 	case "zip":
 		return listZip(p, fn)
@@ -255,6 +288,9 @@ func listRar(p string, fn func(*entry) bool) error {
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "password") || strings.Contains(strings.ToLower(err.Error()), "encrypt") {
 			return errEncrypted
+		}
+		if errors.Is(err, rardecode.ErrNoSig) {
+			return errors.New("文件内容不是 RAR，也不是其他认得的压缩包格式（可能已损坏或不完整）")
 		}
 		return err
 	}
