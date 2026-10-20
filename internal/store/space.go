@@ -159,7 +159,7 @@ func (d *DB) Stats() (*SpaceStats, error) {
 
 	// 各扩展名：共用的文本只算给其中一个文件
 	rows, err = d.R.Query(`SELECT f.ext, count(*), sum(length(t.data)+ifnull(length(t.locs),0)) FROM texts t
-JOIN files f ON f.id=(SELECT min(id) FROM files WHERE text_id=t.id) GROUP BY f.ext`)
+JOIN files f ON f.id=(SELECT min(id) FROM files WHERE text_id=t.id AND text_id>0) GROUP BY f.ext`)
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +198,7 @@ JOIN files f ON f.id=(SELECT min(id) FROM files WHERE text_id=t.id) GROUP BY f.e
 	}
 	rows.Close()
 	for i, id := range ids {
-		_ = d.R.QueryRow(`SELECT min(id), count(*), max(text_len) FROM files WHERE text_id=?`, id).Scan(&big[i].FileID, &big[i].Sharers, &big[i].Chars)
+		_ = d.R.QueryRow(`SELECT min(id), count(*), max(text_len) FROM files WHERE text_id=? AND text_id>0`, id).Scan(&big[i].FileID, &big[i].Sharers, &big[i].Chars)
 	}
 	st.Biggest = big
 	return st, nil

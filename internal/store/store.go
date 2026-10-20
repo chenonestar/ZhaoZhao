@@ -70,6 +70,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_v USING fts5vocab(fts, 'row');
 //
 // 删除的文件（内容哈希已知、提取成功的）的文本先放进回收区保留几天：文件只是被移动或改名时，
 // 新位置的文件内容相同，直接复用，不必重新提取（尤其不必重新 OCR）。回收区的条目过期删除时文本随之删除。
+//
+// 按 text_id 查文件时一定要带上「text_id>0」：files_text 是只含 text_id>0 的部分索引，SQLite 只有在条件里
+// 写明这一项时才会用它，否则每查一次都扫一遍整张文件表（0.2.3 之前的触发器就是这样：14 万个文件时，
+// 每删除或重新提取一个文件要多花约 11 毫秒）。触发器改了名字，旧索引库打开时换成新的。
 const schemaV2 = `
 CREATE INDEX IF NOT EXISTS files_text ON files(text_id) WHERE text_id>0;
 CREATE INDEX IF NOT EXISTS files_problem ON files(id) WHERE state>=2;
@@ -79,19 +83,22 @@ CREATE TABLE IF NOT EXISTS recycled(id INTEGER PRIMARY KEY, text_id INTEGER NOT 
 CREATE INDEX IF NOT EXISTS recycled_hash ON recycled(hash, size);
 DROP TRIGGER IF EXISTS files_text_del;
 DROP TRIGGER IF EXISTS files_text_upd;
-CREATE TRIGGER IF NOT EXISTS files_text_gone AFTER DELETE ON files WHEN OLD.text_id>0 BEGIN
+DROP TRIGGER IF EXISTS files_text_gone;
+DROP TRIGGER IF EXISTS files_text_changed;
+DROP TRIGGER IF EXISTS recycled_gone;
+CREATE TRIGGER IF NOT EXISTS files_text_gone2 AFTER DELETE ON files WHEN OLD.text_id>0 BEGIN
   INSERT OR IGNORE INTO recycled(text_id,hash,size,ocr,text_len,at)
     SELECT OLD.text_id, OLD.hash, OLD.size, OLD.ocr, OLD.text_len, unixepoch()
-    WHERE OLD.hash<>'' AND OLD.state=1 AND NOT EXISTS (SELECT 1 FROM files WHERE text_id=OLD.text_id);
-  DELETE FROM texts WHERE id=OLD.text_id AND NOT EXISTS (SELECT 1 FROM files WHERE text_id=OLD.text_id)
+    WHERE OLD.hash<>'' AND OLD.state=1 AND NOT EXISTS (SELECT 1 FROM files WHERE text_id=OLD.text_id AND text_id>0);
+  DELETE FROM texts WHERE id=OLD.text_id AND NOT EXISTS (SELECT 1 FROM files WHERE text_id=OLD.text_id AND text_id>0)
     AND NOT EXISTS (SELECT 1 FROM recycled WHERE text_id=OLD.text_id);
 END;
-CREATE TRIGGER IF NOT EXISTS files_text_changed AFTER UPDATE OF text_id ON files WHEN OLD.text_id>0 AND OLD.text_id<>NEW.text_id BEGIN
-  DELETE FROM texts WHERE id=OLD.text_id AND NOT EXISTS (SELECT 1 FROM files WHERE text_id=OLD.text_id)
+CREATE TRIGGER IF NOT EXISTS files_text_changed2 AFTER UPDATE OF text_id ON files WHEN OLD.text_id>0 AND OLD.text_id<>NEW.text_id BEGIN
+  DELETE FROM texts WHERE id=OLD.text_id AND NOT EXISTS (SELECT 1 FROM files WHERE text_id=OLD.text_id AND text_id>0)
     AND NOT EXISTS (SELECT 1 FROM recycled WHERE text_id=OLD.text_id);
 END;
-CREATE TRIGGER IF NOT EXISTS recycled_gone AFTER DELETE ON recycled BEGIN
-  DELETE FROM texts WHERE id=OLD.text_id AND NOT EXISTS (SELECT 1 FROM files WHERE text_id=OLD.text_id);
+CREATE TRIGGER IF NOT EXISTS recycled_gone2 AFTER DELETE ON recycled BEGIN
+  DELETE FROM texts WHERE id=OLD.text_id AND NOT EXISTS (SELECT 1 FROM files WHERE text_id=OLD.text_id AND text_id>0);
 END;
 `
 
