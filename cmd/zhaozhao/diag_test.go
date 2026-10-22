@@ -43,7 +43,9 @@ func TestExportDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Stop()
-	for _, limit := range []time.Duration{30 * time.Second, time.Nanosecond} {
+	// 第二次模拟超时：用已经过去的时限。1 纳秒不行：Windows 的计时器要过约 1 毫秒才触发，空索引库的统计
+	// 几毫秒就做完了，来不及超时
+	for _, limit := range []time.Duration{30 * time.Second, -time.Nanosecond} {
 		diagSpaceLimit = limit
 		var steps []string
 		p, err := exportDiagnostics(dir, lg, m, true, func(s string) { steps = append(steps, s) })
@@ -67,7 +69,7 @@ func TestExportDiagnostics(t *testing.T) {
 			}
 		}
 		zr.Close()
-		if limit == time.Nanosecond && !strings.Contains(space, "已跳过") {
+		if limit < 0 && !strings.Contains(space, "已跳过") {
 			t.Fatalf("超时应跳过空间统计：%q", space)
 		}
 		if limit > time.Second && !strings.Contains(space, "索引库") {
