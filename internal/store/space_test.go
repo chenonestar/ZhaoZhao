@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -163,5 +164,35 @@ END`); err != nil {
 	rows.Close()
 	if fmt.Sprint(names) != "[files_text_changed2 files_text_gone2 recycled_gone2]" {
 		t.Fatalf("触发器：%v", names)
+	}
+}
+
+// 按内容哈希找文件要用上 files_hash（只含 hash 不为空的部分索引）：条件里不写明 hash 不为空时 SQLite 用不上，
+// 每查一次都扫一遍所有已完成的文件。
+func TestHashLookupsUseIndex(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, q := range []string{
+		sqlFindDuplicate,
+		`SELECT DISTINCT text_id FROM files WHERE hash=? AND hash<>'' AND size=? AND state=1 AND text_id>0 AND text_id<>?`,
+	} {
+		var plan string
+		rows, err := db.R.Query(`EXPLAIN QUERY PLAN `+q, "h", 1, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var a, b, c int
+			var d string
+			rows.Scan(&a, &b, &c, &d)
+			plan += d + ";"
+		}
+		rows.Close()
+		if !strings.Contains(plan, "files_hash") {
+			t.Fatalf("没用上内容哈希的索引：%s\n%s", plan, q)
+		}
 	}
 }

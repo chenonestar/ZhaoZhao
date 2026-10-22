@@ -254,10 +254,24 @@ func (d *DB) PurgeRecycled(before time.Time) (int64, error) {
 	return r.RowsAffected()
 }
 
+// sqlFindDuplicate 按内容哈希与大小找已完成提取的另一个文件。files_hash 是只含 hash 不为空的部分索引，
+// 条件里要写明 hash 不为空，SQLite 才会用它；0.2.4 之前没写，每查一次都扫一遍所有已完成的文件
+// （13 万个文件时每次约 39 毫秒，建索引时每个文件都要查一次）。
+const sqlFindDuplicate = `SELECT id FROM files WHERE hash=? AND hash<>'' AND size=? AND state=1 AND text_id>0 AND id<>? LIMIT 1`
+
 // FindDuplicate 查找已完成提取、内容哈希与大小都相同的另一个文件。
 func (d *DB) FindDuplicate(hash string, size int64, exclude int64) (int64, error) {
+	return findDuplicate(d.R.QueryRow(sqlFindDuplicate, hash, size, exclude))
+}
+
+// FindDuplicateTx 同 FindDuplicate，在事务里查（看得到同一批里刚写入的文件）。
+func FindDuplicateTx(tx *sql.Tx, hash string, size int64, exclude int64) (int64, error) {
+	return findDuplicate(tx.QueryRow(sqlFindDuplicate, hash, size, exclude))
+}
+
+func findDuplicate(row *sql.Row) (int64, error) {
 	var id int64
-	err := d.R.QueryRow(`SELECT id FROM files WHERE hash=? AND size=? AND state=1 AND text_id>0 AND id<>? LIMIT 1`, hash, size, exclude).Scan(&id)
+	err := row.Scan(&id)
 	if err == sql.ErrNoRows {
 		return 0, nil
 	}
@@ -425,8 +439,8 @@ GROUP BY hash, size HAVING COUNT(DISTINCT text_id)>1 LIMIT ?`, limit)
 		for _, g := range gs {
 			var freed sql.NullInt64
 			_ = tx.QueryRow(`SELECT SUM(length(data)+ifnull(length(locs),0)) FROM texts WHERE id IN
-(SELECT DISTINCT text_id FROM files WHERE hash=? AND size=? AND state=1 AND text_id>0 AND text_id<>?)`, g.hash, g.size, g.textID).Scan(&freed)
-			res, err := tx.Exec(`UPDATE files SET text_id=? WHERE hash=? AND size=? AND state=1 AND text_id>0 AND text_id<>?`, g.textID, g.hash, g.size, g.textID)
+(SELECT DISTINCT text_id FROM files WHERE hash=? AND hash<>'' AND size=? AND state=1 AND text_id>0 AND text_id<>?)`, g.hash, g.size, g.textID).Scan(&freed)
+			res, err := tx.Exec(`UPDATE files SET text_id=? WHERE hash=? AND hash<>'' AND size=? AND state=1 AND text_id>0 AND text_id<>?`, g.textID, g.hash, g.size, g.textID)
 			if err != nil {
 				return err
 			}
