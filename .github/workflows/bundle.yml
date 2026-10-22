@@ -119,18 +119,16 @@ jobs:
           $left = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(zhaozhao|RapidOCR)' }
           if ($left) { $left | Format-Table Name, Id; throw "测速结束后还有进程没有退出" }
 
-      # 实验：RapidOCR 设了线程数，实际占用的 CPU 可能更多（OpenCV、OpenMP 自己开的线程）。限制它们后再测一次，
-      # 比较每分钟页数和实际占用，只记录、不影响打包
-      - name: OCR 实际占用 CPU 对比（限制 OpenCV、OpenMP 的线程后再测一次）
+      # 实验：OCR 认字模型换成 PP-OCRv6 small 能快多少、准多少（组件能不能直接用它）。同一批模拟扫描页，
+      # 直接驱动发布包里的 RapidOCR-json；只记录、不影响打包。顺带确认组件读 BMP（找找交给它的格式）没问题
+      - name: OCR 认字模型对比（PP-OCRv4 与 PP-OCRv6 small，只测不换）
         shell: pwsh
         continue-on-error: true
         run: |
-          $out = Join-Path $env:RUNNER_TEMP 'ocr-bench-limited.txt'
-          $env:OPENCV_FOR_THREADS_NUM = '1'
-          $env:OMP_NUM_THREADS = '1'
-          $env:OMP_WAIT_POLICY = 'PASSIVE'
-          $p = Start-Process -FilePath ZhaoZhao\zhaozhao.exe -ArgumentList '--ocr-bench', "`"$out`"" -Wait -PassThru
-          if (Test-Path $out) { Get-Content $out -Encoding utf8 | Where-Object { $_ -notmatch '^\s*[{}\[\]"]' } }
+          python -m pip install --quiet --disable-pip-version-check onnx pillow numpy
+          python -m pip download --quiet --disable-pip-version-check --no-deps -d ocr-model rapidocr==3.10.0
+          $whl = (Get-ChildItem ocr-model -Filter 'rapidocr-*.whl' | Select-Object -First 1).FullName
+          python packaging/tools/ocr_model_test.py ZhaoZhao\components\ocr $whl (Join-Path $env:RUNNER_TEMP 'ocr-model')
 
       - name: 打包完整版 zip
         shell: pwsh
