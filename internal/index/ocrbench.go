@@ -49,6 +49,7 @@ type OCRBenchPlan struct {
 	Threads int     `json:"threads"`
 	PerMin  float64 `json:"perMin"`        // 每分钟页数（0 表示失败）
 	SlotMem uint64  `json:"slotMem"`       // 每个名额（OCR 进程 + 解析进程）的内存峰值，字节
+	CPU     float64 `json:"cpu,omitempty"` // 测速期间子进程实际平均占用几个逻辑处理器（0 表示取不到，只有 Windows 能取到）
 	Err     string  `json:"err,omitempty"` // 失败的原因
 }
 
@@ -120,8 +121,15 @@ func (b *OCRBench) Summary() string {
 			continue
 		}
 		s := fmt.Sprintf("%s 每分钟 %.1f 页", p.plan(), p.PerMin)
+		var notes []string
 		if p.SlotMem > 0 {
-			s += fmt.Sprintf("（每个约 %d MB）", p.SlotMem>>20)
+			notes = append(notes, fmt.Sprintf("每个约 %d MB", p.SlotMem>>20))
+		}
+		if p.CPU > 0 {
+			notes = append(notes, fmt.Sprintf("实际占用约 %.1f 个逻辑处理器", p.CPU))
+		}
+		if len(notes) > 0 {
+			s += "（" + strings.Join(notes, "，") + "）"
 		}
 		parts = append(parts, s)
 	}
@@ -189,8 +197,15 @@ func (m *Manager) saveOCRBench(key string, b *OCRBench) error {
 	return m.DB.SetMeta(metaOCRBench, string(data))
 }
 
-// ocrBenchRunner 实测一种搭配：pages 页平均分给各个进程，返回每分钟页数和每个名额的内存峰值。
-type ocrBenchRunner func(ctx context.Context, p ocrPlan, pages int) (perMin float64, slotMem uint64, err error)
+// benchRun 是实测一种搭配的结果：每分钟页数、每个名额的内存峰值、子进程实际平均占用几个逻辑处理器。
+type benchRun struct {
+	perMin  float64
+	slotMem uint64
+	cpu     float64
+}
+
+// ocrBenchRunner 实测一种搭配：pages 页平均分给各个进程。
+type ocrBenchRunner func(ctx context.Context, p ocrPlan, pages int) (benchRun, error)
 
 // ocrBenchPages：每种搭配识别的页数。等于线程预算，各种搭配的工作量相同（N 个进程 × 1 线程时每个进程
 // 识别 1 页，1 个进程 × N 线程时识别 N 页）；预算太小时加倍，结果才稳定。
@@ -212,10 +227,10 @@ func runOCRBench(ctx context.Context, budget int, cands []ocrPlan, run ocrBenchR
 		if progress != nil {
 			progress(i, len(cands), c)
 		}
-		perMin, mem, err := run(ctx, c, pages)
-		p := OCRBenchPlan{Procs: c.procs, Threads: c.threads, PerMin: perMin, SlotMem: mem}
+		r, err := run(ctx, c, pages)
+		p := OCRBenchPlan{Procs: c.procs, Threads: c.threads, PerMin: r.perMin, SlotMem: r.slotMem, CPU: r.cpu}
 		if err != nil {
-			p.PerMin, p.Err = 0, truncate(err.Error(), 200)
+			p.PerMin, p.CPU, p.Err = 0, 0, truncate(err.Error(), 200)
 			b.Err = p.Err
 		}
 		b.Plans = append(b.Plans, p)
@@ -237,9 +252,10 @@ func truncate(s string, n int) string {
 }
 
 // poolBench 用进程池实测：先让每个进程识别一页（启动 OCR 组件、加载模型，不计时），
-// 再同时开始，按全部识别完的时间算每分钟页数（不含电脑睡眠的时间）。
+// 再同时开始，按全部识别完的时间算每分钟页数（不含电脑睡眠的时间）；同时记下子进程用掉的 CPU 时间，
+// 算出实际平均占用几个逻辑处理器（RapidOCR 设了线程数，实际占用可能更多）。
 func poolBench(pool *worker.Pool, opts extract.Options, sample string) ocrBenchRunner {
-	return func(ctx context.Context, pl ocrPlan, pages int) (float64, uint64, error) {
+	return func(ctx context.Context, pl ocrPlan, pages int) (benchRun, error) {
 		pool.SetSize(pl.procs)
 		o := opts
 		o.OCR.Threads = pl.threads
@@ -273,14 +289,19 @@ func poolBench(pool *worker.Pool, opts extract.Options, sample string) ocrBenchR
 			return awake.Since(start), mem, firstErr
 		}
 		if _, _, err := round(1); err != nil {
-			return 0, 0, err
+			return benchRun{}, err
 		}
 		each := max(1, pages/pl.procs)
+		cpu0, cpuOK := worker.ChildrenCPU()
 		d, mem, err := round(each)
 		if err != nil {
-			return 0, 0, err
+			return benchRun{}, err
 		}
-		return float64(each*pl.procs) / d.Minutes(), mem, nil
+		r := benchRun{perMin: float64(each*pl.procs) / d.Minutes(), slotMem: mem}
+		if cpu1, ok := worker.ChildrenCPU(); ok && cpuOK && d > 0 {
+			r.cpu = float64(cpu1-cpu0) / float64(d)
+		}
+		return r, nil
 	}
 }
 

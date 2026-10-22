@@ -305,6 +305,7 @@ export interface OCRBenchPlan {
   threads: number;
   perMin: number;
   slotMem: number;
+  cpu?: number; // 测速期间子进程实际平均占用几个逻辑处理器（只有 Windows 量得出来）
   err?: string;
 }
 

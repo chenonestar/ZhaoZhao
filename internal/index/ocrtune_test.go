@@ -210,12 +210,12 @@ func sprint(ps []ocrPlan) string {
 func TestRunOCRBench(t *testing.T) {
 	speed := map[ocrPlan]float64{{4, 1}: 26, {2, 2}: 20, {1, 4}: 16}
 	var calls []string
-	run := func(ctx context.Context, p ocrPlan, pages int) (float64, uint64, error) {
+	run := func(ctx context.Context, p ocrPlan, pages int) (benchRun, error) {
 		calls = append(calls, fmt.Sprintf("%v:%d", p, pages))
 		if p == (ocrPlan{2, 2}) {
-			return 0, 0, errors.New("内存不足")
+			return benchRun{}, errors.New("内存不足")
 		}
-		return speed[p], 300 << 20, nil
+		return benchRun{perMin: speed[p], slotMem: 300 << 20, cpu: float64(p.procs*p.threads) + 1.5}, nil
 	}
 	b := runOCRBench(context.Background(), 4, ocrCandidates(4, 32), run, nil)
 	if bp, ok := b.best(); !ok || bp.plan() != (ocrPlan{4, 1}) || b.Err != "" || len(b.Plans) != 3 || b.Plans[1].Err != "内存不足" {
@@ -224,14 +224,14 @@ func TestRunOCRBench(t *testing.T) {
 	if strings.Join(calls, " ") != "4 个进程 × 1 线程:4 2 个进程 × 2 线程:4 1 个进程 × 4 线程:4" {
 		t.Fatalf("每种都应识别 4 页：%v", calls)
 	}
-	if s := b.Summary(); !strings.Contains(s, "4 个进程 × 1 线程 每分钟 26.0 页（每个约 300 MB）") || !strings.Contains(s, "最快：4 个进程 × 1 线程") {
+	if s := b.Summary(); !strings.Contains(s, "4 个进程 × 1 线程 每分钟 26.0 页（每个约 300 MB，实际占用约 5.5 个逻辑处理器）") || !strings.Contains(s, "最快：4 个进程 × 1 线程") {
 		t.Fatal(s)
 	}
 	if ocrBenchPages(2) != 4 || ocrBenchPages(8) != 8 {
 		t.Fatal("预算太小时页数加倍")
 	}
-	bad := runOCRBench(context.Background(), 2, ocrCandidates(2, 32), func(context.Context, ocrPlan, int) (float64, uint64, error) {
-		return 0, 0, errors.New("OCR 组件启动失败")
+	bad := runOCRBench(context.Background(), 2, ocrCandidates(2, 32), func(context.Context, ocrPlan, int) (benchRun, error) {
+		return benchRun{}, errors.New("OCR 组件启动失败")
 	}, nil)
 	if _, ok := bad.best(); ok || bad.Err != "OCR 组件启动失败" {
 		t.Fatalf("%+v", bad)
@@ -298,9 +298,9 @@ type fakeBench struct {
 func (f *fakeBench) install(t *testing.T) {
 	old := newOCRBenchRunner
 	newOCRBenchRunner = func(m *Manager, pool *worker.Pool, sample string) ocrBenchRunner {
-		return func(ctx context.Context, p ocrPlan, pages int) (float64, uint64, error) {
+		return func(ctx context.Context, p ocrPlan, pages int) (benchRun, error) {
 			if st, err := os.Stat(sample); err != nil || st.Size() != int64(len(ocrSample)) {
-				return 0, 0, fmt.Errorf("样张没写出来：%v", err)
+				return benchRun{}, fmt.Errorf("样张没写出来：%v", err)
 			}
 			f.mu.Lock()
 			f.calls = append(f.calls, p)
@@ -313,7 +313,7 @@ func (f *fakeBench) install(t *testing.T) {
 			if !ok {
 				v = float64(10*p.procs - p.threads)
 			}
-			return v, 200 << 20, nil
+			return benchRun{perMin: v, slotMem: 200 << 20}, nil
 		}
 	}
 	t.Cleanup(func() { newOCRBenchRunner = old })
@@ -516,9 +516,14 @@ func TestPoolBenchReal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cleanup()
-	perMin, mem, err := poolBench(pool, opts, sample)(context.Background(), ocrPlan{2, 1}, 4)
+	r, err := poolBench(pool, opts, sample)(context.Background(), ocrPlan{2, 1}, 4)
 	if err != nil {
 		t.Fatal(err)
+	}
+	perMin, mem := r.perMin, r.slotMem
+	// 实际占用的 CPU 只有 Windows 量得出来（作业对象累计；假 OCR 只是等待，几乎不占 CPU，不检查大小）
+	if runtime.GOOS != "windows" && r.cpu != 0 {
+		t.Fatalf("实际占用 CPU %.2f", r.cpu)
 	}
 	// 2 个进程各识别 2 页、每页 50 毫秒：最快每分钟 2400 页
 	if perMin < 100 || perMin > 2400 {
@@ -531,7 +536,7 @@ func TestPoolBenchReal(t *testing.T) {
 		t.Fatalf("内存峰值 %d", mem)
 	}
 	opts.OCR.Command = filepath.Join(t.TempDir(), "没有这个程序")
-	if _, _, err := poolBench(pool, opts, sample)(context.Background(), ocrPlan{1, 1}, 1); err == nil {
+	if _, err := poolBench(pool, opts, sample)(context.Background(), ocrPlan{1, 1}, 1); err == nil {
 		t.Fatal("OCR 组件启动不了时应报错")
 	}
 }

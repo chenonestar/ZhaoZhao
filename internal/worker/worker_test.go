@@ -38,6 +38,10 @@ func TestMain(m *testing.M) {
 		progressWorker(v)
 		os.Exit(0)
 	}
+	if v := os.Getenv("ZZ_BURN_WORKER"); v != "" {
+		burnWorker(v)
+		os.Exit(0)
+	}
 	os.Exit(m.Run())
 }
 
@@ -75,6 +79,44 @@ func progressWorker(spec string) {
 			enc.Encode(Response{ID: req.ID, Progress: fmt.Sprintf("第 %d/%d 页", i, n)})
 		}
 		enc.Encode(Response{ID: req.ID, Result: doc.Result{Status: doc.StatusOK, Text: "done"}})
+	}
+}
+
+// burnWorker 模拟一个占 CPU 的任务：每个请求空转 d 再返回。
+func burnWorker(spec string) {
+	d, _ := time.ParseDuration(spec)
+	sc := bufio.NewScanner(os.Stdin)
+	enc := json.NewEncoder(os.Stdout)
+	for sc.Scan() {
+		var req Request
+		json.Unmarshal(sc.Bytes(), &req)
+		x := 0
+		for end := time.Now().Add(d); time.Now().Before(end); {
+			x++
+		}
+		enc.Encode(Response{ID: req.ID, Result: doc.Result{Status: doc.StatusOK, Text: strconv.Itoa(x % 2)}})
+	}
+}
+
+// 子进程累计用掉的 CPU 时间（Windows 由作业对象累计；别的系统取不到）。
+func TestChildrenCPU(t *testing.T) {
+	t.Setenv("ZZ_BURN_WORKER", "400ms")
+	exe, _ := os.Executable()
+	p := NewPool(exe, 1)
+	p.Args = []string{"-test.run=^$"}
+	t.Cleanup(p.Close)
+	p.Run(context.Background(), exe, "txt", extract.DefaultOptions(), Timeouts{Total: time.Minute}, nil) // 先启动子进程
+	c0, ok := ChildrenCPU()
+	if runtime.GOOS != "windows" {
+		if ok {
+			t.Fatal("只有 Windows 能取到")
+		}
+		return
+	}
+	r := p.Run(context.Background(), exe, "txt", extract.DefaultOptions(), Timeouts{Total: time.Minute}, nil)
+	c1, ok := ChildrenCPU()
+	if r.Status != doc.StatusOK || !ok || c1-c0 < 200*time.Millisecond {
+		t.Fatalf("子进程空转 400 毫秒，累计 CPU 应增加：%v → %v（%v）", c0, c1, r)
 	}
 }
 

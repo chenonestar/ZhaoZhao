@@ -2,13 +2,43 @@ package index
 
 import (
 	"fmt"
-	"github.com/chenonestar/zhaozhao/internal/awake"
+	"math"
+	"runtime"
 	"runtime/pprof"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/chenonestar/zhaozhao/internal/awake"
 	"github.com/chenonestar/zhaozhao/internal/logx"
+	"github.com/chenonestar/zhaozhao/internal/worker"
 )
+
+// cpuMeter 由子进程累计用掉的 CPU 时间，算出最近一分钟它们实际平均占用几个逻辑处理器，写进状态快照：
+// RapidOCR 设了线程数，实际占用可能更多（用户截图里设 3 线程的 RapidOCR 占了 66% 的 CPU）。只有 Windows 量得出来。
+type cpuMeter struct {
+	at, cpu time.Duration // 上次采样的时间（awake）和累计 CPU 时间；只在 watchdog 里用
+	use     atomic.Uint64 // 最近一次算出的逻辑处理器数（float64 的位）；0 表示没有
+}
+
+// sample 每分钟由 watchdog 调用一次。
+func (c *cpuMeter) sample() {
+	cpu, ok := worker.ChildrenCPU()
+	now := awake.Now()
+	if !ok {
+		return
+	}
+	if c.at > 0 && now-c.at >= 10*time.Second {
+		c.use.Store(math.Float64bits(float64(cpu-c.cpu) / float64(now-c.at)))
+	}
+	c.at, c.cpu = now, cpu
+}
+
+// last 返回最近一分钟子进程实际平均占用的逻辑处理器数；量不出来或几乎为 0 时 ok 为 false。
+func (c *cpuMeter) last() (float64, bool) {
+	v := math.Float64frombits(c.use.Load())
+	return v, v >= 0.05
+}
 
 // watchdog 定时检查调度状态：
 //   - 详细日志模式下，有任务时每分钟记录一次状态快照（各类名额、队列、正在处理的文件和步骤）；
@@ -19,7 +49,7 @@ func (m *Manager) watchdog() {
 	t := time.NewTicker(watchEvery)
 	defer t.Stop()
 	s := &m.sched
-	var lastBeat time.Time
+	var lastBeat, lastCPU time.Time
 	slept := awake.Slept()
 	for {
 		select {
@@ -43,6 +73,10 @@ func (m *Manager) watchdog() {
 		}
 		if s.idle.Load() {
 			m.maybeCheckIntegrity()
+		}
+		if time.Since(lastCPU) >= time.Minute {
+			lastCPU = time.Now()
+			m.cpu.sample()
 		}
 		if logx.Verbose() && !s.idle.Load() && time.Since(lastBeat) >= time.Minute {
 			lastBeat = time.Now()
@@ -84,6 +118,9 @@ func (m *Manager) snapshot() string {
 	fmt.Fprintf(&b, "；待处理 %d（老格式 %d，OCR %d），已提取 %d，失败 %d", c.Pending, lq, oq, c.Done, c.Failed)
 	if m.pausedAll.Load() {
 		b.WriteString("；已暂停")
+	}
+	if u, ok := m.cpu.last(); ok {
+		fmt.Fprintf(&b, "；子进程最近一分钟实际占用约 %.1f 个逻辑处理器（共 %d 个）", u, runtime.NumCPU())
 	}
 	jobs := m.currentJobs()
 	for i, j := range jobs {

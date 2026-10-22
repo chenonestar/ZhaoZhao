@@ -43,8 +43,8 @@ func TestMain(m *testing.M) {
 	userIdleTime = func() time.Duration { return time.Hour }
 	// OCR 测速默认用模拟的（立即返回，进程越多越快），需要时由测试换掉
 	newOCRBenchRunner = func(m *Manager, pool *worker.Pool, sample string) ocrBenchRunner {
-		return func(ctx context.Context, p ocrPlan, pages int) (float64, uint64, error) {
-			return float64(10*p.procs - p.threads), 200 << 20, nil
+		return func(ctx context.Context, p ocrPlan, pages int) (benchRun, error) {
+			return benchRun{perMin: float64(10*p.procs - p.threads), slotMem: 200 << 20}, nil
 		}
 	}
 	os.Exit(m.Run())

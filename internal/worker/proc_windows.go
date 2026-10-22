@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -45,6 +46,27 @@ func killOnCloseJob() windows.Handle {
 		job = h
 	})
 	return job
+}
+
+// jobAccounting 是 JOBOBJECT_BASIC_ACCOUNTING_INFORMATION（时间以 100 纳秒为单位）。
+type jobAccounting struct {
+	TotalUserTime, TotalKernelTime, ThisPeriodTotalUserTime, ThisPeriodTotalKernelTime int64
+	TotalPageFaultCount, TotalProcesses, ActiveProcesses, TotalTerminatedProcesses     uint32
+}
+
+// ChildrenCPU 返回全部子进程（解析、转换、OCR 进程，以及它们启动的 LibreOffice、RapidOCR）累计用掉的
+// CPU 时间，包括已经结束的。它们都在同一个作业对象里，系统替我们累计。取不到时 ok 为 false。
+func ChildrenCPU() (d time.Duration, ok bool) {
+	j := killOnCloseJob()
+	if j == 0 {
+		return 0, false
+	}
+	var a jobAccounting
+	if err := windows.QueryInformationJobObject(j, windows.JobObjectBasicAccountingInformation,
+		uintptr(unsafe.Pointer(&a)), uint32(unsafe.Sizeof(a)), nil); err != nil {
+		return 0, false
+	}
+	return time.Duration(a.TotalUserTime+a.TotalKernelTime) * 100, true
 }
 
 // lowerPriority 在子进程启动后调用：低优先级已在创建时设置，这里把它加入作业对象。

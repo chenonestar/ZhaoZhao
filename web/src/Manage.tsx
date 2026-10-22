@@ -660,13 +660,14 @@ function OCRSpeed() {
       </div>
       {plans.length > 1 && b && (
         <table className="grid">
-          <thead><tr><th>搭配</th><th>每分钟页数</th><th>每个进程的内存</th></tr></thead>
+          <thead><tr><th>搭配</th><th>每分钟页数</th><th>每个进程的内存</th>{plans.some((p) => p.cpu) && <th title="测速期间识别进程实际平均占用几个逻辑处理器">实际占用 CPU</th>}</tr></thead>
           <tbody>
             {plans.map((p, i) => (
               <tr key={i}>
                 <td>{p.procs} 个进程 × {p.threads} 线程{p.procs * p.threads > b.budget ? "（用上超线程）" : ""}{i === b.best ? "（最快）" : ""}</td>
                 <td className="num">{p.err ? `失败：${p.err}` : p.perMin.toFixed(1)}</td>
                 <td className="num">{p.slotMem > 0 ? `${Math.round(p.slotMem / 1048576)} MB` : "—"}</td>
+                {plans.some((x) => x.cpu) && <td className="num">{p.cpu ? `${p.cpu.toFixed(1)} 个逻辑处理器` : "—"}</td>}
               </tr>
             ))}
           </tbody>

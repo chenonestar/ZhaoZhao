@@ -119,6 +119,19 @@ jobs:
           $left = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(zhaozhao|RapidOCR)' }
           if ($left) { $left | Format-Table Name, Id; throw "测速结束后还有进程没有退出" }
 
+      # 实验：RapidOCR 设了线程数，实际占用的 CPU 可能更多（OpenCV、OpenMP 自己开的线程）。限制它们后再测一次，
+      # 比较每分钟页数和实际占用，只记录、不影响打包
+      - name: OCR 实际占用 CPU 对比（限制 OpenCV、OpenMP 的线程后再测一次）
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'ocr-bench-limited.txt'
+          $env:OPENCV_FOR_THREADS_NUM = '1'
+          $env:OMP_NUM_THREADS = '1'
+          $env:OMP_WAIT_POLICY = 'PASSIVE'
+          $p = Start-Process -FilePath ZhaoZhao\zhaozhao.exe -ArgumentList '--ocr-bench', "`"$out`"" -Wait -PassThru
+          if (Test-Path $out) { Get-Content $out -Encoding utf8 | Where-Object { $_ -notmatch '^\s*[{}\[\]"]' } }
+
       - name: 打包完整版 zip
         shell: pwsh
         run: |

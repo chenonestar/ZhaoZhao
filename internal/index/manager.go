@@ -111,6 +111,8 @@ type Manager struct {
 	noticeSeq int64
 	noticed   map[string]bool
 
+	cpu cpuMeter // 子进程实际占用的 CPU（状态快照用）
+
 	corrupt  atomic.Bool
 	checking atomic.Bool // 后台完整性检查进行中
 
