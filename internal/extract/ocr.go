@@ -489,7 +489,6 @@ func (t *tiffPage) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// encodePNG 用最快的压缩级别编码 PNG（只是交给 OCR 组件的临时图片，不必压得小）。
 // ocrImageData 把要识别的图片编码成交给 OCR 组件的临时文件，返回数据和扩展名。灰度图（PDF 渲染出的页、扫描件）
 // 用 BMP：不压缩，编码和组件解码都几乎不花时间（一页 A4 扫描页编码成 PNG 约 0.1～0.2 秒，占每页用时的
 // 5% 左右；BMP 约 3 毫秒），文件大些，但用完就删。彩色图仍用 PNG（透明的地方交给组件按 PNG 处理）。
@@ -561,7 +560,7 @@ func extractImage(p, ext string, opt Options) doc.Result {
 			if multi {
 				opt.Progress("第 %d/%d 页", i+1, n)
 			}
-			data, ext, err := ocrImageData(img)
+			data, imgExt, err := ocrImageData(img)
 			if err != nil {
 				return err
 			}
@@ -569,7 +568,7 @@ func extractImage(p, ext string, opt Options) doc.Result {
 			if multi {
 				label = "第" + strconv.Itoa(i+1) + "页"
 			}
-			if err := ocrOne(label, data, ext); err == errTooSmall {
+			if err := ocrOne(label, data, imgExt); err == errTooSmall {
 				small++
 			} else if err != nil {
 				return err
@@ -601,7 +600,7 @@ func extractImage(p, ext string, opt Options) doc.Result {
 		total, small := len(pages), 0
 		for i, off := range pages {
 			opt.Progress("第 %d/%d 页", i+1, len(pages))
-			data, ext, err := tiffPageImage(raw, off)
+			data, imgExt, err := tiffPageImage(raw, off)
 			if err != nil {
 				// JPEG 压缩、2/4 位色深等 Go 的解码器不支持：这一页起改用 Windows 自带的解码组件
 				n, sm, res := windowsFallback(fmt.Errorf("TIFF 第 %d 页无法解码: %v", i+1, err), i, true)
@@ -611,7 +610,7 @@ func extractImage(p, ext string, opt Options) doc.Result {
 				total, small = i+n, small+sm
 				break
 			}
-			err = ocrOne("第"+strconv.Itoa(i+1)+"页", data, ext)
+			err = ocrOne("第"+strconv.Itoa(i+1)+"页", data, imgExt)
 			if err == errTooSmall {
 				small++
 				continue
@@ -643,11 +642,11 @@ func extractImage(p, ext string, opt Options) doc.Result {
 			}
 			break
 		}
-		data, ext, err := ocrImageData(img)
+		data, imgExt, err := ocrImageData(img)
 		if err != nil {
 			return doc.Result{Status: doc.StatusFailed, Err: "图片无法转换: " + err.Error()}
 		}
-		if err := ocrOne("", data, ext); err != nil {
+		if err := ocrOne("", data, imgExt); err != nil {
 			return imageErr(err)
 		}
 	default:
