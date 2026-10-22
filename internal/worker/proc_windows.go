@@ -16,10 +16,17 @@ import (
 const (
 	createNoWindow      = 0x08000000
 	belowNormalPriority = 0x00004000
+	idlePriority        = 0x00000040
 )
 
-func prepare(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow | belowNormalPriority}
+// prepare 设置子进程的创建参数：不显示窗口，「低于正常」优先级（lowest 时用最低的「空闲」优先级）。
+// 子进程再启动的 LibreOffice、RapidOCR 继承同样的优先级。
+func prepare(cmd *exec.Cmd, lowest bool) {
+	prio := uint32(belowNormalPriority)
+	if lowest {
+		prio = idlePriority
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow | prio}
 }
 
 var (
@@ -70,7 +77,7 @@ func ChildrenCPU() (d time.Duration, ok bool) {
 }
 
 // lowerPriority 在子进程启动后调用：低优先级已在创建时设置，这里把它加入作业对象。
-func lowerPriority(cmd *exec.Cmd) {
+func lowerPriority(cmd *exec.Cmd, lowest bool) {
 	j := killOnCloseJob()
 	if j == 0 || cmd.Process == nil {
 		return

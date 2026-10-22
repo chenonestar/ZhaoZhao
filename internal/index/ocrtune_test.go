@@ -134,7 +134,28 @@ func TestOCRSMT(t *testing.T) {
 	}
 }
 
-// 设置里开了「用电脑时 OCR 只用一半核心」：用户正在用电脑时 OCR 只用一半核心，正在识别的文件从下一页起
+// 普通文件、老格式还在处理时 OCR 也用全部核心（OCR 进程是最低优先级，只用它们剩下的 CPU）。
+func TestOCRFullWhileOthersBusy(t *testing.T) {
+	e := newEnvWith(t, &fakeProv{}, "", func(m *Manager) {
+		useFakeOCR(t, m, "10ms")
+		m.ocr.cores = 6
+	})
+	m := e.m
+	m.ocr.mu.Lock()
+	m.ocrBenchLocked()
+	m.ocr.bench = &OCRBench{Budget: 6, Logical: 6, Plans: []OCRBenchPlan{
+		{Procs: 6, Threads: 1, PerMin: 33}, {Procs: 3, Threads: 2, PerMin: 36}, {Procs: 1, Threads: 6, PerMin: 18}}}
+	m.ocr.mu.Unlock()
+	s := &m.sched
+	s.lanes[prioFast].wantWork.Store(true)
+	defer s.lanes[prioFast].wantWork.Store(false)
+	m.ocrTuneStep()
+	if p := m.ocrPlanNow(); p != (ocrPlan{3, 2}) {
+		t.Fatalf("普通文件还在处理时 OCR 也应用全部核心：%v", p)
+	}
+}
+
+// 设置里开了「用电脑时放慢」：用户正在用电脑时 OCR 只用一半核心，正在识别的文件从下一页起
 // 减少线程；离开后恢复。默认不开：用户在用电脑也用全部核心。
 func TestOCRHalfWhileUserActive(t *testing.T) {
 	idle := time.Hour
@@ -151,7 +172,6 @@ func TestOCRHalfWhileUserActive(t *testing.T) {
 	// 6 核：3×2 最快；预算减半为 3 时 3×1 最快
 	m.ocr.bench = &OCRBench{Budget: 6, Logical: 6, Plans: []OCRBenchPlan{
 		{Procs: 6, Threads: 1, PerMin: 33}, {Procs: 3, Threads: 2, PerMin: 36}, {Procs: 1, Threads: 6, PerMin: 18}}}
-	m.ocr.othersIdle = -time.Hour // 普通文件早就空闲了
 	m.ocr.mu.Unlock()
 	m.ocrTuneStep()
 	if p := m.ocrPlanNow(); p != (ocrPlan{3, 2}) {
@@ -183,7 +203,7 @@ func TestOCRHalfWhileUserActive(t *testing.T) {
 	}
 	// 关掉这个设置（默认）：用户在用电脑也用全部核心
 	c := m.Config()
-	c.OCRHalfWhenActive = false
+	c.SlowWhenActive = false
 	m.SetConfig(c)
 	idle = 10 * time.Second
 	m.ocrTuneStep()
@@ -441,7 +461,7 @@ func TestOCRManualPlanApplied(t *testing.T) {
 	c := e.m.Config()
 	c.OCRWorkers = 0
 	e.m.SetConfig(c)
-	if p := e.m.ocrPlanNow(); p.threads != 1 || p.procs > ocrBudget(cores, true) {
+	if p := e.m.ocrPlanNow(); p.threads != 1 || p.procs > ocrBudget(cores, false) {
 		t.Fatalf("改回自动、还没测速时应每个进程 1 线程：%v", p)
 	}
 }

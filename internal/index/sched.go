@@ -371,8 +371,26 @@ func (m *Manager) laneWorker(l *lane) {
 		}
 		s.mu.Unlock()
 		m.kick()
-		throttleForUser(m.ctx)
+		m.pauseForUser()
 	}
+}
+
+// userPause：设置里开了「用电脑时放慢」、用户正在操作（userPauseIdle 之内用过键盘、鼠标）时，每处理完一个文件
+// 先停这么久（F-BG-04）。0.2.5 以前不管设置一直这样：一个小文件只要几十毫秒，停 0.3 秒让普通文件慢了好几倍，
+// 某位用户白天用着电脑，普通文件的处理线程平均只有一半在干活。子进程本来就是低优先级，用户的程序优先。
+var userPause = 300 * time.Millisecond
+
+const userPauseIdle = 3 * time.Second
+
+func (m *Manager) pauseForUser() {
+	if m.Config().SlowWhenActive && userIdleTime() < userPauseIdle {
+		m.sleepCtx(userPause)
+	}
+}
+
+// slowForUser：设置里开了「用电脑时放慢」，而且用户 userActiveFor 之内用过键盘、鼠标：OCR 只用一半核心。
+func slowForUser(cfg Config) bool {
+	return cfg.SlowWhenActive && userIdleTime() < userActiveFor
 }
 
 // 剩余时间按最近一小时实际完成了多少个文件估算（throughputEta）：自然算进了并发数、文件大小、排队收尾时

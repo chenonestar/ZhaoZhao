@@ -107,6 +107,7 @@ func main() {
 	mgr := index.New(db, volume.System(), pool, dataDir)
 	mgr.OCRPool = worker.NewPool(exe, 1)
 	mgr.OCRPool.Name = "OCR"
+	mgr.OCRPool.Lowest = true // 普通文件、老格式先用 CPU，OCR 用剩下的
 	mgr.LegacyPool = worker.NewPool(exe, 1)
 	mgr.LegacyPool.Name = "转换"
 	if err := mgr.Start(); err != nil {

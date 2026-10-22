@@ -256,7 +256,7 @@ export interface Config {
   hotkey: string;
   ocrEnabled: boolean;
   ocrWorkers: number;
-  ocrHalfWhenActive: boolean;
+  ocrHalfWhenActive: boolean; // 用电脑时放慢建索引（沿用 0.2.5 的名字）
   logLevel: string;
   configVersion: number;
 }

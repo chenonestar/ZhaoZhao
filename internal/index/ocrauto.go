@@ -18,12 +18,11 @@ import (
 
 // ocrState 是 OCR 进程数 × 线程数的当前搭配、本机的测速结果和最近的速度（见 ocrtune.go、ocrbench.go）。
 type ocrState struct {
-	mu         sync.Mutex
-	plan       ocrPlan
-	rate       rateWindow
-	cores      int           // 物理核心数
-	othersIdle time.Duration // 普通文件、老格式开始空闲的时间（awake）；0 表示忙
-	pages      atomic.Int64  // OCR 通道累计识别的页数
+	mu    sync.Mutex
+	plan  ocrPlan
+	rate  rateWindow
+	cores int          // 物理核心数
+	pages atomic.Int64 // OCR 通道累计识别的页数
 
 	machine   sysinfo.Machine
 	key       string    // 本机连同 OCR 组件的指纹
@@ -35,16 +34,13 @@ type ocrState struct {
 	memCap    int       // 内存允许的 OCR 进程数（0 表示还没算）
 	tail      int       // 队列收尾时每个文件的线程数（0 表示没有在收尾）
 	tailSeen  int       // 连续几次看到队列已空、有进程空闲
-	userBusy  bool      // 用户正在用电脑：OCR 只用一半核心
+	userBusy  bool      // 开了「用电脑时放慢」、用户正在用电脑：OCR 只用一半核心
 }
 
 // ocrTuneEvery：多久调整一次。
 var ocrTuneEvery = 30 * time.Second
 
-// othersIdleFor：普通文件、老格式空闲这么久后，OCR 才用全部核心（避免偶尔来一个文件就来回切换）。
-const othersIdleFor = 2 * time.Minute
-
-// userActiveFor：设置里开了「用电脑时 OCR 只用一半核心」时，这么久之内用过键盘、鼠标就算用户正在用电脑，
+// userActiveFor：设置里开了「用电脑时放慢」时，这么久之内用过键盘、鼠标就算用户正在用电脑，
 // OCR 只用一半核心；离开这么久后再用全部核心。默认不开：OCR 进程本来就是低优先级，用户的程序优先；
 // 0.2.4 默认开着，用户白天一直在用电脑，OCR 有 3.6 小时只用一半核心，建索引多花了约 1.9 小时。
 const userActiveFor = 2 * time.Minute
@@ -63,8 +59,12 @@ func (m *Manager) physCores() int {
 	return m.ocr.cores
 }
 
-// ocrBudget 返回 OCR 的线程预算：只剩 OCR 时用全部物理核心；half（普通文件、老格式还在处理，或者用户
-// 正在用电脑）时用一半。实测超线程更快时，只剩 OCR 时用全部逻辑处理器（见 autoPlanLocked）。
+// ocrBudget 返回 OCR 的线程预算：全部物理核心；half（设置里开了「用电脑时放慢」、用户正在用电脑）时用一半。
+// 实测超线程更快时用全部逻辑处理器（见 autoPlanLocked）。
+//
+// 普通文件、老格式还在处理时 OCR 也用全部核心：OCR 进程是最低优先级，解析、转换进程先用 CPU，OCR 只用剩下的。
+// 0.2.5 以前这时只给 OCR 一半核心，可普通文件阶段多半在等磁盘、等写入，CPU 大多空着：某位用户的普通文件
+// 处理了 83 分钟，这期间 OCR 每分钟只识别 16 页（只剩 OCR 时每分钟 60 多页）。
 func ocrBudget(cores int, half bool) int {
 	if !half {
 		return cores
@@ -123,7 +123,7 @@ func (m *Manager) ocrPlanNow() ocrPlan {
 		if cfg.OCRWorkers > 0 {
 			m.ocr.plan = ocrManualPlan(cfg.OCRWorkers, cores)
 		} else {
-			m.ocr.plan, _ = m.autoPlanLocked(cores, true, live)
+			m.ocr.plan, _ = m.autoPlanLocked(cores, slowForUser(cfg), live)
 		}
 	}
 	return m.ocr.plan
@@ -134,19 +134,6 @@ func (m *Manager) resetOCRPlan() {
 	m.ocr.mu.Lock()
 	m.ocr.plan, m.ocr.memCap, m.ocr.tailSeen = ocrPlan{}, 0, 0
 	m.ocr.mu.Unlock()
-}
-
-// othersBusy：普通文件或老格式转换还有文件在处理或排队。
-func (m *Manager) othersBusy() bool {
-	s := &m.sched
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, p := range []int{prioFast, prioLegacy} {
-		if l := s.lanes[p]; l != nil && (l.running > 0 || l.wantWork.Load()) {
-			return true
-		}
-	}
-	return false
 }
 
 func (m *Manager) ocrTuneLoop() {
@@ -172,18 +159,11 @@ func (m *Manager) ocrTuneStep() {
 	cores := m.physCores()
 	now := awake.Now()
 	pages := m.ocr.pages.Load()
-	busy := m.othersBusy()
 	live := m.ocrLive()
-	userBusy := cfg.OCRHalfWhenActive && userIdleTime() < userActiveFor
+	userBusy := slowForUser(cfg)
 
 	m.ocr.mu.Lock()
 	m.ocr.rate.add(now, pages)
-	switch {
-	case busy:
-		m.ocr.othersIdle = 0
-	case m.ocr.othersIdle == 0:
-		m.ocr.othersIdle = now
-	}
 	var next ocrPlan
 	var budget int
 	if cfg.OCRWorkers > 0 {
@@ -191,7 +171,7 @@ func (m *Manager) ocrTuneStep() {
 		budget = next.procs * next.threads
 		userBusy = false // 手动设的不自动调整
 	} else {
-		next, budget = m.autoPlanLocked(cores, busy || now-m.ocr.othersIdle < othersIdleFor || userBusy, live)
+		next, budget = m.autoPlanLocked(cores, userBusy, live)
 	}
 	changed := next != m.ocr.plan
 	userChanged := userBusy != m.ocr.userBusy

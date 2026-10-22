@@ -29,17 +29,19 @@ type Config struct {
 
 	Simplify bool `json:"simplify"` // 繁简体归一
 
-	Workers           int  `json:"workers"`           // 提取并发数，0 表示 CPU 核心数的一半
-	TimeoutSec        int  `json:"timeoutSec"`        // 单文件提取超时
-	LegacyWorkers     int  `json:"legacyWorkers"`     // 老格式转换并发数
-	LegacyLOOnly      bool `json:"legacyLOOnly"`      // 老格式只用 LibreOffice 转换，不用内置解析（排查问题用）
-	OCREnabled        bool `json:"ocrEnabled"`        // OCR 总开关
-	OCRWorkers        int  `json:"ocrWorkers"`        // OCR 进程数，0 表示自动（实测选择进程数和每个进程的线程数）
-	OCRHalfWhenActive bool `json:"ocrHalfWhenActive"` // 用户正在用电脑时 OCR 只用一半核心（默认关：OCR 本来就是低优先级）
-	NetworkScanMin    int  `json:"networkScanMin"`    // 网络盘定时扫描间隔（分钟）
-	NetworkReadConc   int  `json:"networkReadConc"`   // 网络盘读取并发数
-	PauseOnBattery    bool `json:"pauseOnBattery"`    // 使用电池时暂停 OCR 和格式转换
-	KeepAwake         bool `json:"keepAwake"`         // 建立索引期间不让电脑自动睡眠（接通电源时）
+	Workers       int  `json:"workers"`       // 提取并发数，0 表示 CPU 核心数的一半
+	TimeoutSec    int  `json:"timeoutSec"`    // 单文件提取超时
+	LegacyWorkers int  `json:"legacyWorkers"` // 老格式转换并发数
+	LegacyLOOnly  bool `json:"legacyLOOnly"`  // 老格式只用 LibreOffice 转换，不用内置解析（排查问题用）
+	OCREnabled    bool `json:"ocrEnabled"`    // OCR 总开关
+	OCRWorkers    int  `json:"ocrWorkers"`    // OCR 进程数，0 表示自动（实测选择进程数和每个进程的线程数）
+	// SlowWhenActive：用户正在用电脑时放慢建索引：OCR 只用一半核心，普通文件每处理完一个停一下。
+	// 默认关：子进程本来就是低优先级，用户的程序优先。0.2.5 时只管 OCR，沿用当时的设置名。
+	SlowWhenActive    bool `json:"ocrHalfWhenActive"`
+	NetworkScanMin    int  `json:"networkScanMin"`  // 网络盘定时扫描间隔（分钟）
+	NetworkReadConc   int  `json:"networkReadConc"` // 网络盘读取并发数
+	PauseOnBattery    bool `json:"pauseOnBattery"`  // 使用电池时暂停 OCR 和格式转换
+	KeepAwake         bool `json:"keepAwake"`       // 建立索引期间不让电脑自动睡眠（接通电源时）
 	ContainerMaxDepth int  `json:"containerMaxDepth"`
 	ArchiveMaxMB      int  `json:"archiveMaxMB"`    // 单个压缩包解压总量上限
 	ArchiveMaxRatio   int  `json:"archiveMaxRatio"` // 单个内部文件压缩比上限

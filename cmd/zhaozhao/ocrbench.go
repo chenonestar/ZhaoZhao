@@ -34,6 +34,7 @@ func runOCRBench(out string) error {
 	logf("OCR 组件：%s %s", cfg.Command, strings.Join(cfg.Args, " "))
 	pool := worker.NewPool(exe, 1)
 	pool.Name = "OCR"
+	pool.Lowest = true // 和正式运行时一样
 	defer pool.Close()
 	t0 := time.Now()
 	res, err := index.BenchOCR(context.Background(), pool, cfg, func(s string) { logf("正在测：%s", s) })

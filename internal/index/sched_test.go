@@ -275,3 +275,33 @@ func TestCurrentJobsStableOrder(t *testing.T) {
 		t.Fatalf("开始处理后位置变了: %s", got)
 	}
 }
+
+// 设置里开了「用电脑时放慢」、用户正在操作时，每处理完一个文件停一下；默认不停（子进程本来就是低优先级）。
+func TestPauseForUser(t *testing.T) {
+	oldIdle, oldPause := userIdleTime, userPause
+	t.Cleanup(func() { userIdleTime, userPause = oldIdle, oldPause })
+	userPause = 300 * time.Millisecond
+	idle := time.Second
+	userIdleTime = func() time.Duration { return idle }
+	m := newEnv(t, &fakeProv{}).m
+	took := func() time.Duration {
+		t0 := time.Now()
+		m.pauseForUser()
+		return time.Since(t0)
+	}
+	if d := took(); d > 100*time.Millisecond {
+		t.Fatalf("默认不停：%v", d)
+	}
+	c := m.Config()
+	c.SlowWhenActive = true
+	if err := m.SetConfig(c); err != nil {
+		t.Fatal(err)
+	}
+	if d := took(); d < 250*time.Millisecond {
+		t.Fatalf("开了设置、用户正在操作时应停一下：%v", d)
+	}
+	idle = time.Minute
+	if d := took(); d > 100*time.Millisecond {
+		t.Fatalf("用户没在操作时不停：%v", d)
+	}
+}

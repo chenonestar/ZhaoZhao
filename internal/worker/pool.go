@@ -129,6 +129,9 @@ type Pool struct {
 	Args        []string
 	Name        string        // 日志里的名称，如「解析」「OCR」
 	IdleTimeout time.Duration // 闲置多久后结束子进程
+	// Lowest：子进程用最低优先级（OCR）。解析、转换进程是「低于正常」，OCR 比它们还低：普通文件和老格式
+	// 先用 CPU，OCR 只用剩下的，所以 OCR 可以一直开满核心，不会拖慢普通文件。
+	Lowest bool
 
 	mu     sync.Mutex
 	size   int
@@ -278,7 +281,7 @@ func (p *Pool) reapIdle() {
 
 func (p *Pool) start() (*proc, error) {
 	cmd := exec.Command(p.Exe, p.Args...)
-	prepare(cmd)
+	prepare(cmd, p.Lowest)
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -292,7 +295,7 @@ func (p *Pool) start() (*proc, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	lowerPriority(cmd)
+	lowerPriority(cmd, p.Lowest)
 	pr := &proc{cmd: cmd, in: in, out: bufio.NewReaderSize(out, 1<<20), pid: cmd.Process.Pid}
 	ll.setPrefix(fmt.Sprintf("[%s %d] ", p.label(), pr.pid))
 	p.mu.Lock()

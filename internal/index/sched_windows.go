@@ -3,7 +3,6 @@
 package index
 
 import (
-	"context"
 	"time"
 	"unsafe"
 
@@ -51,14 +50,3 @@ func idleMillis() uint32 {
 
 // userIdleTime 返回用户多久没用键盘、鼠标了（测试里换掉）。
 var userIdleTime = func() time.Duration { return time.Duration(idleMillis()) * time.Millisecond }
-
-// throttleForUser：检测到用户正在操作（3 秒内有键鼠输入）时，每处理完一个文件先让出一会儿（F-BG-04）。
-func throttleForUser(ctx context.Context) {
-	if idleMillis() >= 3000 {
-		return
-	}
-	select {
-	case <-time.After(300 * time.Millisecond):
-	case <-ctx.Done():
-	}
-}
