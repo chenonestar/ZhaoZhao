@@ -32,7 +32,7 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
-	_ "golang.org/x/image/bmp"
+	"golang.org/x/image/bmp"
 	"golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
 )
@@ -435,11 +435,11 @@ func tiffPages(b []byte) []uint32 {
 	return pages
 }
 
-// tiffPagePNG 把 TIFF 的第 k 页转成 PNG：让解码器读到的文件头里，指向首个 IFD 的偏移是第 k 页的 IFD，
+// tiffPageImage 把 TIFF 的第 k 页转成交给 OCR 组件的图片（ocrImageData）：让解码器读到的文件头里，指向首个 IFD 的偏移是第 k 页的 IFD，
 // 所有数据偏移都是绝对的，因此标准解码器直接解出该页。不复制文件（每页复制一遍，100 页就是 100 份拷贝）。
-func tiffPagePNG(b []byte, ifd uint32) ([]byte, error) {
+func tiffPageImage(b []byte, ifd uint32) ([]byte, string, error) {
 	if len(b) < 8 {
-		return nil, errors.New("TIFF 文件太短")
+		return nil, "", errors.New("TIFF 文件太短")
 	}
 	r := &tiffPage{b: b}
 	copy(r.hdr[:], b[:8])
@@ -450,9 +450,9 @@ func tiffPagePNG(b []byte, ifd uint32) ([]byte, error) {
 	}
 	img, err := tiff.Decode(r)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return encodePNG(img)
+	return ocrImageData(img)
 }
 
 // tiffPage 是改了文件头前 8 字节的 TIFF 数据（解码器有 ReadAt 时直接用它，不会整份读进新的缓冲区）。
@@ -490,13 +490,22 @@ func (t *tiffPage) Read(p []byte) (int, error) {
 }
 
 // encodePNG 用最快的压缩级别编码 PNG（只是交给 OCR 组件的临时图片，不必压得小）。
-func encodePNG(img image.Image) ([]byte, error) {
+// ocrImageData 把要识别的图片编码成交给 OCR 组件的临时文件，返回数据和扩展名。灰度图（PDF 渲染出的页、扫描件）
+// 用 BMP：不压缩，编码和组件解码都几乎不花时间（一页 A4 扫描页编码成 PNG 约 0.1～0.2 秒，占每页用时的
+// 5% 左右；BMP 约 3 毫秒），文件大些，但用完就删。彩色图仍用 PNG（透明的地方交给组件按 PNG 处理）。
+func ocrImageData(img image.Image) ([]byte, string, error) {
 	var out bytes.Buffer
+	if g, ok := img.(*image.Gray); ok {
+		if err := bmp.Encode(&out, g); err != nil {
+			return nil, "", err
+		}
+		return out.Bytes(), ".bmp", nil
+	}
 	enc := png.Encoder{CompressionLevel: png.BestSpeed}
 	if err := enc.Encode(&out, img); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return out.Bytes(), nil
+	return out.Bytes(), ".png", nil
 }
 
 // tempImage 把图片数据写成 ASCII 文件名的临时文件（OCR 组件对非 ASCII 路径支持不好）。
@@ -552,7 +561,7 @@ func extractImage(p, ext string, opt Options) doc.Result {
 			if multi {
 				opt.Progress("第 %d/%d 页", i+1, n)
 			}
-			data, err := encodePNG(img)
+			data, ext, err := ocrImageData(img)
 			if err != nil {
 				return err
 			}
@@ -560,7 +569,7 @@ func extractImage(p, ext string, opt Options) doc.Result {
 			if multi {
 				label = "第" + strconv.Itoa(i+1) + "页"
 			}
-			if err := ocrOne(label, data, ".png"); err == errTooSmall {
+			if err := ocrOne(label, data, ext); err == errTooSmall {
 				small++
 			} else if err != nil {
 				return err
@@ -592,7 +601,7 @@ func extractImage(p, ext string, opt Options) doc.Result {
 		total, small := len(pages), 0
 		for i, off := range pages {
 			opt.Progress("第 %d/%d 页", i+1, len(pages))
-			pngData, err := tiffPagePNG(raw, off)
+			data, ext, err := tiffPageImage(raw, off)
 			if err != nil {
 				// JPEG 压缩、2/4 位色深等 Go 的解码器不支持：这一页起改用 Windows 自带的解码组件
 				n, sm, res := windowsFallback(fmt.Errorf("TIFF 第 %d 页无法解码: %v", i+1, err), i, true)
@@ -602,7 +611,7 @@ func extractImage(p, ext string, opt Options) doc.Result {
 				total, small = i+n, small+sm
 				break
 			}
-			err = ocrOne("第"+strconv.Itoa(i+1)+"页", pngData, ".png")
+			err = ocrOne("第"+strconv.Itoa(i+1)+"页", data, ext)
 			if err == errTooSmall {
 				small++
 				continue
@@ -622,7 +631,7 @@ func extractImage(p, ext string, opt Options) doc.Result {
 			return doc.Result{Status: doc.StatusSkipped, Err: ErrTooSmall}
 		}
 	case "webp", "bmp", "gif":
-		// OCR 组件不一定支持这些格式：统一转成 PNG
+		// OCR 组件不一定支持这些格式（BMP 有多种写法）：统一转成 ocrImageData 的格式
 		img, _, err := image.Decode(bytes.NewReader(raw))
 		if err != nil {
 			n, small, res := windowsFallback(errors.New("图片无法解码: "+err.Error()), 0, false)
@@ -634,11 +643,11 @@ func extractImage(p, ext string, opt Options) doc.Result {
 			}
 			break
 		}
-		data, err := encodePNG(img)
+		data, ext, err := ocrImageData(img)
 		if err != nil {
 			return doc.Result{Status: doc.StatusFailed, Err: "图片无法转换: " + err.Error()}
 		}
-		if err := ocrOne("", data, ".png"); err != nil {
+		if err := ocrOne("", data, ext); err != nil {
 			return imageErr(err)
 		}
 	default:
@@ -702,6 +711,8 @@ func (r pdfOCRResult) note() string {
 // ocrPDFiumPages 用 PDFium 把没有文字层的页逐页渲染成图片并做 OCR：不管页面里是什么格式的图片
 // （JPEG、JBIG2、JPEG 2000、CCITT），也不管是一张图还是多张拼成，都按整页识别。
 // 几乎全白的页（空白页）不送去识别。调用方持有 pdfiumMu。
+//
+// 识别当前页的同时渲染下一页（renderAhead）：渲染、写临时文件约占每页用时的 5～8%，以前 OCR 组件这时干等着。
 func ocrPDFiumPages(d *pdfDoc, p string, pages []int, opt Options) (pdfOCRResult, error) {
 	res := pdfOCRResult{texts: map[int]string{}, skipped: map[string]int{}}
 	tmp, err := os.MkdirTemp("", "zhaozhao-pdfocr-")
@@ -714,26 +725,24 @@ func ocrPDFiumPages(d *pdfDoc, p string, pages []int, opt Options) (pdfOCRResult
 		logx.Debugf("PDF %s 第 %d 页%s，跳过", logx.P(p), pg, why)
 	}
 	logx.Debugf("PDF %s：共 %d 页，其中 %d 页没有文字层，渲染后 OCR", logx.P(p), d.pages(), len(pages))
+	ahead, stop := renderAhead(d, pages, tmp)
+	defer stop()
 	for i, pg := range pages {
 		opt.Progress("第 %d/%d 页", i+1, len(pages))
-		t0 := time.Now()
-		img, err := d.render(pg-1, 200, 3500)
-		if err != nil {
-			skip(pg, "无法渲染（"+truncate(err.Error(), 80)+"）")
+		r := <-ahead
+		if r.err != nil {
+			return res, r.err
+		}
+		if r.skip != "" {
+			skip(pg, r.skip)
 			continue
 		}
-		if blankImage(img) {
+		if r.path == "" {
 			continue // 空白页
 		}
-		path := filepath.Join(tmp, "p"+strconv.Itoa(pg)+".png")
-		if err := writePNG(path, img); err != nil {
-			return res, err
-		}
-		sz := img.Rect.Size()
-		img = nil
 		t1 := time.Now()
-		text, err := ocrImage(opt.OCR, path)
-		os.Remove(path)
+		text, err := ocrImage(opt.OCR, r.path)
+		os.Remove(r.path)
 		if errors.Is(err, errOCRTimeout) {
 			skip(pg, "识别超时")
 			continue
@@ -742,13 +751,72 @@ func ocrPDFiumPages(d *pdfDoc, p string, pages []int, opt Options) (pdfOCRResult
 			return res, err
 		}
 		logx.Debugf("OCR %s 第 %d 页（%d/%d）渲染 %.1fs、识别 %.1fs，图片 %dx%d，识别出 %d 字", logx.P(p), pg, i+1, len(pages),
-			t1.Sub(t0).Seconds(), time.Since(t1).Seconds(), sz.X, sz.Y, len([]rune(text)))
+			r.dur.Seconds(), time.Since(t1).Seconds(), r.size.X, r.size.Y, len([]rune(text)))
 		res.texts[pg] = text
 	}
 	if n := res.note(); n != "" {
 		log.Printf("PDF %s：%s", logx.P(p), n)
 	}
 	return res, nil
+}
+
+// renderedPage 是渲染好、写成临时文件等着识别的一页。path 为空、skip 也为空表示空白页。
+type renderedPage struct {
+	path string
+	size image.Point
+	dur  time.Duration // 渲染加写文件的用时
+	skip string        // 无法渲染的原因
+	err  error         // 写临时文件失败：整份文件失败
+}
+
+// renderAhead 在另一个协程里按顺序渲染 pages，最多比识别提前一页（内存里、磁盘上最多多一页的图）。
+// stop 结束渲染并等协程退出：调用方返回后会释放 pdfiumMu、关闭文档，之后不能再碰 PDFium。
+func renderAhead(d *pdfDoc, pages []int, tmp string) (<-chan renderedPage, func()) {
+	out := make(chan renderedPage, 1)
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, pg := range pages {
+			select {
+			case <-quit:
+				return
+			default:
+			}
+			var r renderedPage
+			t0 := time.Now()
+			img, err := d.render(pg-1, 200, 3500)
+			switch {
+			case err != nil:
+				r.skip = "无法渲染（" + truncate(err.Error(), 80) + "）"
+			case !blankImage(img):
+				var data []byte
+				var ext string
+				if data, ext, r.err = ocrImageData(img); r.err == nil {
+					r.size = img.Rect.Size()
+					r.path, r.err = tempImage(tmp, "p"+strconv.Itoa(pg)+ext, data)
+				}
+			}
+			img = nil
+			r.dur = time.Since(t0)
+			select {
+			case out <- r:
+			case <-quit:
+				if r.path != "" {
+					os.Remove(r.path)
+				}
+				return
+			}
+			if r.err != nil {
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return out, func() {
+		once.Do(func() { close(quit) })
+		<-done
+	}
 }
 
 // blankImage 判断渲染出的页面是否几乎全白（深色像素不到万分之五）。
@@ -763,19 +831,6 @@ func blankImage(g *image.Gray) bool {
 		}
 	}
 	return true
-}
-
-func writePNG(path string, img image.Image) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	enc := png.Encoder{CompressionLevel: png.BestSpeed}
-	if err := enc.Encode(f, img); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
 }
 
 // ocrPDFPages 对没有文字层的页逐页取出内嵌图片并做 OCR（没有 PDFium 时）：PDF 结构只读一次，
@@ -839,8 +894,8 @@ func ocrPDFPages(p string, pages []int, opt Options) (pdfOCRResult, error) {
 		case "jpg", "jpeg", "png":
 		case "tif", "tiff":
 			if tp := tiffPages(b); len(tp) > 0 {
-				if pngData, err := tiffPagePNG(b, tp[0]); err == nil {
-					b, ext = pngData, ".png"
+				if data, e, err := tiffPageImage(b, tp[0]); err == nil {
+					b, ext = data, e
 				}
 			}
 		case "jbig2":
@@ -855,7 +910,7 @@ func ocrPDFPages(p string, pages []int, opt Options) (pdfOCRResult, error) {
 		}
 		w, h := best.Width, best.Height
 		if w == 0 || h == 0 {
-			if cfg, err := decodeConfig(b, best.FileType); err == nil {
+			if cfg, err := decodeConfig(b, strings.TrimPrefix(ext, ".")); err == nil { // TIFF 已转成别的格式
 				w, h = cfg.Width, cfg.Height
 			}
 		}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenonestar/zhaozhao/internal/scanpdf"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
@@ -119,5 +120,45 @@ func TestCheckPDFium(t *testing.T) {
 	t.Logf("%+v", st)
 	if _, err := PDFiumPath(); err == nil && !st.OK {
 		t.Fatal(st.Message)
+	}
+}
+
+// 识别当前页的同时渲染下一页：拿到第 1 页时，第 2 页已经在渲染（写好临时文件），不等第 1 页识别完。
+// 中途停下（识别出错）时渲染协程退出，之后不再碰 PDFium。
+func TestRenderAhead(t *testing.T) {
+	needPDFium(t)
+	var b bytes.Buffer
+	if err := scanpdf.Write(&b, []scanpdf.Page{{Image: grayPage(1)}, {Image: grayPage(2)}, {Image: grayPage(3)}}); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "扫描.pdf")
+	os.WriteFile(p, b.Bytes(), 0o644)
+	tmp := t.TempDir()
+	pdfiumMu.Lock()
+	defer pdfiumMu.Unlock()
+	d, err := openPDFium(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.close()
+	ahead, stop := renderAhead(d, []int{1, 2, 3}, tmp)
+	r := <-ahead
+	if r.err != nil || r.path == "" || !strings.HasSuffix(r.path, ".bmp") {
+		t.Fatalf("第 1 页：%+v", r)
+	}
+	// 这时「识别」第 1 页：第 2 页应在后台渲染好
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(tmp, "p2.bmp")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("识别第 1 页时第 2 页没有提前渲染")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	stop() // 中途停下：等渲染协程退出
+	if _, err := os.Stat(filepath.Join(tmp, "p3.bmp")); err == nil {
+		t.Fatal("停下时多渲染的页应删掉临时文件")
 	}
 }

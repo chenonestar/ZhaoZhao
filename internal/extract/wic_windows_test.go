@@ -38,7 +38,7 @@ func TestWICDecodesUnsupportedTIFF(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, off := range tiffPages(raw) {
-		if _, err := tiffPagePNG(raw, off); err == nil {
+		if _, _, err := tiffPageImage(raw, off); err == nil {
 			t.Fatalf("第 %d 页 Go 的解码器应解不开", i+1)
 		}
 	}

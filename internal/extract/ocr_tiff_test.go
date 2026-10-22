@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"image"
-	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,11 +26,14 @@ func TestTIFFPagesNoCopy(t *testing.T) {
 			t.Fatalf("%v：%d 页", bo, len(pages))
 		}
 		for i, off := range pages {
-			data, err := tiffPagePNG(raw, off)
+			data, ext, err := tiffPageImage(raw, off)
 			if err != nil {
 				t.Fatalf("%v 第 %d 页：%v", bo, i+1, err)
 			}
-			img, err := png.Decode(bytes.NewReader(data))
+			if ext != ".bmp" {
+				t.Fatalf("灰度页应写成 BMP 交给 OCR 组件（编码快）：%s", ext)
+			}
+			img, _, err := image.Decode(bytes.NewReader(data))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -43,7 +45,7 @@ func TestTIFFPagesNoCopy(t *testing.T) {
 			t.Fatal("原数据被改动了")
 		}
 	}
-	if _, err := tiffPagePNG([]byte("II*"), 8); err == nil {
+	if _, _, err := tiffPageImage([]byte("II*"), 8); err == nil {
 		t.Fatal("太短的数据应报错")
 	}
 }
@@ -56,11 +58,11 @@ func TestTIFFShortLastStrip(t *testing.T) {
 	if len(pages) != 1 {
 		t.Fatal(pages)
 	}
-	out, err := tiffPagePNG(raw, pages[0])
+	out, _, err := tiffPageImage(raw, pages[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	img, _ := png.Decode(bytes.NewReader(out))
+	img, _, _ := image.Decode(bytes.NewReader(out))
 	if r, _, _, _ := img.At(10, 10).RGBA(); r>>8 != 200 {
 		t.Fatalf("像素 %d", r>>8)
 	}
