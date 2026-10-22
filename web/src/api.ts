@@ -76,6 +76,7 @@ export const api = {
   saveConfig: (c: Config) => post<Config>("/api/config", c),
   defaults: () => call<Config>("/api/config/defaults"),
   notices: (after: number) => call<Notice[]>(`/api/notices?after=${after}`),
+  dismissNotice: (id: number) => post("/api/notices/dismiss", { id }),
   history: () => call<string[]>("/api/history"),
   addHistory: (query: string) => post<string[]>("/api/history", { query }),
   clearHistory: () => post<string[]>("/api/history", { clear: true }),

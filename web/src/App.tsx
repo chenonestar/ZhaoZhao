@@ -44,7 +44,6 @@ export function App() {
   const [notices, setNotices] = useState<Notice[]>([]);
   const input = useRef<HTMLInputElement>(null);
   const abort = useRef<AbortController | null>(null);
-  const lastNotice = useRef(0);
   const ranQuery = useRef("");
 
   useEffect(() => { localStorage.setItem(OPTS_KEY, JSON.stringify(opts)); }, [opts]);
@@ -130,9 +129,8 @@ export function App() {
   useEffect(() => {
     api.history().then(setHistory).catch(() => {});
     api.saved().then(setSaved).catch(() => {});
-    const poll = () => api.notices(lastNotice.current).then((ns) => {
-      if (ns.length) { lastNotice.current = ns[ns.length - 1].id; setNotices((p) => [...p, ...ns]); }
-    }).catch(() => {});
+    // 每次取回全部还有效的通知：关掉的、磁盘拔出了的不再显示，重新打开窗口也一样
+    const poll = () => api.notices(0).then((ns) => setNotices(ns ?? [])).catch(() => {});
     poll();
     const t = setInterval(poll, 5000);
     return () => clearInterval(t);
@@ -257,12 +255,13 @@ export function App() {
             <button className="primary" disabled={adding} onClick={() => {
               setAdding(true); setNoticeErr("");
               api.addRoot(n.path!)
-                .then(() => { setNotices([]); refreshStatus(); setPanel("index"); })
+                .then(() => { setNotices((p) => p.filter((x) => x.id !== n.id)); refreshStatus(); setPanel("index"); })
                 .catch((e) => setNoticeErr("没能加入：" + e.message))
                 .finally(() => setAdding(false));
             }}>{adding ? "正在加入…" : "加入索引"}</button>
           )}
-          <button onClick={() => { setNotices([]); setNoticeErr(""); }}>忽略</button>
+          <button title={n.kind === "new-volume" ? "以后接入这块磁盘不再询问；需要时可以在「索引与设置」里用「添加目录」加入" : undefined}
+            onClick={() => { api.dismissNotice(n.id).catch(() => {}); setNotices((p) => p.filter((x) => x.id !== n.id)); setNoticeErr(""); }}>忽略</button>
           {noticeErr && <span className="error">{noticeErr}</span>}
         </div>
       ))}

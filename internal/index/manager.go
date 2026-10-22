@@ -565,6 +565,7 @@ func (m *Manager) AddRoot(path string) (*store.Root, error) {
 		return nil, err
 	}
 	m.saveRootsBackup()
+	m.dropVolumeNotices(info.ID)
 	rt := m.getRoot(id)
 	m.watchRoot(rt)
 	m.enqueueScan(scanReq{rootID: id})
@@ -697,11 +698,11 @@ func (m *Manager) addNotice(n Notice) {
 	}
 }
 
-// Notices 返回 id 之后的新通知。
+// Notices 返回 id 之后的通知（after 为 0 时返回全部还有效的通知：关掉的、过时的不再返回）。
 func (m *Manager) Notices(after int64) []Notice {
 	m.noticeMu.Lock()
 	defer m.noticeMu.Unlock()
-	var out []Notice
+	out := []Notice{}
 	for _, n := range m.notices {
 		if n.ID > after {
 			out = append(out, n)
@@ -710,7 +711,51 @@ func (m *Manager) Notices(after int64) []Notice {
 	return out
 }
 
-// DismissNotice 不再提示某个新卷（用户选择了不加入）。
+// DismissNotice 关掉一条通知。新接入磁盘的「是否加入索引」：记住这块盘，以后接入不再问
+// （要加入时用「添加目录」）。以前只在界面上隐藏，重新打开窗口又会出现。
+func (m *Manager) DismissNotice(id int64) {
+	m.noticeMu.Lock()
+	var gone *Notice
+	for i, n := range m.notices {
+		if n.ID == id {
+			gone = &n
+			m.notices = slices.Delete(m.notices, i, i+1)
+			break
+		}
+	}
+	m.noticeMu.Unlock()
+	if gone != nil && gone.Kind == "new-volume" && gone.Volume != "" {
+		m.ignoreVolume(gone.Volume)
+		m.logf("不再提示把磁盘 %s 加入索引（需要时可以用「添加目录」加入）", logx.P(gone.Path))
+	}
+}
+
+// dropVolumeNotices 去掉某块磁盘的「是否加入索引」提示（磁盘拔出了、已经加入索引），下次接入时可以再问。
+func (m *Manager) dropVolumeNotices(vol string) {
+	m.noticeMu.Lock()
+	defer m.noticeMu.Unlock()
+	m.notices = slices.DeleteFunc(m.notices, func(n Notice) bool { return n.Kind == "new-volume" && n.Volume == vol })
+	delete(m.noticed, "new:"+vol)
+}
+
+const metaIgnoredVolumes = "ignored_volumes" // 用户选择了不加入索引的磁盘（JSON 数组）
+
+func (m *Manager) ignoredVolumes() []string {
+	v, _ := m.DB.GetMeta(metaIgnoredVolumes)
+	var ids []string
+	_ = json.Unmarshal([]byte(v), &ids)
+	return ids
+}
+
+func (m *Manager) ignoreVolume(id string) {
+	ids := m.ignoredVolumes()
+	if slices.Contains(ids, id) {
+		return
+	}
+	data, _ := json.Marshal(append(ids, id))
+	_ = m.DB.SetMeta(metaIgnoredVolumes, string(data))
+}
+
 func (m *Manager) logf(format string, a ...any) { log.Printf(format, a...) }
 
 // ---- 索引根备份：索引库损坏重建后可恢复索引根列表 ----

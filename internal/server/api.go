@@ -310,6 +310,16 @@ func (s *Server) routes(mux *http.ServeMux) {
 		after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
 		writeJSON(w, s.M.Notices(after))
 	})
+	h("/api/notices/dismiss", s.post(func(r *http.Request) (any, error) {
+		var b struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+			return nil, err
+		}
+		s.M.DismissNotice(b.ID)
+		return ok(), nil
+	}))
 	h("/api/history", s.handleHistory)
 	h("/api/saved", s.handleSaved)
 	h("/api/fs", s.handleFS)
