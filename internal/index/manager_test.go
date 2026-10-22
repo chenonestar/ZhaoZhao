@@ -773,3 +773,38 @@ func TestKeepAwakeEngagesForShortJob(t *testing.T) {
 		t.Fatalf("有任务时应立即阻止睡眠：%v", calls)
 	}
 }
+
+// 同一个文件出现在几个压缩包里、压缩包外也有一份：都能搜到，提取文本只存一份。
+func TestArchiveChildrenShareText(t *testing.T) {
+	dir := t.TempDir()
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	same := "任免审批表 张三 简历 narwhal " + strings.Repeat("内容", 500)
+	makeZip(t, filepath.Join(dir, "甲.zip"), map[string]string{"表/张三.txt": same, "别的.txt": "别的内容 quokka"})
+	makeZip(t, filepath.Join(dir, "副本", "甲.zip"), map[string]string{"表/张三.txt": same, "别的.txt": "别的内容 quokka"})
+	makeZip(t, filepath.Join(dir, "乙.zip"), map[string]string{"张三.txt": same})
+	write(t, filepath.Join(dir, "张三.txt"), same)
+	e := newEnv(t, prov)
+	if _, err := e.m.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+	var files, texts int
+	e.m.DB.R.QueryRow(`SELECT count(*), count(DISTINCT text_id) FROM files WHERE text_id>0 AND (inner LIKE '%张三.txt' OR name='张三.txt')`).Scan(&files, &texts)
+	if files != 4 || texts != 1 {
+		t.Fatalf("4 份相同内容应共用 1 份文本：%d 个文件，%d 份文本", files, texts)
+	}
+	// 搜索结果把内容相同的文件合并为一条，其余列在「相同文件」里
+	r, err := e.eng.Search(context.Background(), search.Params{Query: "narwhal", Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Results) != 1 || len(r.Results[0].Dups) != 3 {
+		t.Fatalf("4 份相同内容应合并为一条结果、3 个相同文件：%+v", r.Results)
+	}
+	var hashed int
+	e.m.DB.R.QueryRow(`SELECT count(*) FROM files WHERE inner<>'' AND hash<>''`).Scan(&hashed)
+	if hashed != 5 {
+		t.Fatalf("压缩包里提取成功的文件都应有内容指纹：%d", hashed)
+	}
+}

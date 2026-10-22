@@ -5,7 +5,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha1"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -611,7 +613,26 @@ func (w *walkState) leafResult(e *entry) doc.Result {
 	if r.Status == doc.StatusSkipped && r.Err == "" {
 		r.Err = "不支持的文件类型"
 	}
+	if r.Status == doc.StatusOK {
+		// 内容指纹：同一个文件出现在几个压缩包里（或者压缩包被复制了几份）时只存一份文本
+		r.Hash = FileSHA1(tmp)
+	}
 	return r
+}
+
+// FileSHA1 返回文件内容的 SHA-1（十六进制）；读不了时返回空。与主程序给普通文件算的内容指纹相同，
+// 压缩包里的文件和外面的同一个文件也能认出来。
+func FileSHA1(p string) string {
+	f, err := os.Open(p)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha1.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // extractLeaf 提取不是容器的文件。
