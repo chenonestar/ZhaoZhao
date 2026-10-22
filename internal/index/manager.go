@@ -121,6 +121,7 @@ type Manager struct {
 	ibAt       time.Time
 	ibBusy     bool
 	rebuilding atomic.Bool
+	writeBulk  atomic.Bool // 写入积压，正在批量写入（全文索引暂停边写边合并）
 	startedAt  time.Time
 	baseline   atomic.Bool // 首次卷扫描完成后才通知「新卷」
 

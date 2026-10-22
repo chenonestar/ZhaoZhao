@@ -908,23 +908,63 @@ func (m *Manager) prepareReuse(f store.File, src int64, hash string) *prepared {
 // walCheckEvery：写入期间每隔这么久看一次 WAL 有没有超过上限。
 const walCheckEvery = 10 * time.Second
 
+// 一批最多 writeBatchFiles 个文件、约 writeBatchBytes 文字：事务短，其他写操作（加入索引根、扫描）最多等一秒左右。
+// 写入积压（一批装满了，后面还有）时改为「批量写入」：一批最多 writeBulkFiles 个文件、writeBulkBytes 文字，
+// 全文索引暂停边写边合并（store.SetFTSBulk，写入快 55～70%）；writeBulkIdle 之内没再积压就恢复，
+// 攒下的段等空闲时整理全文索引一次合并好。
+const (
+	writeBatchFiles = 64
+	writeBatchBytes = 8 << 20
+	writeBulkFiles  = 256
+	writeBulkBytes  = 16 << 20
+)
+
+var writeBulkIdle = 2 * time.Minute
+
 func (m *Manager) writer() {
 	defer m.wg.Done()
 	s := &m.sched
-	var walChecked time.Time
+	var walChecked, lastBacklog time.Time
+	setBulk := func(on bool) {
+		if err := m.DB.SetFTSBulk(on); err != nil {
+			logx.Debugf("切换全文索引批量写入失败: %v", err)
+			return
+		}
+		m.writeBulk.Store(on)
+		if on {
+			logx.Debugf("写入积压：改为批量写入（全文索引暂停边写边合并，空闲时一次整理）")
+			return
+		}
+		// 批量写入攒下了不少段：空闲时尽快整理，不等上次整理满一天
+		_ = m.DB.SetMeta("fts_merged_at", "")
+		logx.Debugf("写入不再积压：恢复全文索引边写边合并")
+	}
+	if on, err := m.DB.FTSBulk(); err == nil && on {
+		setBulk(false) // 上次在批量写入时退出
+	}
 	for {
 		var first *prepared
+		var bulkEnd <-chan time.Time
+		if m.writeBulk.Load() {
+			bulkEnd = time.After(time.Until(lastBacklog.Add(writeBulkIdle)))
+		}
 		select {
 		case first = <-s.write:
+		case <-bulkEnd:
+			setBulk(false)
+			continue
 		case <-m.ctx.Done():
 			return
 		}
-		// 一批最多 64 个文件、约 8 MB 文字：事务短，其他写操作（加入索引根、扫描）最多等一秒左右
+		maxFiles, maxBytes := writeBatchFiles, writeBatchBytes
+		if m.writeBulk.Load() {
+			maxFiles, maxBytes = writeBulkFiles, writeBulkBytes
+		}
 		batch := []*prepared{first}
 		size := first.textSize()
 		timeout := time.After(150 * time.Millisecond)
 	collect:
-		for len(batch) < 64 && size < 8<<20 {
+		for len(batch) < maxFiles && size < maxBytes {
 			select {
 			case p := <-s.write:
 				batch = append(batch, p)
@@ -933,6 +973,12 @@ func (m *Manager) writer() {
 				break collect
 			case <-m.ctx.Done():
 				break collect
+			}
+		}
+		if (len(batch) >= maxFiles || size >= maxBytes) && len(s.write) > 0 {
+			lastBacklog = time.Now()
+			if !m.writeBulk.Load() {
+				setBulk(true)
 			}
 		}
 		err := m.DB.Tx(func(tx *sql.Tx) error {

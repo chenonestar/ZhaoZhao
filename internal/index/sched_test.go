@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"github.com/chenonestar/zhaozhao/internal/awake"
 	"image"
@@ -14,9 +15,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/chenonestar/zhaozhao/internal/doc"
 	"github.com/chenonestar/zhaozhao/internal/extract"
 	"github.com/chenonestar/zhaozhao/internal/search"
 	"github.com/chenonestar/zhaozhao/internal/store"
@@ -303,5 +306,74 @@ func TestPauseForUser(t *testing.T) {
 	idle = time.Minute
 	if d := took(); d > 100*time.Millisecond {
 		t.Fatalf("用户没在操作时不停：%v", d)
+	}
+}
+
+// 写入积压时改为批量写入（全文索引暂停边写边合并），不再积压后恢复，并且空闲时尽快整理全文索引。
+func TestWriterBulkWhenBacklogged(t *testing.T) {
+	old := writeBulkIdle
+	writeBulkIdle = 300 * time.Millisecond
+	t.Cleanup(func() { writeBulkIdle = old })
+	e := newEnv(t, &fakeProv{})
+	m := e.m
+	if _, err := m.DB.W.Exec(`INSERT INTO roots(id,volume_id,rel_path,added_at) VALUES(1,'v','',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DB.SetMeta("fts_merged_at", "1"); err != nil {
+		t.Fatal(err)
+	}
+	const n = 600
+	var files []store.File
+	err := m.DB.Tx(func(tx *sql.Tx) error {
+		for i := 0; i < n; i++ {
+			f := store.File{RootID: 1, VolumeID: "v", RelPath: fmt.Sprintf("f%03d.txt", i), Name: fmt.Sprintf("f%03d.txt", i),
+				Ext: "txt", Kind: "text", Size: 10, MTime: 1, Prio: 1}
+			if err := store.UpsertFile(tx, &f, f.Name); err != nil {
+				return err
+			}
+			files = append(files, f)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawBulk atomic.Bool
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if m.writeBulk.Load() {
+				sawBulk.Store(true)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	defer close(stop)
+	// 一下子交给写入协程很多结果：后面的要排队
+	for _, f := range files {
+		m.send(m.prepare(f, doc.Result{Status: doc.StatusOK, Text: "批量写入的内容 " + f.Name}))
+	}
+	waitFor(t, "全部写入", 20*time.Second, func() bool {
+		c, _ := m.DB.AllCounts()
+		return c.Done == n
+	})
+	if !sawBulk.Load() {
+		t.Fatal("写入积压时应改为批量写入")
+	}
+	waitFor(t, "不再积压后恢复", 5*time.Second, func() bool {
+		on, err := m.DB.FTSBulk()
+		return err == nil && !on && !m.writeBulk.Load()
+	})
+	if v, _ := m.DB.GetMeta("fts_merged_at"); v != "" {
+		t.Fatalf("恢复后应尽快整理全文索引（不等一天）：fts_merged_at=%q", v)
+	}
+	var got int
+	if err := m.DB.R.QueryRow(`SELECT count(*) FROM fts WHERE fts MATCH '批'`).Scan(&got); err != nil || got != n {
+		t.Fatalf("全文索引里有 %d 个（%v），应为 %d", got, err, n)
 	}
 }

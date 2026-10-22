@@ -110,3 +110,72 @@ func TestParseFTSStructureRejectsGarbage(t *testing.T) {
 		}
 	}
 }
+
+// 批量写入：全文索引不边写边合并，段多攒一些（同一层最多 16 个）；恢复后照常自动合并。搜索结果不受影响。
+func TestFTSBulk(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	r := rand.New(rand.NewPCG(3, 4))
+	id := 0
+	// 每批一个事务、一个段；每批的数据够多，默认设置下会边写边合并
+	write := func(batches int) {
+		for b := 0; b < batches; b++ {
+			tx, err := db.W.Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for k := 0; k < 50; k++ {
+				id++
+				var sb strings.Builder
+				sb.WriteString("共同 ")
+				for j := 0; j < 200; j++ {
+					fmt.Fprintf(&sb, "w%d ", r.IntN(3000))
+				}
+				if _, err := tx.Exec(`INSERT INTO fts(rowid,c,n) VALUES(?,?,'')`, id, sb.String()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	segs := func() int {
+		fi, err := db.FTSInfo()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi.Segments
+	}
+	if on, err := db.FTSBulk(); err != nil || on {
+		t.Fatalf("新索引库不是批量写入：%v %v", on, err)
+	}
+	if err := db.SetFTSBulk(true); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := db.FTSBulk(); !on {
+		t.Fatal("应处于批量写入")
+	}
+	write(12)
+	bulk := segs()
+	if bulk != 12 {
+		t.Fatalf("批量写入：12 批应是 12 个段（不到 16 个不合并），实际 %d 个", bulk)
+	}
+	if err := db.SetFTSBulk(false); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := db.FTSBulk(); on {
+		t.Fatal("应已恢复")
+	}
+	write(12)
+	if s := segs(); s >= bulk {
+		t.Fatalf("恢复后应照常边写边合并：%d → %d 个段", bulk, s)
+	}
+	var n int
+	if err := db.R.QueryRow(`SELECT count(*) FROM fts WHERE fts MATCH '共同'`).Scan(&n); err != nil || n != id {
+		t.Fatalf("搜到 %d 个（%v），应为 %d", n, err, id)
+	}
+}
