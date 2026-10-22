@@ -38,6 +38,7 @@ const (
 	hEML
 	hMbox
 	hMSG
+	hXML // 只取 XML 里的文字（任免审批表 .lrmx 等）
 )
 
 type fmtInfo struct {
@@ -60,6 +61,7 @@ func init() {
 		"rs", "rb", "php", "swift", "kt", "kts", "scala", "sh", "bash", "zsh", "bat", "cmd", "ps1", "vue", "css", "scss",
 		"less", "lua", "pl", "r", "m", "mm", "dart", "sql", "gradle", "proto", "vb", "vbs", "asm", "s", "svelte", "jsp", "asp", "aspx")
 	reg(KindText, hHTML, "html", "htm", "xhtml")
+	reg(KindDoc, hXML, "lrmx") // 干部任免审批表（XML，照片以 base64 嵌在里面）
 	reg(KindDoc, hDocx, "docx", "docm", "dotx", "dotm")
 	reg(KindSheet, hXlsx, "xlsx", "xlsm", "xltx", "xltm")
 	reg(KindSlide, hPptx, "pptx", "pptm", "potx", "potm", "ppsx", "ppsm")

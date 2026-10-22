@@ -314,21 +314,31 @@ func (m *Manager) retryProtectedOOXML() {
 	}
 }
 
-// upgradeRetries：新版本能处理以前失败的文件时，升级后把它们重新排队一次（每项只做一次，记在索引库里）。
-var upgradeRetries = []struct{ key, cond, what string }{
+// upgradeRetries：新版本能处理以前失败的文件、或提取得更好时，升级后把它们重新排队一次（每项只做一次，记在索引库里）。
+// fix 是重新排队前先执行的 SQL（可以为空）。
+var upgradeRetries = []struct{ key, cond, what, fix string }{
 	{"retry_zip_methods", `state=2 AND inner<>'' AND err='无法读取（超过解压总量上限、压缩比异常或数据损坏）'`,
-		"压缩包里以前读不出的文件（多为 Deflate64 等压缩方式）"},
+		"压缩包里以前读不出的文件（多为 Deflate64 等压缩方式）", ""},
 	{"retry_sleep_timeouts", `state=2 AND err LIKE '%超时%'`,
-		"以前超时的文件（以前的版本把电脑睡眠的时间也算进时限，醒来后会误判超时）"},
+		"以前超时的文件（以前的版本把电脑睡眠的时间也算进时限，醒来后会误判超时）", ""},
 	{"retry_wic_sniff", `state=2 AND (err LIKE 'TIFF 第 % 页无法解码%' OR err='TIFF 文件已损坏' OR err LIKE '图片无法解码%'
 		OR err LIKE '%RAR signature not found%')`,
-		"以前解不开的 TIFF、BMP 等图片（现在改用 Windows 自带的解码组件）和改过扩展名的压缩包"},
+		"以前解不开的 TIFF、BMP 等图片（现在改用 Windows 自带的解码组件）和改过扩展名的压缩包", ""},
+	{"retry_encoded_text", `state=1 AND (ext='lrmx' OR (ext IN ('xml','txt','json','log','csv','htm','html','svg') AND text_len>=50000))`,
+		"文字里可能夹着照片等编码数据的文件（任免审批表 .lrmx，以及较大的 xml、txt 等），重新提取后索引库会变小",
+		`UPDATE files SET kind='doc' WHERE ext='lrmx'`},
 }
 
 func (m *Manager) runUpgradeRetries() {
 	for _, u := range upgradeRetries {
 		if v, _ := m.DB.GetMeta(u.key); v == "1" {
 			continue
+		}
+		if u.fix != "" {
+			if _, err := m.DB.W.Exec(u.fix); err != nil {
+				m.logf("升级索引库失败: %v", err)
+				continue
+			}
 		}
 		n, err := m.DB.RetryCond(u.cond)
 		if err != nil {

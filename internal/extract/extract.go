@@ -98,6 +98,12 @@ func Extract(p, ext string, opt Options) (res doc.Result) {
 			return doc.Result{Status: doc.StatusFailed, Err: err.Error()}
 		}
 		return doc.Result{Status: doc.StatusOK, Text: htmlText(raw), LineBased: true}
+	case hXML:
+		raw, err := readLimited(p, opt.MaxTextBytes)
+		if err != nil {
+			return doc.Result{Status: doc.StatusFailed, Err: err.Error()}
+		}
+		return doc.Result{Status: doc.StatusOK, Text: xmlText(raw), LineBased: true}
 	case hDocx:
 		return extractDocx(p)
 	case hXlsx:
@@ -141,6 +147,8 @@ func extractText(p string, opt Options) doc.Result {
 // finish 统一收尾：去掉非法字符、限制长度。
 func finish(r *doc.Result, opt Options) {
 	r.Text = strings.ToValidUTF8(r.Text, "")
+	// 去掉夹在文字里的编码数据（嵌入的照片等）；按字符位置定位的结果换成空格，位置不变
+	r.Text = dropEncoded(r.Text, !r.LineBased && len(r.Locs) > 0)
 	if opt.MaxRunes > 0 && len(r.Text) > opt.MaxRunes {
 		rs := []rune(r.Text)
 		if len(rs) > opt.MaxRunes {

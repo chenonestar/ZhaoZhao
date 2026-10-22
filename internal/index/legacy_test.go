@@ -443,6 +443,52 @@ func TestRetryWICAndSniffOnUpgrade(t *testing.T) {
 	}
 }
 
+// 升级后，任免审批表（.lrmx）和较大的文本类文件重新提取一次（去掉夹在文字里的照片编码）；lrmx 改算文档。
+// 压缩包里的 lrmx 重新排队它所在的压缩包；小的文本文件、别的格式不动。
+func TestRetryEncodedTextOnUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "a.txt"), "x")
+	prov := &fakeProv{}
+	prov.add("v1", "数据", dir, true)
+	e := newEnv(t, prov)
+	if _, err := e.m.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+	rows := []struct {
+		rel, inner, ext string
+		textLen         int
+		want            int
+	}{
+		{"任免.lrmx", "", "lrmx", 300, store.StatePending},
+		{"大.xml", "", "xml", 80000, store.StatePending},
+		{"小.xml", "", "xml", 1000, store.StateDone},
+		{"大.docx", "", "docx", 900000, store.StateDone},
+		{"包.zip", "", "zip", 0, store.StatePending},
+		{"包.zip", "表/张三.lrmx", "lrmx", 300, store.StateDone}, // 条目本身不单独排队，由压缩包重新提取
+	}
+	for _, r := range rows {
+		if _, err := e.m.DB.W.Exec(`INSERT INTO files(root_id,volume_id,rel_path,inner,name,ext,kind,size,mtime,state,err,prio,text_len)
+			SELECT root_id,volume_id,?,?,?,?,'other',1,1,1,'',1,? FROM files WHERE name='a.txt'`, r.rel, r.inner, r.rel, r.ext, r.textLen); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.m.PauseAll()
+	e.m.DB.W.Exec(`DELETE FROM meta WHERE k='retry_encoded_text'`)
+	e.m.runUpgradeRetries()
+	for _, r := range rows {
+		var st int
+		var kind string
+		e.m.DB.R.QueryRow(`SELECT state, kind FROM files WHERE rel_path=? AND inner=?`, r.rel, r.inner).Scan(&st, &kind)
+		if st != r.want {
+			t.Fatalf("%s %s：state %d，应为 %d", r.rel, r.inner, st, r.want)
+		}
+		if r.ext == "lrmx" && kind != "doc" {
+			t.Fatalf("lrmx 应改算文档：%s", kind)
+		}
+	}
+}
+
 // LibreOffice 崩溃、连接断开算「LibreOffice 出错」（重试一次后单独列出，不影响索引），文件本身的问题不算。
 func TestLOCrashedSeparated(t *testing.T) {
 	for err, want := range map[string]bool{
