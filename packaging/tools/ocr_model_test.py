@@ -123,7 +123,8 @@ class Engine:
         return ''.join(x['text'] for x in items)
 
     def close(self):
-        self.p.stdin.close()
+        # 组件关了输入也不退出（找找也是直接结束它）
+        self.p.kill()
         self.p.wait(timeout=30)
 
 
