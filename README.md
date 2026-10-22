@@ -96,7 +96,7 @@ iscc packaging\zhaozhao.iss
 | `.github/workflows/bundle.yml` | 手动、改动打包文件、被 release 调用 | **完整版**：choco 安装 LibreOffice，下载 RapidOCR-json（简体中文 V4 模型）和 PDFium，随包放入 VC++ 运行库，在真实 Windows 上冒烟测试（含组件自检、OCR 测速、退出后无残留进程）通过后，产出完整版 zip（约 340 MB）和离线安装包 |
 | `.github/workflows/release.yml` | 推送 `v*` 标签；或提交信息里带 `[release vX.Y.Z]` | 调用完整版构建，并发布完整版 zip、安装包、精简版 zip 到 GitHub Release |
 
-发布版本：`git tag v0.2.4 && git push origin v0.2.4`，或在推送的提交信息里写 `[release v0.2.4]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice、OCR 和 PDFium 组件**；精简版（主程序 + PDFium）需要按 `components\README.txt` 自行放入 LibreOffice 和 OCR。
+发布版本：`git tag v0.2.5 && git push origin v0.2.5`，或在推送的提交信息里写 `[release v0.2.5]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice、OCR 和 PDFium 组件**；精简版（主程序 + PDFium）需要按 `components\README.txt` 自行放入 LibreOffice 和 OCR。
 
 ### 组件
 
@@ -185,7 +185,7 @@ ZHAOZHAO_SCALE=100000 go test ./internal/search -run TestScale -v -timeout 40m
 
 | 类别 | 状态 | 说明 |
 |---|---|---|
-| 文本/代码/配置、HTML | ✅ | 自动识别 UTF-8/UTF-16/GBK/GB18030/Big5，位置为行号 |
+| 文本/代码/配置、HTML | ✅ | 自动识别 UTF-8/UTF-16/GBK/GB18030/Big5，位置为行号；夹在文字里的编码数据（嵌入照片的 base64 等）提取时去掉；干部任免审批表（.lrmx）当 XML 只取文字 |
 | docx/xlsx/pptx 及变体 | ✅ | 正文、表格、页眉页脚、脚注、批注、文本框；Excel 全部工作表+批注；PPT 备注。位置：段落 / 工作表!单元格 / 幻灯片 |
 | doc/xls/ppt/rtf、wps/et/dps（P0） | ✅ | 内置解析（位置：段落、单元格、幻灯片）；解析不了的交给常驻 LibreOffice；WPS 缺真实样本 |
 | PDF 文字层 / 扫描页 | ✅ | PDFium 提取文字层；没有文字层的页渲染后 OCR（任何图片格式）。只有页码、电子章等少量文字（< 50 字）而图片占半页以上的页也做 OCR（保留原有文字）；文字层是乱码的页改用 OCR |
@@ -193,7 +193,7 @@ ZHAOZHAO_SCALE=100000 go test ./internal/search -run TestScale -v -timeout 40m
 | OpenDocument（P2） | ✅ | |
 | 加密文件 | ✅ | OLE 加密 Office、加密 PDF、加密 zip 条目/7z 标记「已加密」，文件名仍可搜。打开时不要密码的加密文件（Excel 用默认密码 VelvetSweatshop 加密：.xls 的 RC4/CryptoAPI，docx/xlsx/pptx 的标准加密和 Agile 加密）程序自己解密、正常索引；只有真正设了打开密码的才算已加密（原因写明「需要打开密码」），权限管理（IRM / 敏感度标签）单独说明 |
 | 超时/失败 | ✅ | 子进程隔离；时限只计电脑醒着的时间（睡眠不算）；失败原因进「失败列表」：按原因类别和扩展名统计、按路径筛选，可整类重试、导出 CSV、加入排除规则，每行可打开、打开所在文件夹、复制路径 |
-| 压缩包 zip/7z/tar/gz/tgz（P1） | ✅ | 按文件内容识别格式（改过扩展名也能解开）；嵌套 ≤ 3 层、2 GB 总量上限、压缩比 > 100 倍跳过；GBK 文件名 |
+| 压缩包 zip/7z/tar/gz/tgz（P1） | ✅ | 按文件内容识别格式（改过扩展名也能解开）；包里的文件也按内容去重（相同内容只存一份文本）；嵌套 ≤ 3 层、2 GB 总量上限、压缩比 > 100 倍跳过；GBK 文件名 |
 | rar（P1） | ⚠ | 代码已写，无样本 |
 | eml / mbox（P1） | ✅ | 附件、邮件内嵌邮件逐层展开；预览显示主题/发件人/收件人/日期 |
 | msg（P1） | ⚠ | 代码已写，无样本 |
@@ -244,7 +244,7 @@ ZHAOZHAO_SCALE=100000 go test ./internal/search -run TestScale -v -timeout 40m
 |---|---|---|
 | F-BG-01、02 实时监听、启动对账 | ✅ | |
 | F-BG-03 内容哈希复用 | ✅ | 改名/复制后复用提取与 OCR 结果；移动、改名（含移到别的索引根）时删除的文件的文本保留 3 天，新位置内容相同就直接复用 |
-| F-BG-04 低优先级、用户活动降速 | ⚠ | 子进程低优先级；用户活动检测（`GetLastInputInfo`）仅 Windows：用户正在操作时每个文件之间让出一会儿，2 分钟内用过键鼠时 OCR 只用一半核心 |
+| F-BG-04 低优先级、用户活动降速 | ⚠ | 子进程低优先级；用户活动检测（`GetLastInputInfo`）仅 Windows：用户正在操作时每个文件之间让出一会儿；设置里可以打开「用电脑时 OCR 只用一半核心」（默认关：0.2.4 默认开着，建索引慢了约 1.9 小时） |
 | F-BG-05、06、07 | ✅ | 默认一半核心；OCR 进程数 × 线程数在每台电脑上用样张实测选择（结果按电脑保存，按每线程效率估算各种预算下最快的搭配，进程数受内存限制，队列收尾时空出的线程分给大文件）；电池检测仅 Windows ⚠；全局/单根暂停恢复；建立索引期间（接通电源时）不让电脑自动睡眠（`PowerSetRequest`） |
 | F-BG-08 断点续跑 | ✅ | 待处理状态在库里，重启后继续 |
 | F-BG-09、10 状态面板、OCR 队列预计时间 | ✅ | 剩余时间按最近一小时实际完成的文件数估算 |
