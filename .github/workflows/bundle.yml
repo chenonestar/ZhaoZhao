@@ -128,6 +128,7 @@ jobs:
           python -m pip install --quiet --disable-pip-version-check onnx pillow numpy
           python -m pip download --quiet --disable-pip-version-check --no-deps -d ocr-model rapidocr==3.10.0
           $whl = (Get-ChildItem ocr-model -Filter 'rapidocr-*.whl' | Select-Object -First 1).FullName
+          $env:PYTHONIOENCODING = 'utf-8'
           python packaging/tools/ocr_model_test.py ZhaoZhao\components\ocr $whl (Join-Path $env:RUNNER_TEMP 'ocr-model')
 
       - name: 打包完整版 zip

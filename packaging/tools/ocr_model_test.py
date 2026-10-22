@@ -18,6 +18,7 @@ import zipfile
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+sys.stdout.reconfigure(encoding='utf-8')  # CI 的控制台默认是 cp1252，打印中文会出错
 COMPONENT, WHEEL, WORK = sys.argv[1], sys.argv[2], sys.argv[3]
 PAGES, THREADS = 6, 2
 
