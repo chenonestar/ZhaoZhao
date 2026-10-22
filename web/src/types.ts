@@ -256,6 +256,7 @@ export interface Config {
   hotkey: string;
   ocrEnabled: boolean;
   ocrWorkers: number;
+  ocrHalfWhenActive: boolean;
   logLevel: string;
   configVersion: number;
 }

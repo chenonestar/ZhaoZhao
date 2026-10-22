@@ -134,13 +134,14 @@ func TestOCRSMT(t *testing.T) {
 	}
 }
 
-// 用户正在用电脑：OCR 只用一半核心，正在识别的文件从下一页起减少线程；离开后恢复。
+// 设置里开了「用电脑时 OCR 只用一半核心」：用户正在用电脑时 OCR 只用一半核心，正在识别的文件从下一页起
+// 减少线程；离开后恢复。默认不开：用户在用电脑也用全部核心。
 func TestOCRHalfWhileUserActive(t *testing.T) {
 	idle := time.Hour
 	old := userIdleTime
 	userIdleTime = func() time.Duration { return idle }
 	t.Cleanup(func() { userIdleTime = old })
-	e := newEnvWith(t, &fakeProv{}, "", func(m *Manager) {
+	e := newEnvWith(t, &fakeProv{}, `{"ocrHalfWhenActive":true,"configVersion":3}`, func(m *Manager) {
 		useFakeOCR(t, m, "10ms")
 		m.ocr.cores = 6
 	})
@@ -179,6 +180,18 @@ func TestOCRHalfWhileUserActive(t *testing.T) {
 	m.ocrTuneStep()
 	if p := m.ocrPlanNow(); p != (ocrPlan{3, 2}) || ctl.OCRThreads() != 0 {
 		t.Fatalf("离开后应恢复：%v，正在识别的文件 %d 线程", p, ctl.OCRThreads())
+	}
+	// 关掉这个设置（默认）：用户在用电脑也用全部核心
+	c := m.Config()
+	c.OCRHalfWhenActive = false
+	m.SetConfig(c)
+	idle = 10 * time.Second
+	m.ocrTuneStep()
+	if p := m.ocrPlanNow(); p != (ocrPlan{3, 2}) {
+		t.Fatalf("默认不因为用户在用电脑减半：%v", p)
+	}
+	if _, _, note := m.ocrStatus(); strings.Contains(note, "正在用电脑") {
+		t.Fatalf("没开这个设置不应提示：%q", note)
 	}
 	s.mu.Lock()
 	delete(s.inflight, -1)

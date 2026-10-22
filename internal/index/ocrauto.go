@@ -44,8 +44,9 @@ var ocrTuneEvery = 30 * time.Second
 // othersIdleFor：普通文件、老格式空闲这么久后，OCR 才用全部核心（避免偶尔来一个文件就来回切换）。
 const othersIdleFor = 2 * time.Minute
 
-// userActiveFor：这么久之内用过键盘、鼠标，就算用户正在用电脑，OCR 只用一半核心，电脑不卡；
-// 离开这么久后再用全部核心。
+// userActiveFor：设置里开了「用电脑时 OCR 只用一半核心」时，这么久之内用过键盘、鼠标就算用户正在用电脑，
+// OCR 只用一半核心；离开这么久后再用全部核心。默认不开：OCR 进程本来就是低优先级，用户的程序优先；
+// 0.2.4 默认开着，用户白天一直在用电脑，OCR 有 3.6 小时只用一半核心，建索引多花了约 1.9 小时。
 const userActiveFor = 2 * time.Minute
 
 // newOCRBenchRunner 返回实测一种搭配的函数（测试里换成模拟的）。
@@ -173,7 +174,7 @@ func (m *Manager) ocrTuneStep() {
 	pages := m.ocr.pages.Load()
 	busy := m.othersBusy()
 	live := m.ocrLive()
-	userBusy := userIdleTime() < userActiveFor
+	userBusy := cfg.OCRHalfWhenActive && userIdleTime() < userActiveFor
 
 	m.ocr.mu.Lock()
 	m.ocr.rate.add(now, pages)

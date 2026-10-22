@@ -567,6 +567,7 @@ function SettingsTab() {
       {chk("ocrEnabled", "识别图片和扫描 PDF 里的文字（OCR）")}
       {num("ocrWorkers", "OCR 进程数", "0 = 自动（推荐）：在这台电脑上用样张实测，选出最快的进程数和每个进程的线程数（通常是每个 CPU 核心一个进程），进程数不超过内存允许的数量。手动设为 N 时，每个进程用「CPU 核心数 ÷ N」个线程")}
       <OCRSpeed />
+      {chk("ocrHalfWhenActive", "你在用电脑时（2 分钟内用过键盘、鼠标）OCR 只用一半核心。一般不需要开：OCR 本来就是低优先级，你的程序优先；开了建索引会慢不少")}
       {chk("pauseOnBattery", "使用电池时暂停 OCR 和格式转换")}
       {chk("keepAwake", "建立索引期间不让电脑自动睡眠（只在接通电源时；屏幕保护、关闭显示器不受影响；索引完成后自动恢复）")}
 
@@ -654,7 +655,7 @@ function OCRSpeed() {
         {st.manual
           ? `OCR 进程数是手动设置的（现在 ${st.plan}），不测速。`
           : best && b
-            ? `本机实测（${new Date(b.at * 1000).toLocaleDateString()}，${b.cpu}，${b.cores} 个物理核心${(b.logical ?? 0) > b.cores ? `、${b.logical} 个逻辑处理器` : ""}）：${best.procs} 个进程 × ${best.threads} 线程最快，约每分钟 ${best.perMin.toFixed(1)} 页 A4 扫描页。现在用 ${st.plan}${memNote}。普通文件还在处理或你正在用电脑时，OCR 只用一半核心。`
+            ? `本机实测（${new Date(b.at * 1000).toLocaleDateString()}，${b.cpu}，${b.cores} 个物理核心${(b.logical ?? 0) > b.cores ? `、${b.logical} 个逻辑处理器` : ""}）：${best.procs} 个进程 × ${best.threads} 线程最快，约每分钟 ${best.perMin.toFixed(1)} 页 A4 扫描页。现在用 ${st.plan}${memNote}。普通文件还在处理时，OCR 只用一半核心。`
             : "还没有测过本机的 OCR 速度：第一次有图片要识别时自动测（约 1～2 分钟，期间普通文件暂停）。"}
       </div>
       {plans.length > 1 && b && (
