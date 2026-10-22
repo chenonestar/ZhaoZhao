@@ -103,6 +103,7 @@ type Manager struct {
 	scanInfo map[int64]*scanState
 
 	sched schedState
+	stats stageStats // 各阶段用时，定时写进日志（stats.go）
 
 	watch watchState
 

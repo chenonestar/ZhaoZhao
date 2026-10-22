@@ -15,13 +15,24 @@ import (
 
 	"github.com/chenonestar/zhaozhao/internal/index"
 	"github.com/chenonestar/zhaozhao/internal/logx"
+	"github.com/chenonestar/zhaozhao/internal/sysinfo"
 )
 
 // environment 返回运行环境说明（启动时写日志、导出诊断信息时使用）。路径已用 logx.P 标记。
 func environment(dataDir string) string {
 	exe, _ := os.Executable()
 	return fmt.Sprintf("版本 %s；%s；程序 %s（%s）；数据目录 %s（%s）", version, sysInfo(),
-		logx.P(exe), driveKind(exe), logx.P(dataDir), driveKind(dataDir))
+		logx.P(exe), driveKind(exe), logx.P(dataDir), diskDesc(dataDir))
+}
+
+// diskDesc 说明路径所在的盘：本地盘、移动盘还是网络盘，固态硬盘还是机械硬盘（取得到时），如「本地盘，机械硬盘，SATA」。
+// 索引库在机械硬盘上时写入、整理都慢得多，诊断时要知道。
+func diskDesc(p string) string {
+	d := driveKind(p)
+	if m := sysinfo.DiskMedia(p); m != "" {
+		d += "，" + m
+	}
+	return d
 }
 
 // diagSpaceLimit：导出诊断信息时空间统计最多花多久（大索引库要读遍整个文件），超时就跳过这一项。
@@ -100,7 +111,11 @@ func exportDiagnostics(dataDir string, lg *logx.Logger, mgr *index.Manager, anon
 	}
 	fmt.Fprintf(&b, "\n磁盘：\n")
 	for _, v := range st.Volumes {
-		fmt.Fprintf(&b, "  %s（%s）在线 %v %s 文件 %d\n", v.ID, index.KindName(v.Kind), v.Online, logx.P(v.Mount), v.Files)
+		kind := index.KindName(v.Kind)
+		if m := sysinfo.DiskMedia(v.Mount); v.Online && m != "" {
+			kind += "，" + m
+		}
+		fmt.Fprintf(&b, "  %s（%s）在线 %v %s 文件 %d\n", v.ID, kind, v.Online, logx.P(v.Mount), v.Files)
 	}
 	if fl, err := mgr.DB.ListFailed(500); err == nil && len(fl) > 0 {
 		fmt.Fprintf(&b, "\n失败列表（最多 500 个）：\n")

@@ -122,6 +122,7 @@ type prepared struct {
 	recycled *store.Recycled // 复用回收区里刚删除的文件的提取结果（文件被移动、改名）
 	requeue  int             // 非 0 时保存结果后把文件重新排到这个队列（OCR、老格式转换）
 	children []*preparedChild
+	sent     time.Time // 交给写入协程的时间（统计等写入的时间）
 }
 
 type preparedChild struct {
@@ -148,9 +149,10 @@ func (m *Manager) startScheduler() {
 	s.startedAt = time.Now()
 	s.lastActivity.Store(int64(awake.Now()))
 	m.applyWorkers()
-	m.wg.Add(2)
+	m.wg.Add(3)
 	go m.writer()
 	go m.watchdog()
+	go m.statsLoop()
 	s.eachLane(func(l *lane) {
 		m.wg.Add(1)
 		go m.laneDispatcher(l)
@@ -384,7 +386,9 @@ const userPauseIdle = 3 * time.Second
 
 func (m *Manager) pauseForUser() {
 	if m.Config().SlowWhenActive && userIdleTime() < userPauseIdle {
+		t0 := time.Now()
 		m.sleepCtx(userPause)
+		m.stats.addPause(time.Since(t0))
 	}
 }
 
@@ -676,6 +680,7 @@ func (m *Manager) runJob(j *job) {
 		if dup, _ := m.DB.FindDuplicate(hash, f.Size, f.ID); dup != 0 {
 			if p := m.prepareReuse(f, dup, hash); p != nil {
 				logx.Debugf("内容与已索引的文件相同，复用结果 %s", logx.P(abs))
+				m.statJob(j, time.Since(start), 0, 0, true)
 				m.sendJob(j, p)
 				return
 			}
@@ -684,6 +689,7 @@ func (m *Manager) runJob(j *job) {
 		if r, _ := m.DB.FindRecycled(hash, f.Size); r != nil {
 			if p := m.prepareRecycled(f, r, hash); p != nil {
 				logx.Debugf("内容与刚删除的文件相同（移动或改名），复用结果 %s", logx.P(abs))
+				m.statJob(j, time.Since(start), 0, 0, true)
 				m.sendJob(j, p)
 				return
 			}
@@ -725,7 +731,10 @@ func (m *Manager) runJob(j *job) {
 		j.ctl, j.ocrThreads = ctl, opts.OCR.Threads
 		s.mu.Unlock()
 	}
+	read := time.Since(start) // 读取文件信息、（网络盘）复制、计算校验值、查重
+	t1 := time.Now()
 	res := pool.RunCtl(m.ctx, src, f.Ext, opts, t, func(p string) { m.setProgress(j, p) }, ctl)
+	extracted := time.Since(t1)
 	if useOCR {
 		s.mu.Lock()
 		j.ctl = nil
@@ -744,7 +753,17 @@ func (m *Manager) runJob(j *job) {
 		res.Hash = hash
 	}
 	m.logJob(j, res, start, netWait, readDur)
-	m.sendJob(j, m.prepare(f, res))
+	t2 := time.Now()
+	p := m.prepare(f, res)
+	m.statJob(j, read, extracted, time.Since(t2), false)
+	m.sendJob(j, p)
+}
+
+// statJob 记下普通文件各阶段的用时（stats.go）。
+func (m *Manager) statJob(j *job, read, extract, prepare time.Duration, reused bool) {
+	if j.class == prioFast {
+		m.stats.addJob(read, extract, prepare, reused)
+	}
 }
 
 // logJob 记录一个文件的处理结果：失败总是记录，成功只在详细日志里记录。
@@ -813,6 +832,7 @@ func (m *Manager) sendJob(j *job, p *prepared) {
 }
 
 func (m *Manager) send(p *prepared) {
+	p.sent = time.Now()
 	select {
 	case m.sched.write <- p:
 	case <-m.ctx.Done():
@@ -981,6 +1001,7 @@ func (m *Manager) writer() {
 				setBulk(true)
 			}
 		}
+		t0 := time.Now()
 		err := m.DB.Tx(func(tx *sql.Tx) error {
 			for _, p := range batch {
 				if err := m.writeOne(tx, p); err != nil {
@@ -989,6 +1010,7 @@ func (m *Manager) writer() {
 			}
 			return nil
 		})
+		m.stats.addBatch(batch, t0, time.Since(t0), m.writeBulk.Load())
 		if err != nil {
 			m.logf("批量写入失败，改为逐个写入: %v", err)
 			for _, p := range batch {
