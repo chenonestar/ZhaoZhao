@@ -999,7 +999,7 @@ func (m *Manager) writeOne(tx *sql.Tx, p *prepared) error {
 			return err
 		}
 	}
-	if err := m.DB.PutResult(tx, f.ID, p.state, p.res.Err, p.res.Hash, p.res.OCR, p.text, p.fts, p.nameFTS); err != nil {
+	if err := m.putResult(tx, f.ID, f.Size, p.res.Hash, p.state, p.res.Err, p.res.OCR, p.text, p.fts, p.nameFTS); err != nil {
 		return err
 	}
 	if p.requeue != 0 {
@@ -1020,25 +1020,8 @@ func (m *Manager) writeOne(tx *sql.Tx, p *prepared) error {
 		} else if err != nil {
 			return err
 		}
-		// 内容和已索引的某个文件相同（别的压缩包里、外面的同一个文件）：共用它的文本，不再存一份
-		reused := false
-		if c.hash != "" && c.state == store.StateDone {
-			if src, err := store.FindDuplicateTx(tx, c.hash, cf.Size, cf.ID); err != nil {
-				return err
-			} else if src != 0 {
-				if err := store.CopyResult(tx, src, cf.ID, c.fts, c.nameFTS); err != nil {
-					return err
-				}
-				if _, err := tx.Exec(`UPDATE files SET hash=? WHERE id=?`, c.hash, cf.ID); err != nil {
-					return err
-				}
-				reused = true
-			}
-		}
-		if !reused {
-			if err := m.DB.PutResult(tx, cf.ID, c.state, c.err, c.hash, c.ocr, c.text, c.fts, c.nameFTS); err != nil {
-				return err
-			}
+		if err := m.putResult(tx, cf.ID, cf.Size, c.hash, c.state, c.err, c.ocr, c.text, c.fts, c.nameFTS); err != nil {
+			return err
 		}
 		if c.meta != "" {
 			if _, err := tx.Exec(`UPDATE files SET meta=? WHERE id=?`, c.meta, cf.ID); err != nil {
@@ -1047,6 +1030,26 @@ func (m *Manager) writeOne(tx *sql.Tx, p *prepared) error {
 		}
 	}
 	return nil
+}
+
+// putResult 写入一个文件的提取结果。内容和已索引的某个文件相同（别的压缩包里的、外面的同一个文件，或者同时
+// 提取的两个相同文件）时共用它的文本，不再存一份：提取前查过一次，但同时提取的相同文件那时都还没写入，
+// 写入时在同一个事务里再查一次（同一批里先写的也看得到）。
+func (m *Manager) putResult(tx *sql.Tx, id, size int64, hash string, state int, errMsg string, ocr bool, t *store.Text, fts, nameFTS string) error {
+	if hash != "" && state == store.StateDone && t != nil {
+		src, err := store.FindDuplicateTx(tx, hash, size, id)
+		if err != nil {
+			return err
+		}
+		if src != 0 {
+			if err := store.CopyResult(tx, src, id, fts, nameFTS); err != nil {
+				return err
+			}
+			_, err := tx.Exec(`UPDATE files SET hash=? WHERE id=?`, hash, id)
+			return err
+		}
+	}
+	return m.DB.PutResult(tx, id, state, errMsg, hash, ocr, t, fts, nameFTS)
 }
 
 // rebuildFTS 清空并重建全文索引（繁简归一设置变化后需要）。旧索引在重建期间不可靠，
