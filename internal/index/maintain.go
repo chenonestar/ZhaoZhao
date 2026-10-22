@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chenonestar/zhaozhao/internal/awake"
 	"github.com/chenonestar/zhaozhao/internal/extract"
 	"github.com/chenonestar/zhaozhao/internal/logx"
 	"github.com/chenonestar/zhaozhao/internal/store"
@@ -129,7 +130,7 @@ func (m *Manager) migrateTexts() {
 		}
 	}
 	defer m.setMaint("")
-	start := time.Now()
+	start := awake.Now() // 用时不算电脑睡眠的时间
 	var total store.MigrateStats
 	add := func(st store.MigrateStats) {
 		m.addMaint(st)
@@ -186,7 +187,7 @@ func (m *Manager) migrateTexts() {
 	if total.Recompressed+total.Deduped > 0 {
 		sp := db.Space()
 		m.logf("索引库整理完成：重新压缩 %d 份文本，%d 个内容相同的文件改为共用一份文本，节省约 %s，用时 %s；目前可回收 %s%s",
-			total.Recompressed, total.Deduped, fmtBytes(total.SavedBytes), fmtDuration(time.Since(start)), fmtBytes(sp.FreeBytes),
+			total.Recompressed, total.Deduped, fmtBytes(total.SavedBytes), fmtDuration(awake.Since(start)), fmtBytes(sp.FreeBytes),
 			map[bool]string{true: "（空闲时自动归还磁盘）", false: "（可在「索引」页点「压缩索引库」归还磁盘）"}[sp.Incremental])
 	}
 }
@@ -303,7 +304,7 @@ func (m *Manager) mergeFTS() {
 		_ = db.SetMeta("fts_merge", "")
 		_ = db.SetMeta("fts_merged_at", strconv.FormatInt(time.Now().Unix(), 10))
 	}
-	start := time.Now()
+	start := awake.Now() // 用时不算电脑睡眠的时间
 	for first := !resumed; m.ctx.Err() == nil && m.sched.idle.Load(); first = false {
 		if fi, err := db.FTSInfo(); err == nil && total > 0 {
 			m.setMaint(fmt.Sprintf("正在整理全文索引（%d%%）", min(99, max(0, 100-fi.Merging*100/total))))
@@ -323,7 +324,7 @@ func (m *Manager) mergeFTS() {
 				msg += fmt.Sprintf("：%d 个段、约 %s", fi.Segments, fmtBytes(fi.Pages*4096))
 			}
 			if !resumed {
-				msg += "，用时 " + fmtDuration(time.Since(start))
+				msg += "，用时 " + fmtDuration(awake.Since(start))
 			}
 			if saved := usedBefore - (sp.DBBytes - sp.FreeBytes); saved > 1<<20 {
 				msg += "，索引库小了约 " + fmtBytes(saved)
@@ -385,7 +386,7 @@ func (m *Manager) StartCompact() error {
 		defer m.wg.Done()
 		before := m.DB.Space()
 		m.logf("开始压缩索引库：%s，其中空闲 %s", fmtBytes(before.DBBytes+before.WALBytes), fmtBytes(before.FreeBytes))
-		start := time.Now()
+		start := awake.Now() // 用时不算电脑睡眠的时间
 		err := m.DB.Vacuum()
 		after := m.DB.Space()
 		var msg string
@@ -395,7 +396,7 @@ func (m *Manager) StartCompact() error {
 				msg += "（磁盘空间不足：压缩时需要与索引库差不多大的临时空间）"
 			}
 		} else {
-			msg = fmt.Sprintf("压缩完成：%s → %s，用时 %s", fmtBytes(before.DBBytes+before.WALBytes), fmtBytes(after.DBBytes+after.WALBytes), fmtDuration(time.Since(start)))
+			msg = fmt.Sprintf("压缩完成：%s → %s，用时 %s", fmtBytes(before.DBBytes+before.WALBytes), fmtBytes(after.DBBytes+after.WALBytes), fmtDuration(awake.Since(start)))
 		}
 		m.logf("%s", msg)
 		t.mu.Lock()
