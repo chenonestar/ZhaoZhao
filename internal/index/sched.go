@@ -88,6 +88,11 @@ type lane struct {
 type schedState struct {
 	mu       sync.Mutex
 	inflight map[int64]*job
+	// deferred：要 OCR、但和正在识别的文件大小相同的文件（文件 ID → 大小）。多半是同一份扫描件的副本：
+	// 等那个文件识别完写入后再派发，到时按内容查重直接复用结果，不再识别一遍。0.2.6 的日志里约 17% 的
+	// OCR 是这样重复做的：队列按小文件优先排，相同的副本排在一起、几乎同时开始识别，识别前的查重查不到
+	// 还没做完的那一份。
+	deferred map[int64]int64
 	lanes    [4]*lane // 下标是 prioFast、prioLegacy、prioOCR
 	write    chan *prepared
 	net      *sem
@@ -141,6 +146,7 @@ func (m *Manager) startScheduler() {
 	s := &m.sched
 	cfg := m.Config()
 	s.inflight = map[int64]*job{}
+	s.deferred = map[int64]int64{}
 	s.write = make(chan *prepared, 256)
 	s.net = newSem(cfg.netConc())
 	for _, p := range lanePrios {
@@ -218,11 +224,45 @@ func (m *Manager) inflightIDs() []int64 {
 	s := &m.sched
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ids := make([]int64, 0, len(s.inflight))
+	ids := make([]int64, 0, len(s.inflight)+len(s.deferred))
 	for id := range s.inflight {
 		ids = append(ids, id)
 	}
+	for id := range s.deferred {
+		ids = append(ids, id)
+	}
 	return ids
+}
+
+// ocrSameSizeLocked：有正在识别、大小相同的文件（调用方持有 s.mu）。
+func (s *schedState) ocrSameSizeLocked(f store.File) bool {
+	if f.Size <= 0 {
+		return false
+	}
+	for id, j := range s.inflight {
+		if id != f.ID && j.lane != nil && j.lane.prio == prioOCR && j.f.Size == f.Size {
+			return true
+		}
+	}
+	return false
+}
+
+// doneLocked 把文件移出「处理中」；没有同样大小的文件在识别了，就放出等它的文件，返回是否放出了
+// （调用方持有 s.mu；放出了要 kick，让 OCR 通道马上派发）。
+func (s *schedState) doneLocked(id int64) bool {
+	j := s.inflight[id]
+	delete(s.inflight, id)
+	if j == nil || j.lane == nil || j.lane.prio != prioOCR || len(s.deferred) == 0 || s.ocrSameSizeLocked(j.f) {
+		return false
+	}
+	released := false
+	for d, size := range s.deferred {
+		if size == j.f.Size {
+			delete(s.deferred, d)
+			released = true
+		}
+	}
+	return released
 }
 
 // classOf 决定文件的提取方式：OCR、老格式转换（LibreOffice），或普通提取。
@@ -304,6 +344,12 @@ func (m *Manager) laneDispatcher(l *lane) {
 			j := &job{f: f, class: classOf(f, loOnly), lane: l, stage: "等待空闲的提取线程", queued: now, since: awake.Now()}
 			j.path, _ = m.AbsPath(f.VolumeID, f.RelPath)
 			s.mu.Lock()
+			if l.prio == prioOCR && s.ocrSameSizeLocked(f) {
+				s.deferred[f.ID] = f.Size
+				s.mu.Unlock()
+				logx.Debugf("%s 和正在识别的文件大小相同（可能是副本），等它完成后按内容复用结果", logx.P(j.path))
+				continue
+			}
 			s.inflight[f.ID] = j
 			s.mu.Unlock()
 			select {
@@ -369,7 +415,7 @@ func (m *Manager) laneWorker(l *lane) {
 				l.done = append(l.done[:0], l.done[i:]...)
 			}
 		} else {
-			delete(s.inflight, j.f.ID)
+			s.doneLocked(j.f.ID)
 		}
 		s.mu.Unlock()
 		m.kick()
@@ -1019,15 +1065,20 @@ func (m *Manager) writer() {
 				}
 			}
 		}
+		released := false
 		s.mu.Lock()
 		for _, p := range batch {
-			delete(s.inflight, p.file.ID) // 已写入：之后才允许再次派发同一文件
+			// 已写入：之后才允许再次派发同一文件（等它的副本也在这之后派发、复用结果）
+			released = s.doneLocked(p.file.ID) || released
 			s.done.Add(1)
 			if p.file.Prio >= 1 && p.file.Prio <= 3 {
 				s.doneByPri[p.file.Prio].Add(1)
 			}
 		}
 		s.mu.Unlock()
+		if released {
+			m.kick()
+		}
 		m.activity()
 		if time.Since(walChecked) >= walCheckEvery {
 			walChecked = time.Now()

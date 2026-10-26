@@ -58,6 +58,14 @@ func fakeOCR(delay string) {
 	fmt.Println("OCR init completed.")
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
+		for _, a := range os.Args { // 参数 -zzlog=文件：记下每次识别请求，测试据此数识别了几次
+			if p, ok := strings.CutPrefix(a, "-zzlog="); ok {
+				if f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+					fmt.Fprintln(f, sc.Text())
+					f.Close()
+				}
+			}
+		}
 		time.Sleep(d)
 		fmt.Println(`{"code":100,"data":[{"text":"fakeocrword"}]}`)
 	}
@@ -375,5 +383,40 @@ func TestWriterBulkWhenBacklogged(t *testing.T) {
 	var got int
 	if err := m.DB.R.QueryRow(`SELECT count(*) FROM fts WHERE fts MATCH '批'`).Scan(&got); err != nil || got != n {
 		t.Fatalf("全文索引里有 %d 个（%v），应为 %d", got, err, n)
+	}
+}
+
+// 同一份图片的多个副本同时排队：只识别一次，其余等它写入后按内容复用结果（0.2.6 约 17% 的 OCR 是这样重复做的）。
+func TestOCRDuplicatesNotConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	writePNG(t, filepath.Join(dir, "原件.png"), 7)
+	b, _ := os.ReadFile(filepath.Join(dir, "原件.png"))
+	for i := 0; i < 5; i++ {
+		os.WriteFile(filepath.Join(dir, fmt.Sprintf("副本%d.png", i)), b, 0o644)
+	}
+	writePNG(t, filepath.Join(dir, "另一张.png"), 9)
+	reqs := filepath.Join(t.TempDir(), "ocr.log")
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	e := newEnvWith(t, prov, `{"workers":2,"ocrWorkers":3,"legacyWorkers":1,"configVersion":2}`,
+		func(m *Manager) {
+			useFakeOCR(t, m, "300ms")
+			m.ocrCfg.Args = append(m.ocrCfg.Args, "-zzlog="+reqs)
+		})
+	if _, err := e.m.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "全部提取完成", 60*time.Second, func() bool {
+		c, _ := e.m.DB.AllCounts()
+		return c.Total == 7 && c.Pending == 0
+	})
+	var n int
+	e.m.DB.R.QueryRow(`SELECT count(*) FROM files WHERE ocr=1 AND text_len>0`).Scan(&n)
+	if n != 7 {
+		t.Fatalf("7 张图都应有识别出的文字，实际 %d 张", n)
+	}
+	data, _ := os.ReadFile(reqs)
+	if n := strings.Count(string(data), "\n"); n != 2 {
+		t.Fatalf("两种内容应只识别 2 次，实际 %d 次", n)
 	}
 }
