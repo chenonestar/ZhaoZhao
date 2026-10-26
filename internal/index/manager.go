@@ -51,6 +51,9 @@ type scanReq struct {
 	rootID int64
 	sub    string // 卷内相对路径，空表示整个索引根
 	force  bool   // 忽略大小/时间对账，全部重新入队
+	// again：这个索引根正在扫描时，等它扫完再扫一遍（设置改了、变化事件溢出、磁盘重新接入，正在进行的扫描
+	// 可能看不到这些变化）。没有它的请求（启动、定时、手动点「扫描」）在正在扫描时直接忽略。
+	again bool
 }
 
 // scanState 记录某个索引根的扫描进度；各字段会被扫描协程和状态查询并发读写。
@@ -100,6 +103,7 @@ type Manager struct {
 	scanMu   sync.Mutex
 	scanQ    chan scanReq
 	scanSet  map[scanReq]bool
+	scanRun  map[int64]*scanReq // 正在整个扫描的索引根 → 扫完后要补扫的请求（nil 表示不用补扫）
 	scanInfo map[int64]*scanState
 
 	sched schedState
@@ -136,7 +140,7 @@ func New(db *store.DB, prov volume.Provider, pool *worker.Pool, dataDir string) 
 	m := &Manager{DB: db, Prov: prov, Pool: pool, DataDir: dataDir,
 		vols: map[string]*volState{}, roots: map[int64]*rootRT{},
 		kickCh: make(chan struct{}, 1), awakeCh: make(chan struct{}, 1), scanQ: make(chan scanReq, 1024),
-		scanSet: map[scanReq]bool{}, scanInfo: map[int64]*scanState{}}
+		scanSet: map[scanReq]bool{}, scanRun: map[int64]*scanReq{}, scanInfo: map[int64]*scanState{}}
 	m.watch.watched = map[int64]recursiveWatcher{}
 	m.watch.pending = map[string]pendingEvent{}
 	if m.Pool == nil {
@@ -207,7 +211,7 @@ func (m *Manager) SetConfig(c Config) error {
 		!slices.Equal(old.ExcludePrefixes, c.ExcludePrefixes) || !slices.Equal(old.ExcludeGlobs, c.ExcludeGlobs) ||
 		!slices.Equal(old.ExcludeExts, c.ExcludeExts) || old.FollowLinks != c.FollowLinks || old.SkipCloud != c.SkipCloud ||
 		old.SniffUnknown != c.SniffUnknown {
-		m.RescanAll()
+		m.rescanAll(true)
 	}
 	return nil
 }
@@ -615,7 +619,7 @@ func (m *Manager) PauseRoot(id int64, paused bool) error {
 	}
 	_ = m.reloadRoots()
 	if !paused {
-		m.enqueueScan(scanReq{rootID: id})
+		m.enqueueScan(scanReq{rootID: id, again: true})
 		m.kick()
 	}
 	return nil
@@ -628,7 +632,7 @@ func (m *Manager) SetRootOpts(id int64, o RootOpts) error {
 	}
 	_ = m.reloadRoots()
 	m.saveRootsBackup()
-	m.enqueueScan(scanReq{rootID: id})
+	m.enqueueScan(scanReq{rootID: id, again: true})
 	return nil
 }
 
@@ -637,8 +641,10 @@ func (m *Manager) PauseAll()      { m.pausedAll.Store(true) }
 func (m *Manager) ResumeAll()     { m.pausedAll.Store(false); m.kick() }
 func (m *Manager) IsPaused() bool { return m.pausedAll.Load() }
 
-// RescanAll 对全部索引根做增量对账。
-func (m *Manager) RescanAll() {
+// RescanAll 对全部索引根做增量对账（正在扫描的索引根不再重复扫描）。
+func (m *Manager) RescanAll() { m.rescanAll(false) }
+
+func (m *Manager) rescanAll(again bool) {
 	m.mu.RLock()
 	var ids []int64
 	for id, rt := range m.roots {
@@ -648,7 +654,7 @@ func (m *Manager) RescanAll() {
 	}
 	m.mu.RUnlock()
 	for _, id := range ids {
-		m.enqueueScan(scanReq{rootID: id})
+		m.enqueueScan(scanReq{rootID: id, again: again})
 	}
 }
 
@@ -660,9 +666,9 @@ func (m *Manager) RebuildRoot(id int64) error {
 		return err
 	}
 	if id == 0 {
-		m.RescanAll()
+		m.rescanAll(true)
 	} else {
-		m.enqueueScan(scanReq{rootID: id, force: true})
+		m.enqueueScan(scanReq{rootID: id, force: true, again: true})
 	}
 	m.kick()
 	return nil

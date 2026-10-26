@@ -119,7 +119,7 @@ func (m *Manager) watchRoot(rt *rootRT) {
 					return
 				}
 				m.logf("文件变化事件溢出，重新对账索引根 %d", rootID)
-				m.enqueueScan(scanReq{rootID: rootID})
+				m.enqueueScan(scanReq{rootID: rootID, again: true})
 			}
 		}
 	}()

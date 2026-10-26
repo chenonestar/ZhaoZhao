@@ -841,3 +841,44 @@ func TestRescanKeepsExtractedNoText(t *testing.T) {
 		t.Fatalf("没变化的空白文件被重新处理了：indexed_at %d → %d", first, again)
 	}
 }
+
+// 同一个索引根正在扫描时：普通请求忽略，要求补扫的请求记下来，扫完再扫一遍（只一遍）。
+func TestRootScanNotConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	write(t, filepath.Join(dir, "a.txt"), "hello")
+	e := newEnv(t, prov)
+	r, err := e.m.AddRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+	m := e.m
+	m.scanMu.Lock()
+	m.scanRun[r.ID] = nil // 假装正在扫描
+	m.scanMu.Unlock()
+	m.runRootScan(scanReq{rootID: r.ID})
+	m.scanMu.Lock()
+	if next := m.scanRun[r.ID]; next != nil {
+		t.Fatalf("正在扫描时的普通请求应忽略，却记了补扫：%+v", *next)
+	}
+	m.scanMu.Unlock()
+	m.runRootScan(scanReq{rootID: r.ID, again: true})
+	m.runRootScan(scanReq{rootID: r.ID, force: true, again: true})
+	m.scanMu.Lock()
+	next := m.scanRun[r.ID]
+	delete(m.scanRun, r.ID)
+	m.scanMu.Unlock()
+	if next == nil || !next.force || next.sub != "" {
+		t.Fatalf("要求补扫的请求应合并成一次（带 force）：%+v", next)
+	}
+	// 不在扫描时照常扫描，扫完不留记录
+	m.runRootScan(scanReq{rootID: r.ID})
+	m.scanMu.Lock()
+	_, busy := m.scanRun[r.ID]
+	m.scanMu.Unlock()
+	if busy {
+		t.Fatal("扫描结束后应清除正在扫描的记录")
+	}
+}

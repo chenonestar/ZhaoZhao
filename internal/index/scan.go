@@ -33,13 +33,45 @@ func (m *Manager) startScanners(n int) {
 				case <-m.ctx.Done():
 					return
 				case req := <-m.scanQ:
-					m.scanMu.Lock()
-					delete(m.scanSet, req)
-					m.scanMu.Unlock()
-					m.runScan(req)
+					if req.sub != "" {
+						m.scanMu.Lock()
+						delete(m.scanSet, req)
+						m.scanMu.Unlock()
+						m.runScan(req)
+						continue
+					}
+					m.runRootScan(req)
 				}
 			}
 		}()
+	}
+}
+
+// runRootScan 扫描整个索引根。同一个索引根同一时刻只扫一遍：正在扫描时，要求补扫的请求记下来等扫完再扫，
+// 其余的忽略（正在进行的扫描会看到这些文件）。0.2.6 以前会并行再开一个扫描，同一批文件被处理两三遍。
+func (m *Manager) runRootScan(req scanReq) {
+	m.scanMu.Lock()
+	delete(m.scanSet, req)
+	if next, busy := m.scanRun[req.rootID]; busy {
+		if req.again || req.force {
+			if next == nil {
+				next = &scanReq{rootID: req.rootID, again: true}
+				m.scanRun[req.rootID] = next
+			}
+			next.force = next.force || req.force
+		}
+		m.scanMu.Unlock()
+		return
+	}
+	m.scanRun[req.rootID] = nil
+	m.scanMu.Unlock()
+	m.runScan(req)
+	m.scanMu.Lock()
+	next := m.scanRun[req.rootID]
+	delete(m.scanRun, req.rootID)
+	m.scanMu.Unlock()
+	if next != nil && m.ctx.Err() == nil {
+		m.enqueueScan(*next)
 	}
 }
 

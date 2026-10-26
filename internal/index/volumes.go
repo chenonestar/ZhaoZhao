@@ -118,7 +118,7 @@ func (m *Manager) refreshVolumes(initial bool) {
 					Message: "检测到新接入的磁盘「" + c.info.Label + "」（" + c.info.Mount + "），是否加入索引？"})
 			}
 			if hasRoots {
-				m.volumeOnline(c.id)
+				m.volumeOnline(c.id, !initial)
 			}
 		} else {
 			if hasRoots {
@@ -173,8 +173,9 @@ func (m *Manager) rootsOf(volID string) []*rootRT {
 	return out
 }
 
-// volumeOnline：卷接入或盘符变化。启动监听并后台增量对账（F-VOL-05）。
-func (m *Manager) volumeOnline(id string) {
+// volumeOnline：卷接入或盘符变化。启动监听并后台增量对账（F-VOL-05）。again：正在扫描时扫完再扫一遍
+// （运行中重新接入的盘，正在进行的扫描可能因为它一度离线而中止）；启动时由启动对账统一扫描，不用补扫。
+func (m *Manager) volumeOnline(id string, again bool) {
 	if o := m.volOf(id); o != nil {
 		m.mu.RLock()
 		info := o.info
@@ -187,7 +188,7 @@ func (m *Manager) volumeOnline(id string) {
 		m.unwatchRoot(rt)
 		m.watchRoot(rt)
 		if !rt.Paused {
-			m.enqueueScan(scanReq{rootID: rt.ID})
+			m.enqueueScan(scanReq{rootID: rt.ID, again: again})
 		}
 	}
 	m.kick()
