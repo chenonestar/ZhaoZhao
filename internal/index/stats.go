@@ -8,6 +8,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/chenonestar/zhaozhao/internal/awake"
+	"github.com/chenonestar/zhaozhao/internal/sysinfo"
+	"github.com/chenonestar/zhaozhao/internal/worker"
 )
 
 // 阶段用时统计：建索引期间每 statsEvery 在日志里写一行，说明这段时间普通文件的时间花在哪一步（读文件和查重、
@@ -135,6 +137,7 @@ func (m *Manager) statsLoop() {
 	m.stats.mu.Lock()
 	m.stats.since, m.stats.pages = awake.Now(), m.ocr.pages.Load()
 	m.stats.mu.Unlock()
+	cpu := sysinfo.NewCPUMonitor(worker.ChildrenCPU)
 	t := time.NewTicker(statsEvery)
 	defer t.Stop()
 	for {
@@ -143,8 +146,30 @@ func (m *Manager) statsLoop() {
 			return
 		case <-t.C:
 		}
+		c := cpu.Read()
 		if s := m.stats.take(awake.Now(), m.ocr.pages.Load()); s != "" {
+			if cs := c.String(); cs != "" {
+				s += "；" + cs
+			}
 			m.logf("%s", s)
+			m.checkCPUSlow(c)
 		}
 	}
+}
+
+// checkCPUSlow：建索引期间 CPU 明显被限速（大半逻辑处理器在忙，实际速度却不到额定频率的 80%）时提示一次。
+// 正常满负荷时 CPU 会睿频到额定频率以上；被电源计划、过热、主板功耗限制压住时，OCR 会慢很多。
+func (m *Manager) checkCPUSlow(c sysinfo.CPUStat) {
+	if !c.Slow(m.ocrMachine().Logical) {
+		return
+	}
+	plan := sysinfo.PowerPlan()
+	msg := fmt.Sprintf("最近 %.0f 分钟建索引时，CPU 实际只有约 %.1f GHz（额定 %.1f GHz 的 %.0f%%），可能被限速了，建索引会慢很多。",
+		c.Span.Minutes(), c.ActualGHz(), c.MHz/1000, c.Perf)
+	if plan != "" {
+		msg += "现在的电源计划是「" + plan + "」，"
+	}
+	msg += "可以在「控制面板 → 电源选项」改用「平衡」或「高性能」，或检查电脑散热（风扇、灰尘）。"
+	m.logf("%s", msg)
+	m.noticeOnce("cpu-slow", Notice{Kind: "info", Message: msg})
 }

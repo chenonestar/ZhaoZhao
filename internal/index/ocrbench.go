@@ -47,6 +47,20 @@ type OCRBench struct {
 	PlanModel string          `json:"planModel,omitempty"`
 	Models    []OCRBenchModel `json:"models,omitempty"`
 	Model     string          `json:"model,omitempty"`
+	// CPUNote 是测速期间 CPU 的情况：实际频率、全部程序和别的程序各占几个逻辑处理器、电源计划（只有 Windows 取得到）
+	CPUNote string `json:"cpuNote,omitempty"`
+}
+
+// cpuNote 把测速期间的 CPU 情况连同电源计划写成一句话。
+func cpuNote(c sysinfo.CPUStat) string {
+	s := c.String()
+	if p := sysinfo.PowerPlan(); p != "" {
+		if s != "" {
+			s += "，"
+		}
+		s += "电源计划「" + p + "」"
+	}
+	return s
 }
 
 // OCRBenchModel 是一种认字模型的实测结果（用最快的搭配）。
@@ -185,6 +199,9 @@ func (b *OCRBench) Summary() string {
 		if b.Model != "" {
 			s += "；选用 " + extract.OCRModelName(b.Model)
 		}
+	}
+	if b.CPUNote != "" {
+		s += "。测速期间" + b.CPUNote
 	}
 	return s
 }
@@ -492,9 +509,11 @@ func BenchOCR(ctx context.Context, pool *worker.Pool, cfg extract.OCRConfig, pro
 	cands := ocrBenchCandidates(budget, mc.Logical, nextMemCap(0, ocrMemSlots(total, avail, ocrSlotMemDefault, 0)))
 	opts := extract.DefaultOptions()
 	opts.OCR = cfg
+	cpu := sysinfo.NewCPUMonitor(worker.ChildrenCPU)
 	b := runOCRBench(ctx, budget, cands, cfg.Models(), poolBench(pool, opts, sample), func(i, n int, what string) {
 		progress(fmt.Sprintf("第 %d/%d 项：%s", i+1, n, what))
 	})
 	b.Machine, b.CPU, b.Cores, b.Logical, b.MemGB = ocrMachineKey(mc, cfg), mc.CPU, mc.Cores, mc.Logical, float64(mc.MemTotal)/(1<<30)
+	b.CPUNote = cpuNote(cpu.Read())
 	return b, nil
 }

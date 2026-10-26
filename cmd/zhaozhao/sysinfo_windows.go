@@ -21,6 +21,15 @@ func sysInfo() string {
 	if total, avail := sysinfo.Memory(); total > 0 {
 		s += fmt.Sprintf("，内存 %.1f GB（可用 %.1f GB）", float64(total)/(1<<30), float64(avail)/(1<<30))
 	}
+	if maxMHz, limit := sysinfo.CPULimit(); maxMHz > 0 {
+		s += fmt.Sprintf("，CPU 最高 %.1f GHz", float64(maxMHz)/1000)
+		if limit > 0 && limit < maxMHz {
+			s += fmt.Sprintf("（现在限制在 %.1f GHz）", float64(limit)/1000)
+		}
+	}
+	if p := sysinfo.PowerPlan(); p != "" {
+		s += "，电源计划「" + p + "」"
+	}
 	return s
 }
 

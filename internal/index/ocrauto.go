@@ -72,6 +72,16 @@ func (m *Manager) ocrModel() string {
 	return extract.OCRModelV4
 }
 
+// ocrMachine 返回本机的处理器、核心数、内存。
+func (m *Manager) ocrMachine() sysinfo.Machine {
+	m.ocr.mu.Lock()
+	defer m.ocr.mu.Unlock()
+	if m.ocr.machine.Cores == 0 {
+		m.ocr.machine = sysinfo.This()
+	}
+	return m.ocr.machine
+}
+
 func (m *Manager) physCores() int {
 	m.ocr.mu.Lock()
 	defer m.ocr.mu.Unlock()
@@ -397,8 +407,9 @@ func (m *Manager) runOCRBench() bool {
 	if pool == nil {
 		pool = m.Pool
 	}
-	m.logf("测试本机 OCR 速度：比较 %d 种搭配（%s），普通文件暂停约 1～2 分钟", len(cands), planList(cands))
+	m.logf("测试本机 OCR 速度：比较 %d 种搭配（%s），普通文件暂停约 2 分钟", len(cands), planList(cands))
 	t0 := awake.Now()
+	cpu := sysinfo.NewCPUMonitor(worker.ChildrenCPU)
 	b := runOCRBench(m.ctx, cores, cands, m.ocrCfg.Models(), newOCRBenchRunner(m, pool, sample), func(i, n int, what string) {
 		m.setBenchNote(fmt.Sprintf("正在测试本机 OCR 速度（第 %d/%d 项：%s），其他文件暂停约 2 分钟", i+1, n, what))
 		m.activity()
@@ -407,6 +418,7 @@ func (m *Manager) runOCRBench() bool {
 		return false
 	}
 	b.Machine, b.CPU, b.Cores, b.Logical, b.MemGB = key, mc.CPU, mc.Cores, mc.Logical, float64(mc.MemTotal)/(1<<30)
+	b.CPUNote = cpuNote(cpu.Read())
 	if _, ok := b.best(); !ok {
 		return fail(b.Err)
 	}

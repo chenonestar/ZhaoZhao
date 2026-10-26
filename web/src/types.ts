@@ -322,7 +322,7 @@ export interface OCRBenchModel {
 export interface OCRBenchInfo {
   bench: {
     cpu: string; cores: number; logical?: number; memGB: number; at: number; budget: number; plans: OCRBenchPlan[] | null; best: number;
-    planModel?: string; models?: OCRBenchModel[] | null; model?: string;
+    planModel?: string; models?: OCRBenchModel[] | null; model?: string; cpuNote?: string;
   } | null;
   model: string; // 现在用的认字模型
   models: string[] | null; // 组件里有的认字模型

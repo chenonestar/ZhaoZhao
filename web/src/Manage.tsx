@@ -709,6 +709,7 @@ function OCRSpeed() {
           </tbody>
         </table>
       )}
+      {b?.cpuNote && <div className="dim small">测速期间：{b.cpuNote}</div>}
       {st.note && <div className="small">{st.note}</div>}
       {st.done > 0 && (
         <div className="btns">
