@@ -432,11 +432,13 @@ type FileSig struct {
 	Size  int64
 	MTime int64
 	State int
+	// Indexed：提取过（不论有没有提取出文字）。为 false 的「只索引文件名」是扫描时按规则跳过的
+	Indexed bool
 }
 
 // RootSigs 返回某索引根下所有顶层文件（非容器内部条目）的签名，键为 rel_path。
 func (d *DB) RootSigs(rootID int64) (map[string]FileSig, error) {
-	rows, err := d.R.Query(`SELECT id,rel_path,size,mtime,state FROM files WHERE root_id=? AND inner=''`, rootID)
+	rows, err := d.R.Query(`SELECT id,rel_path,size,mtime,state,indexed_at>0 FROM files WHERE root_id=? AND inner=''`, rootID)
 	if err != nil {
 		return nil, err
 	}
@@ -445,7 +447,7 @@ func (d *DB) RootSigs(rootID int64) (map[string]FileSig, error) {
 	for rows.Next() {
 		var s FileSig
 		var p string
-		if err := rows.Scan(&s.ID, &p, &s.Size, &s.MTime, &s.State); err != nil {
+		if err := rows.Scan(&s.ID, &p, &s.Size, &s.MTime, &s.State, &s.Indexed); err != nil {
 			return nil, err
 		}
 		m[p] = s

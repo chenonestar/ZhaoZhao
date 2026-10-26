@@ -216,8 +216,9 @@ func (m *Manager) runScan(req scanReq) {
 		atomic.AddInt64(&st.count, 1)
 		size, mtime := info.Size(), info.ModTime().Unix()
 		if sig, ok := sigs[rel]; ok && !req.force && sig.Size == size && sig.MTime == mtime {
-			// 未变化。只处理「设置放宽后原先被跳过的文件」。
-			if sig.State == store.StateMetaOnly && extract.Supported(ext) {
+			// 未变化。只处理「设置放宽后原先被跳过的文件」：扫描时按规则跳过、从没提取过的。
+			// 提取过但没有文字（没有文字内容、图片太小等）的不再动，否则每次扫描都会重新处理一遍。
+			if sig.State == store.StateMetaOnly && !sig.Indexed && extract.Supported(ext) {
 				state, msg, prio, kind := m.decide(rt, cfg, abs, ext, size, info)
 				if state == store.StatePending {
 					batch = append(batch, &store.File{RootID: rt.ID, VolumeID: rt.VolumeID, RelPath: rel, Name: name, Ext: ext, Kind: kind,

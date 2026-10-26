@@ -808,3 +808,36 @@ func TestArchiveChildrenShareText(t *testing.T) {
 		t.Fatalf("压缩包里提取成功的文件都应有内容指纹：%d", hashed)
 	}
 }
+
+// 提取过但没有文字的文件（只索引文件名）在重新扫描时不应再处理一遍；扫描时按规则跳过的仍会在放宽后补上。
+func TestRescanKeepsExtractedNoText(t *testing.T) {
+	dir := t.TempDir()
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	write(t, filepath.Join(dir, "空白.txt"), "   \n\n  ")
+	write(t, filepath.Join(dir, "有字.txt"), "zebra 斑马")
+	e := newEnv(t, prov)
+	id, err := e.m.AddRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+	at := func() (state int, indexed int64) {
+		if err := e.m.DB.R.QueryRow(`SELECT state,indexed_at FROM files WHERE name='空白.txt'`).Scan(&state, &indexed); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	st, first := at()
+	if st != store.StateMetaOnly || first == 0 {
+		t.Fatalf("空白文件应提取过、只索引文件名：state=%d indexed_at=%d", st, first)
+	}
+	time.Sleep(1100 * time.Millisecond) // indexed_at 以秒计
+	for i := 0; i < 2; i++ {
+		e.m.RescanRoot(id.ID)
+		e.waitIdle()
+	}
+	if _, again := at(); again != first {
+		t.Fatalf("没变化的空白文件被重新处理了：indexed_at %d → %d", first, again)
+	}
+}
