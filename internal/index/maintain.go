@@ -454,7 +454,31 @@ func (m *Manager) SpaceStatsContext(ctx context.Context) (*SpaceDetail, error) {
 		}
 		d.BiggestPaths = append(d.BiggestPaths, p)
 	}
+	m.spaceMu.Lock()
+	m.spaceLast, m.spaceAt = d, time.Now()
+	m.spaceMu.Unlock()
 	return d, nil
+}
+
+// LastSpaceStats 返回这次运行里最近一次空间统计的结果和统计时间（没统计过时为 nil）。
+// 导出诊断信息时直接用它：机械硬盘上冷读整个索引库要几十秒到几分钟。
+func (m *Manager) LastSpaceStats() (*SpaceDetail, time.Time) {
+	m.spaceMu.Lock()
+	defer m.spaceMu.Unlock()
+	return m.spaceLast, m.spaceAt
+}
+
+// QuickSpaceText 是不用读遍索引库的简要空间统计（完整统计超时时写进诊断信息）。
+func (m *Manager) QuickSpaceText() string {
+	sp := m.DB.Space()
+	var b strings.Builder
+	fmt.Fprintf(&b, "索引库 %s，WAL %s，空闲 %s（%s）\n", fmtBytes(sp.DBBytes), fmtBytes(sp.WALBytes), fmtBytes(sp.FreeBytes),
+		map[bool]string{true: "增量回收模式", false: "需手动压缩才能归还"}[sp.Incremental])
+	if f, err := m.DB.FTSInfo(); err == nil {
+		fmt.Fprintf(&b, "全文索引：%d 个段，约 %s，最大的段占 %d%%，已删除的残留条目 %d 个（共 %d 个）\n",
+			f.Segments, fmtBytes(f.Pages*4096), f.Largest*100/max(1, f.Pages), f.Deleted, f.Entries)
+	}
+	return b.String()
 }
 
 // SpaceText 把空间统计写成文字（诊断信息用）。

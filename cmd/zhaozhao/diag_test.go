@@ -43,9 +43,9 @@ func TestExportDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Stop()
-	// 第二次模拟超时：用已经过去的时限。1 纳秒不行：Windows 的计时器要过约 1 毫秒才触发，空索引库的统计
-	// 几毫秒就做完了，来不及超时
-	for _, limit := range []time.Duration{30 * time.Second, -time.Nanosecond} {
+	// 第一次模拟超时：用已经过去的时限（1 纳秒不行：Windows 的计时器要过约 1 毫秒才触发，空索引库的统计
+	// 几毫秒就做完了，来不及超时），应写简要统计；第二次完整统计；第三次直接用第二次的结果，不再统计
+	for i, limit := range []time.Duration{-time.Nanosecond, 30 * time.Second, -time.Nanosecond} {
 		diagSpaceLimit = limit
 		var steps []string
 		p, err := exportDiagnostics(dir, lg, m, true, func(s string) { steps = append(steps, s) })
@@ -69,17 +69,26 @@ func TestExportDiagnostics(t *testing.T) {
 			}
 		}
 		zr.Close()
-		if limit < 0 && !strings.Contains(space, "已跳过") {
-			t.Fatalf("超时应跳过空间统计：%q", space)
+		stepped := strings.Contains(strings.Join(steps, "|"), "索引库空间统计")
+		switch i {
+		case 0:
+			if !strings.Contains(space, "简要统计") || !strings.Contains(space, "索引库") || !stepped {
+				t.Fatalf("超时应写简要统计：%q %v", space, steps)
+			}
+		case 1:
+			if !strings.Contains(space, "提取文本") || strings.Contains(space, "统计的结果") || !stepped {
+				t.Fatalf("应完整统计：%q", space)
+			}
+		case 2:
+			if !strings.Contains(space, "统计的结果") || !strings.Contains(space, "提取文本") || stepped {
+				t.Fatalf("应直接用上次统计的结果：%q %v", space, steps)
+			}
 		}
-		if limit > time.Second && !strings.Contains(space, "索引库") {
-			t.Fatalf("空间统计：%q", space)
-		}
-		if !strings.Contains(strings.Join(steps, "|"), "索引库空间统计") || !strings.HasPrefix(steps[len(steps)-1], "日志") {
+		if !strings.HasPrefix(steps[len(steps)-1], "日志") {
 			t.Fatalf("进度：%v", steps)
 		}
 		os.Remove(p)
 		time.Sleep(1100 * time.Millisecond) // 文件名按秒命名
 	}
-	diagSpaceLimit = 30 * time.Second
+	diagSpaceLimit = 2 * time.Minute
 }

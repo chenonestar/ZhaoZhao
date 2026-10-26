@@ -131,6 +131,9 @@ type Manager struct {
 	baseline   atomic.Bool // 首次卷扫描完成后才通知「新卷」
 
 	compMu       sync.Mutex
+	spaceMu      sync.Mutex
+	spaceLast    *SpaceDetail // 这次运行里最近一次空间统计的结果（导出诊断信息时复用）
+	spaceAt      time.Time
 	components   []extract.ComponentStatus
 	compChecking bool
 }

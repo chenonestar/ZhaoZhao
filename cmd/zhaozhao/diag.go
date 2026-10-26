@@ -35,8 +35,10 @@ func diskDesc(p string) string {
 	return d
 }
 
-// diagSpaceLimit：导出诊断信息时空间统计最多花多久（大索引库要读遍整个文件），超时就跳过这一项。
-var diagSpaceLimit = 30 * time.Second
+// diagSpaceLimit：导出诊断信息时空间统计最多花多久（大索引库要读遍整个文件，机械硬盘上冷读 1.5 GB 的
+// 索引库要一分多钟），超时就写一份不用读遍索引库的简要统计。这次运行里已经统计过（设置页点过「统计详情」）
+// 时直接用那次的结果。
+var diagSpaceLimit = 2 * time.Minute
 
 // exportDiagnostics 把日志、当前状态、设置和运行环境打包成 zip，放在数据目录下。
 // anonymize 为真时，所有文件名和路径替换成代号（保留盘符、层级和扩展名）。progress 报告进行到哪一步。
@@ -132,18 +134,22 @@ func exportDiagnostics(dataDir string, lg *logx.Logger, mgr *index.Manager, anon
 		return "", err
 	}
 
-	progress(fmt.Sprintf("索引库空间统计（最多 %d 秒）", int(diagSpaceLimit.Seconds())))
-	ctx, cancel := context.WithTimeout(context.Background(), diagSpaceLimit)
-	sp, err := mgr.SpaceStatsContext(ctx)
-	cancel()
 	space := ""
-	switch {
-	case err == nil:
-		space = index.SpaceText(sp)
-	case errors.Is(err, context.DeadlineExceeded):
-		space = fmt.Sprintf("空间统计超过 %d 秒，已跳过。\n", int(diagSpaceLimit.Seconds()))
-	default:
-		space = "空间统计失败：" + err.Error() + "\n"
+	if sp, at := mgr.LastSpaceStats(); sp != nil {
+		space = fmt.Sprintf("（%s 统计的结果）\n", at.Format("2006-01-02 15:04:05")) + index.SpaceText(sp)
+	} else {
+		progress(fmt.Sprintf("索引库空间统计（机械硬盘上较慢，最多 %d 分钟）", int(diagSpaceLimit.Minutes())))
+		ctx, cancel := context.WithTimeout(context.Background(), diagSpaceLimit)
+		sp, err := mgr.SpaceStatsContext(ctx)
+		cancel()
+		switch {
+		case err == nil:
+			space = index.SpaceText(sp)
+		case errors.Is(err, context.DeadlineExceeded):
+			space = fmt.Sprintf("完整的空间统计超过 %d 分钟，改写简要统计：\n", int(diagSpaceLimit.Minutes())) + mgr.QuickSpaceText()
+		default:
+			space = "空间统计失败：" + err.Error() + "\n" + mgr.QuickSpaceText()
+		}
 	}
 	if err := add("索引空间.txt", space); err != nil {
 		f.Close()
