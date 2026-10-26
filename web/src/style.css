@@ -96,6 +96,7 @@ footer { display: flex; gap: 4px; padding: 5px 14px; border-top: 1px solid var(-
 .current { height: calc(9 * 18px); overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: var(--panel); }
 .current > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; line-height: 18px; }
 .current > .stall { white-space: normal; }
+.current > .waiting { opacity: .55; }
 /* 组件检测结果固定占 3 行 */
 .components { min-height: calc(3 * 18px); }
 .components > div { line-height: 18px; }

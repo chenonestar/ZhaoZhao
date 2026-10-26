@@ -104,6 +104,7 @@ export interface CurrentJob {
   stage: string;
   progress: string;
   seconds: number;
+  waiting?: boolean; // 已从队列取出、还在等空闲的处理线程（OCR 进程）
 }
 
 export interface SlotStatus {

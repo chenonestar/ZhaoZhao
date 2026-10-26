@@ -54,6 +54,7 @@ type job struct {
 	stage    string
 	progress string
 	sent     bool // 结果已交给写入协程：写入完成后才从「处理中」移除，避免同一文件被再次派发
+	started  bool // 已由处理线程开始处理（之前是在等空闲的线程）
 
 	pagesDone, pagesTotal int         // OCR：已识别的页数、总页数（由进度消息得到，用于实测每分钟页数）
 	ctl                   *worker.Ctl // OCR 识别期间不为 nil：可以调整之后识别用的线程数（队列收尾时）
@@ -341,7 +342,11 @@ func (m *Manager) laneDispatcher(l *lane) {
 				break // 开始测试 OCR 速度了：剩下的等测完再派发
 			}
 			now := time.Now()
-			j := &job{f: f, class: classOf(f, loOnly), lane: l, stage: "等待空闲的提取线程", queued: now, since: awake.Now()}
+			wait := "排队，等空闲的处理线程"
+			if l.prio == prioOCR {
+				wait = "排队，等空闲的 OCR 进程"
+			}
+			j := &job{f: f, class: classOf(f, loOnly), lane: l, stage: wait, queued: now, since: awake.Now()}
 			j.path, _ = m.AbsPath(f.VolumeID, f.RelPath)
 			s.mu.Lock()
 			if l.prio == prioOCR && s.ocrSameSizeLocked(f) {
@@ -392,7 +397,7 @@ func (m *Manager) laneWorker(l *lane) {
 			return
 		}
 		s.mu.Lock()
-		j.since = awake.Now()
+		j.since, j.started = awake.Now(), true
 		if l.running == 0 && (len(l.done) == 0 || j.since-l.done[len(l.done)-1] > laneIdleGap) {
 			l.busySince, l.done = j.since, l.done[:0]
 		}

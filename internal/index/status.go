@@ -47,7 +47,9 @@ type CurrentJob struct {
 	Kind     string `json:"kind"`     // 普通 / 老格式 / OCR
 	Stage    string `json:"stage"`    // 当前步骤，如「从网络盘读取」「OCR 识别」
 	Progress string `json:"progress"` // 步骤内的进度，如「第 3/20 页」
-	Seconds  int64  `json:"seconds"`  // 已处理的时间
+	Seconds  int64  `json:"seconds"`  // 已处理的时间（排队时为已等待的时间）
+	// Waiting：已从队列取出、还在等空闲的处理线程（OCR 进程）。界面上和正在处理的分开显示。
+	Waiting bool `json:"waiting,omitempty"`
 }
 
 // SlotStatus 是一类受限资源的使用情况。
@@ -110,7 +112,7 @@ func (m *Manager) currentJobs() []CurrentJob {
 	s.mu.Lock()
 	for _, j := range s.inflight {
 		items = append(items, item{CurrentJob{ID: j.f.ID, Path: j.path, Kind: classNames[j.class], Stage: j.stage, Progress: j.progress,
-			Seconds: int64(awake.Since(j.since).Seconds())}, j.queued})
+			Seconds: int64(awake.Since(j.since).Seconds()), Waiting: !j.started}, j.queued})
 	}
 	s.mu.Unlock()
 	sort.Slice(items, func(i, k int) bool {

@@ -96,12 +96,15 @@ function IndexTab({ status, refresh }: { status: Status | null; refresh: () => v
               </div>
             )}
             <div>
-              正在处理 {status.current.length} 个{status.net && status.net.used > 0 ? ` · 网络盘读取 ${status.net.used}/${status.net.cap}` : ""}
+              正在处理 {status.current.filter((j) => !j.waiting).length} 个
+              {status.current.some((j) => j.waiting) ? `，排队 ${status.current.filter((j) => j.waiting).length} 个` : ""}
+              {status.net && status.net.used > 0 ? ` · 网络盘读取 ${status.net.used}/${status.net.cap}` : ""}
               {status.keepingAwake ? " · 已阻止电脑自动睡眠（索引完成后恢复）" : ""}
             </div>
-            {status.current.map((j) => (
-              <div key={j.id} title={j.path}>
-                <span className="badge">{j.kind}</span> {j.path.split(/[\\/]/).pop()} — {j.stage}{j.progress ? ` ${j.progress}` : ""} · {fmtDuration(j.seconds)}
+            {[...status.current.filter((j) => !j.waiting), ...status.current.filter((j) => j.waiting)].map((j) => (
+              <div key={j.id} title={j.path} className={j.waiting ? "waiting" : undefined}>
+                <span className="badge">{j.kind}</span> {j.path.split(/[\\/]/).pop()} — {j.stage}{j.progress ? ` ${j.progress}` : ""}
+                {j.waiting ? "" : ` · ${fmtDuration(j.seconds)}`}
               </div>
             ))}
           </div>
