@@ -52,6 +52,7 @@ export const api = {
   excludeFolders: (ids: number[]) => post<{ folders: string[] }>("/api/exclude/folders", { ids }),
   ocrBench: () => call<OCRBenchInfo>("/api/ocrbench"),
   rerunOCRBench: () => post("/api/ocrbench/rerun"),
+  redoOCR: () => post<{ files: number }>("/api/ocr/redo"),
   legacyTest: () => call<LegacyTestState>("/api/legacytest"),
   startLegacyTest: (perExt: number) => post("/api/legacytest/start", { perExt }),
   cancelLegacyTest: () => post("/api/legacytest/cancel"),

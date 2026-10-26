@@ -15,9 +15,13 @@ func (m *Manager) CheckComponents() {
 	}
 	m.compChecking = true
 	m.compMu.Unlock()
-	ocr := m.ocrCfg
+	model := m.ocrModel()
+	ocr := m.ocrCfg.WithModel(model)
 	go func() {
 		res := []extract.ComponentStatus{extract.CheckSoffice(), extract.CheckOCR(ocr), extract.CheckPDFium()}
+		if ocr.Enabled() {
+			res[1].Message += "，认字模型 " + extract.OCRModelName(model)
+		}
 		for _, c := range res {
 			m.logf("组件自检：%s：%s %s", c.Name, c.Message, logx.P(c.Path))
 		}

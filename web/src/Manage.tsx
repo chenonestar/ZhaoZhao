@@ -566,6 +566,14 @@ function SettingsTab() {
       {chk("legacyLOOnly", "老格式只用 LibreOffice 转换，不用内置解析（较慢；仅在内置解析结果有问题时使用）")}
       {chk("ocrEnabled", "识别图片和扫描 PDF 里的文字（OCR）")}
       {num("ocrWorkers", "OCR 进程数", "0 = 自动（推荐）：在这台电脑上用样张实测，选出最快的进程数和每个进程的线程数（通常是每个 CPU 核心一个进程），进程数不超过内存允许的数量。手动设为 N 时，每个进程用「CPU 核心数 ÷ N」个线程")}
+      <label className="field inline"><span>认字模型</span>
+        <select value={c.ocrModel ?? ""} onChange={(e) => setC({ ...c, ocrModel: e.target.value })}>
+          <option value="">自动（推荐）：新模型 PP-OCRv6 small，按本机测速选普通版或量化版</option>
+          <option value="v6">新模型 PP-OCRv6 small</option>
+          <option value="v6q">新模型 PP-OCRv6 small 量化版（整数运算，多数电脑上更快）</option>
+          <option value="v4">旧模型 PP-OCRv4（0.2.6 及以前用的，认字准确率较低）</option>
+        </select>
+        <em className="dim small">只影响之后识别的文件；已识别的可以在下面「重新识别」</em></label>
       <OCRSpeed />
       {chk("ocrHalfWhenActive", "你在用电脑时放慢建索引：OCR 只用一半核心，普通文件每处理完一个停一下。一般不需要开：建索引的进程本来就是低优先级，你的程序优先；开了建索引会慢很多")}
       {chk("pauseOnBattery", "使用电池时暂停 OCR 和格式转换")}
@@ -633,10 +641,14 @@ function HotkeyField({ value, onChange, state }: { value: string; onChange: (v: 
   );
 }
 
+const modelNames: Record<string, string> = { v6: "PP-OCRv6 small", v6q: "PP-OCRv6 small 量化版", v4: "PP-OCRv4（旧模型）" };
+const modelName = (m: string) => modelNames[m] ?? m;
+
 // 本机 OCR 测速：每台电脑测一次（便携版换了电脑会重新测），按最快的搭配开进程。
 function OCRSpeed() {
   const [st, setSt] = useState<OCRBenchInfo | null>(null);
   const [err, setErr] = useState("");
+  const [redone, setRedone] = useState<number | null>(null);
   const load = () => api.ocrBench().then(setSt).catch(() => {});
   useEffect(() => { load(); }, []);
   useEffect(() => {
@@ -649,14 +661,21 @@ function OCRSpeed() {
   const plans = b?.plans ?? [];
   const best = b && b.best >= 0 && b.best < plans.length ? plans[b.best] : null;
   const memNote = st.memCap > 0 && st.memCap < st.cores ? `（内存只够开 ${st.memCap} 个 OCR 进程）` : "";
+  const models = b?.models ?? [];
+  const redo = () => {
+    if (!confirm(`用现在的认字模型（${modelName(st.model)}）重新识别已识别过的 ${st.done} 个文件？\n\n需要的时间和第一次识别差不多（可能要几个小时），期间旧的文字照样能搜到。`)) return;
+    setErr("");
+    api.redoOCR().then((r) => { setRedone(r.files); load(); }).catch((e) => setErr(e.message));
+  };
   return (
     <div className="field">
       <div className="dim small">
         {st.manual
           ? `OCR 进程数是手动设置的（现在 ${st.plan}），不测速。`
           : best && b
-            ? `本机实测（${new Date(b.at * 1000).toLocaleDateString()}，${b.cpu}，${b.cores} 个物理核心${(b.logical ?? 0) > b.cores ? `、${b.logical} 个逻辑处理器` : ""}）：${best.procs} 个进程 × ${best.threads} 线程最快，约每分钟 ${best.perMin.toFixed(1)} 页 A4 扫描页。现在用 ${st.plan}${memNote}。普通文件还在处理时，OCR 只用一半核心。`
-            : "还没有测过本机的 OCR 速度：第一次有图片要识别时自动测（约 1～2 分钟，期间普通文件暂停）。"}
+            ? `本机实测（${new Date(b.at * 1000).toLocaleDateString()}，${b.cpu}，${b.cores} 个物理核心${(b.logical ?? 0) > b.cores ? `、${b.logical} 个逻辑处理器` : ""}）：${best.procs} 个进程 × ${best.threads} 线程最快，约每分钟 ${best.perMin.toFixed(1)} 页 A4 扫描页。现在用 ${st.plan}${memNote}。`
+            : "还没有测过本机的 OCR 速度：第一次有图片要识别时自动测（约 2 分钟，期间普通文件暂停）。"}
+        {` 认字模型：${modelName(st.model)}。`}
       </div>
       {plans.length > 1 && b && (
         <table className="grid">
@@ -673,7 +692,27 @@ function OCRSpeed() {
           </tbody>
         </table>
       )}
+      {models.length > 1 && b && (
+        <table className="grid">
+          <thead><tr><th>认字模型</th><th>每分钟页数</th><th title="样张上认出的字和比较搭配时用的模型相同的比例">认出的字相同</th></tr></thead>
+          <tbody>
+            {models.map((x) => (
+              <tr key={x.name}>
+                <td>{modelName(x.name)}{x.name === b.model ? "（选用）" : ""}</td>
+                <td className="num">{x.err ? `失败：${x.err}` : x.perMin.toFixed(1)}</td>
+                <td className="num">{x.err || x.name === b.planModel ? "—" : `${(x.agree ?? 0).toFixed(1)}%`}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
       {st.note && <div className="small">{st.note}</div>}
+      {st.done > 0 && (
+        <div className="btns">
+          <button onClick={redo}>用现在的认字模型重新识别（{st.done} 个已识别的文件）</button>
+          {redone !== null && <span className="dim small">已排队 {redone} 个文件，旧的文字在重新识别完成前照样能搜到</span>}
+        </div>
+      )}
       {!st.manual && (
         <div className="btns">
           <button disabled={st.running || st.asked} onClick={() => { setErr(""); api.rerunOCRBench().then(load).catch((e) => setErr(e.message)); }}>

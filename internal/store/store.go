@@ -839,6 +839,32 @@ func (d *DB) Requeue(ids []int64, prio int) error {
 	})
 }
 
+// ocrDoneCond 选出 OCR 识别过的顶层文件：识别出文字的，和识别过但没认出字的（排除图片太小跳过的）。
+const ocrDoneCond = `inner='' AND (ocr=1 OR (prio=? AND state=4 AND indexed_at>0 AND err NOT LIKE '%太小%'))`
+
+// CountOCRDone 返回 OCR 识别过的文件数（prioOCR 是 OCR 队列的 prio）。
+func (d *DB) CountOCRDone(prioOCR int) (int64, error) {
+	var n int64
+	err := d.R.QueryRow(`SELECT count(*) FROM files WHERE `+ocrDoneCond, prioOCR).Scan(&n)
+	return n, err
+}
+
+// ResetOCR 把 OCR 识别过的文件重新排到 OCR 队列（换了认字模型后重新识别），返回个数。旧文字保留到重新识别
+// 完成时替换，期间照样能搜到；内容相同的文件不会复用旧模型的结果（刚删除的文件留着的旧结果也一并丢掉）。
+func (d *DB) ResetOCR(prioOCR int) (int64, error) {
+	var n int64
+	err := d.Tx(func(tx *sql.Tx) error {
+		res, err := tx.Exec(`UPDATE files SET state=0, err='', indexed_at=0, prio=? WHERE `+ocrDoneCond, prioOCR, prioOCR)
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		_, err = tx.Exec(`DELETE FROM recycled WHERE ocr=1`)
+		return err
+	})
+	return n, err
+}
+
 // ResetAllContent 把所有文件重置为待提取（重建索引）。
 func (d *DB) ResetContent(rootID int64) error {
 	return d.Tx(func(tx *sql.Tx) error {

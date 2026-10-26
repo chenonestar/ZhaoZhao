@@ -256,6 +256,7 @@ export interface Config {
   hotkey: string;
   ocrEnabled: boolean;
   ocrWorkers: number;
+  ocrModel?: string; // 认字模型：空为自动，或 v6、v6q（量化版）、v4（旧模型）
   ocrHalfWhenActive: boolean; // 用电脑时放慢建索引（沿用 0.2.5 的名字）
   logLevel: string;
   configVersion: number;
@@ -309,9 +310,22 @@ export interface OCRBenchPlan {
   err?: string;
 }
 
+export interface OCRBenchModel {
+  name: string;
+  perMin: number;
+  agree?: number; // 认出的字和比较搭配时用的模型一致的比例（%）
+  err?: string;
+}
+
 // 本机的 OCR 测速情况（每台电脑测一次，按电脑保存）。
 export interface OCRBenchInfo {
-  bench: { cpu: string; cores: number; logical?: number; memGB: number; at: number; budget: number; plans: OCRBenchPlan[] | null; best: number } | null;
+  bench: {
+    cpu: string; cores: number; logical?: number; memGB: number; at: number; budget: number; plans: OCRBenchPlan[] | null; best: number;
+    planModel?: string; models?: OCRBenchModel[] | null; model?: string;
+  } | null;
+  model: string; // 现在用的认字模型
+  models: string[] | null; // 组件里有的认字模型
+  done: number; // OCR 识别过的文件数
   running: boolean;
   asked: boolean;
   note?: string;

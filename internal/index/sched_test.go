@@ -46,7 +46,7 @@ func TestMain(m *testing.M) {
 	userIdleTime = func() time.Duration { return time.Hour }
 	// OCR 测速默认用模拟的（立即返回，进程越多越快），需要时由测试换掉
 	newOCRBenchRunner = func(m *Manager, pool *worker.Pool, sample string) ocrBenchRunner {
-		return func(ctx context.Context, p ocrPlan, pages int) (benchRun, error) {
+		return func(ctx context.Context, model string, p ocrPlan, pages int) (benchRun, error) {
 			return benchRun{perMin: float64(10*p.procs - p.threads), slotMem: 200 << 20}, nil
 		}
 	}
@@ -418,5 +418,47 @@ func TestOCRDuplicatesNotConcurrent(t *testing.T) {
 	data, _ := os.ReadFile(reqs)
 	if n := strings.Count(string(data), "\n"); n != 2 {
 		t.Fatalf("两种内容应只识别 2 次，实际 %d 次", n)
+	}
+}
+
+// 换了认字模型后重新识别：OCR 识别过的文件重新排队、再识别一遍，旧文字期间照样能搜到；普通文件不动。
+func TestReOCR(t *testing.T) {
+	dir := t.TempDir()
+	writePNG(t, filepath.Join(dir, "扫描.png"), 3)
+	write(t, filepath.Join(dir, "文本.txt"), "普通文本 kiwi")
+	reqs := filepath.Join(t.TempDir(), "ocr.log")
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	e := newEnvWith(t, prov, `{"workers":2,"ocrWorkers":1,"legacyWorkers":1,"configVersion":2}`,
+		func(m *Manager) {
+			useFakeOCR(t, m, "10ms")
+			m.ocrCfg.Args = append(m.ocrCfg.Args, "-zzlog="+reqs)
+		})
+	if _, err := e.m.AddRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "全部提取完成", 30*time.Second, func() bool {
+		c, _ := e.m.DB.AllCounts()
+		return c.Total == 2 && c.Pending == 0
+	})
+	if n, _ := e.m.DB.CountOCRDone(prioOCR); n != 1 {
+		t.Fatalf("OCR 识别过的文件应为 1 个：%d", n)
+	}
+	n, err := e.m.ReOCR()
+	if err != nil || n != 1 {
+		t.Fatalf("重新识别 %d 个：%v", n, err)
+	}
+	var txt int
+	e.m.DB.R.QueryRow(`SELECT count(*) FROM files WHERE name='文本.txt' AND state=1`).Scan(&txt)
+	if txt != 1 {
+		t.Fatal("普通文件不应重新排队")
+	}
+	waitFor(t, "重新识别完成", 30*time.Second, func() bool {
+		data, _ := os.ReadFile(reqs)
+		c, _ := e.m.DB.AllCounts()
+		return strings.Count(string(data), "\n") == 2 && c.Pending == 0
+	})
+	if n, _ := e.m.DB.CountOCRDone(prioOCR); n != 1 {
+		t.Fatalf("重新识别后仍应算识别过：%d", n)
 	}
 }

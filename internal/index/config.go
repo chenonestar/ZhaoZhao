@@ -35,6 +35,9 @@ type Config struct {
 	LegacyLOOnly  bool `json:"legacyLOOnly"`  // 老格式只用 LibreOffice 转换，不用内置解析（排查问题用）
 	OCREnabled    bool `json:"ocrEnabled"`    // OCR 总开关
 	OCRWorkers    int  `json:"ocrWorkers"`    // OCR 进程数，0 表示自动（实测选择进程数和每个进程的线程数）
+	// OCRModel 是认字模型：空为自动（新模型 PP-OCRv6 small，按本机测速选普通版或量化版），
+	// 或 v6、v6q（量化版）、v4（组件自带的旧模型）。
+	OCRModel string `json:"ocrModel,omitempty"`
 	// SlowWhenActive：用户正在用电脑时放慢建索引：OCR 只用一半核心，普通文件每处理完一个停一下。
 	// 默认关：子进程本来就是低优先级，用户的程序优先。0.2.5 时只管 OCR，沿用当时的设置名。
 	SlowWhenActive    bool `json:"ocrHalfWhenActive"`

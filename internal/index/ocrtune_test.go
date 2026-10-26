@@ -230,19 +230,20 @@ func sprint(ps []ocrPlan) string {
 func TestRunOCRBench(t *testing.T) {
 	speed := map[ocrPlan]float64{{4, 1}: 26, {2, 2}: 20, {1, 4}: 16}
 	var calls []string
-	run := func(ctx context.Context, p ocrPlan, pages int) (benchRun, error) {
+	run := func(ctx context.Context, model string, p ocrPlan, pages int) (benchRun, error) {
 		calls = append(calls, fmt.Sprintf("%v:%d", p, pages))
 		if p == (ocrPlan{2, 2}) {
 			return benchRun{}, errors.New("内存不足")
 		}
 		return benchRun{perMin: speed[p], slotMem: 300 << 20, cpu: float64(p.procs*p.threads) + 1.5}, nil
 	}
-	b := runOCRBench(context.Background(), 4, ocrCandidates(4, 32), run, nil)
+	b := runOCRBench(context.Background(), 4, ocrCandidates(4, 32), nil, run, nil)
 	if bp, ok := b.best(); !ok || bp.plan() != (ocrPlan{4, 1}) || b.Err != "" || len(b.Plans) != 3 || b.Plans[1].Err != "内存不足" {
 		t.Fatalf("%+v", b)
 	}
-	if strings.Join(calls, " ") != "4 个进程 × 1 线程:4 2 个进程 × 2 线程:4 1 个进程 × 4 线程:4" {
-		t.Fatalf("每种都应识别 4 页：%v", calls)
+	// 失败的搭配再试一次（同时启动很多个组件时偶尔有一个启动失败）
+	if strings.Join(calls, " ") != "4 个进程 × 1 线程:4 2 个进程 × 2 线程:4 2 个进程 × 2 线程:4 1 个进程 × 4 线程:4" {
+		t.Fatalf("每种都应识别 4 页，失败的再试一次：%v", calls)
 	}
 	if s := b.Summary(); !strings.Contains(s, "4 个进程 × 1 线程 每分钟 26.0 页（每个约 300 MB，实际占用约 5.5 个逻辑处理器）") || !strings.Contains(s, "最快：4 个进程 × 1 线程") {
 		t.Fatal(s)
@@ -250,11 +251,57 @@ func TestRunOCRBench(t *testing.T) {
 	if ocrBenchPages(2) != 4 || ocrBenchPages(8) != 8 {
 		t.Fatal("预算太小时页数加倍")
 	}
-	bad := runOCRBench(context.Background(), 2, ocrCandidates(2, 32), func(context.Context, ocrPlan, int) (benchRun, error) {
+	bad := runOCRBench(context.Background(), 2, ocrCandidates(2, 32), nil, func(context.Context, string, ocrPlan, int) (benchRun, error) {
 		return benchRun{}, errors.New("OCR 组件启动失败")
 	}, nil)
 	if _, ok := bad.best(); ok || bad.Err != "OCR 组件启动失败" {
 		t.Fatalf("%+v", bad)
+	}
+}
+
+// 认字模型：先用新模型比较搭配，再用最快的搭配比较量化版和旧模型；量化版认出的字几乎一样又更快时选它。
+// 新模型在这台电脑上用不了时，用旧模型比较搭配、选旧模型。
+func TestRunOCRBenchModels(t *testing.T) {
+	text := map[string]string{"v6": "通知各部门做好安全检查工作", "v6q": "通知各部门做好安全检查工作", "v4": "通知各部门做奸安全检查工伤"}
+	speed := map[string]float64{"v6": 20, "v6q": 24, "v4": 18}
+	var calls []string
+	run := func(ctx context.Context, model string, p ocrPlan, pages int) (benchRun, error) {
+		calls = append(calls, model+"@"+p.String())
+		if speed[model] == 0 {
+			return benchRun{}, errors.New("组件异常退出")
+		}
+		return benchRun{perMin: speed[model] * float64(p.procs) / float64(p.procs+p.threads-1), text: text[model]}, nil
+	}
+	models := []string{"v6", "v6q", "v4"}
+	b := runOCRBench(context.Background(), 2, ocrCandidates(2, 32), models, run, nil)
+	if b.PlanModel != "v6" || b.Model != "v6q" || len(b.Models) != 3 {
+		t.Fatalf("%+v", b)
+	}
+	if b.Models[2].Name != "v4" || b.Models[2].Agree > 90 || b.Models[1].Agree != 100 {
+		t.Fatalf("一致比例：%+v", b.Models)
+	}
+	if s := b.Summary(); !strings.Contains(s, "选用 PP-OCRv6 small（量化版）") {
+		t.Fatal(s)
+	}
+	// 量化版认出的字不一样：不选
+	text["v6q"] = "通知各部门做好安全检查工伤伤"
+	if b := runOCRBench(context.Background(), 2, ocrCandidates(2, 32), models, run, nil); b.Model != "v6" {
+		t.Fatalf("量化版认得不一样时应选普通版：%+v", b.Models)
+	}
+	// 量化版快得不多：不选
+	text["v6q"], speed["v6q"] = text["v6"], 20.4
+	if b := runOCRBench(context.Background(), 2, ocrCandidates(2, 32), models, run, nil); b.Model != "v6" {
+		t.Fatalf("量化版快得不多时应选普通版：%+v", b.Models)
+	}
+	// 新模型用不了：用旧模型比较搭配
+	speed["v6"], speed["v6q"] = 0, 0
+	calls = nil
+	b = runOCRBench(context.Background(), 2, ocrCandidates(2, 32), models, run, nil)
+	if _, ok := b.best(); !ok || b.PlanModel != "v4" || b.Model != "v4" || b.Models[0].Name != "v6" || b.Models[0].Err == "" {
+		t.Fatalf("%+v", b)
+	}
+	if strings.Contains(strings.Join(calls, " "), "v6q@") {
+		t.Fatalf("新模型用不了时不用再试量化版：%v", calls)
 	}
 }
 
@@ -318,7 +365,7 @@ type fakeBench struct {
 func (f *fakeBench) install(t *testing.T) {
 	old := newOCRBenchRunner
 	newOCRBenchRunner = func(m *Manager, pool *worker.Pool, sample string) ocrBenchRunner {
-		return func(ctx context.Context, p ocrPlan, pages int) (benchRun, error) {
+		return func(ctx context.Context, model string, p ocrPlan, pages int) (benchRun, error) {
 			if st, err := os.Stat(sample); err != nil || st.Size() != int64(len(ocrSample)) {
 				return benchRun{}, fmt.Errorf("样张没写出来：%v", err)
 			}
@@ -536,7 +583,7 @@ func TestPoolBenchReal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cleanup()
-	r, err := poolBench(pool, opts, sample)(context.Background(), ocrPlan{2, 1}, 4)
+	r, err := poolBench(pool, opts, sample)(context.Background(), "", ocrPlan{2, 1}, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,7 +603,7 @@ func TestPoolBenchReal(t *testing.T) {
 		t.Fatalf("内存峰值 %d", mem)
 	}
 	opts.OCR.Command = filepath.Join(t.TempDir(), "没有这个程序")
-	if _, err := poolBench(pool, opts, sample)(context.Background(), ocrPlan{1, 1}, 1); err == nil {
+	if _, err := poolBench(pool, opts, sample)(context.Background(), "", ocrPlan{1, 1}, 1); err == nil {
 		t.Fatal("OCR 组件启动不了时应报错")
 	}
 }

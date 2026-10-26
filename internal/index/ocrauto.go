@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/chenonestar/zhaozhao/internal/awake"
+	"github.com/chenonestar/zhaozhao/internal/extract"
 	"github.com/chenonestar/zhaozhao/internal/logx"
 	"github.com/chenonestar/zhaozhao/internal/sysinfo"
 	"github.com/chenonestar/zhaozhao/internal/worker"
@@ -47,7 +48,26 @@ const userActiveFor = 2 * time.Minute
 
 // newOCRBenchRunner 返回实测一种搭配的函数（测试里换成模拟的）。
 var newOCRBenchRunner = func(m *Manager, pool *worker.Pool, sample string) ocrBenchRunner {
-	return poolBench(pool, m.extractOptions(m.Config(), true), sample)
+	opts := m.extractOptions(m.Config(), true)
+	opts.OCR = m.ocrCfg // 认字模型由测速指定
+	return poolBench(pool, opts, sample)
+}
+
+// ocrModel 返回现在用的认字模型：设置里指定的（组件里有的话）；自动时用测速选的，还没测时用新模型。
+func (m *Manager) ocrModel() string {
+	if want := m.Config().OCRModel; want != "" && m.ocrCfg.HasModel(want) {
+		return want
+	}
+	m.ocr.mu.Lock()
+	b := m.ocrBenchLocked()
+	m.ocr.mu.Unlock()
+	if b != nil && b.Model != "" && m.ocrCfg.HasModel(b.Model) {
+		return b.Model
+	}
+	if ms := m.ocrCfg.Models(); len(ms) > 0 {
+		return ms[0]
+	}
+	return extract.OCRModelV4
 }
 
 func (m *Manager) physCores() int {
@@ -377,8 +397,8 @@ func (m *Manager) runOCRBench() bool {
 	}
 	m.logf("测试本机 OCR 速度：比较 %d 种搭配（%s），普通文件暂停约 1～2 分钟", len(cands), planList(cands))
 	t0 := awake.Now()
-	b := runOCRBench(m.ctx, cores, cands, newOCRBenchRunner(m, pool, sample), func(i, n int, p ocrPlan) {
-		m.setBenchNote(fmt.Sprintf("正在测试本机 OCR 速度（第 %d/%d 种：%s），其他文件暂停约 1～2 分钟", i+1, n, p))
+	b := runOCRBench(m.ctx, cores, cands, m.ocrCfg.Models(), newOCRBenchRunner(m, pool, sample), func(i, n int, what string) {
+		m.setBenchNote(fmt.Sprintf("正在测试本机 OCR 速度（第 %d/%d 项：%s），其他文件暂停约 2 分钟", i+1, n, what))
 		m.activity()
 	})
 	if m.ctx.Err() != nil {
@@ -417,6 +437,9 @@ type OCRBenchInfo struct {
 	Plan    string    `json:"plan"`           // 现在的搭配
 	MemCap  int       `json:"memCap"`         // 内存允许的进程数
 	Cores   int       `json:"cores"`          // 本机物理核心数
+	Model   string    `json:"model"`          // 现在用的认字模型
+	Models  []string  `json:"models"`         // 组件里有的认字模型
+	Done    int64     `json:"done"`           // OCR 识别过的文件数（可以用现在的模型重新识别）
 }
 
 // OCRBenchInfo 返回本机的 OCR 测速情况。
@@ -424,11 +447,13 @@ func (m *Manager) OCRBenchInfo() OCRBenchInfo {
 	cfg := m.Config()
 	plan := m.ocrPlanNow()
 	cores := m.physCores()
+	model := m.ocrModel()
+	done, _ := m.DB.CountOCRDone(prioOCR)
 	m.ocr.mu.Lock()
 	defer m.ocr.mu.Unlock()
 	info := OCRBenchInfo{Bench: m.ocrBenchLocked(), Running: m.ocrBenching.Load(), Asked: m.ocr.benchAsk,
 		Note: m.ocr.benchNote, Manual: cfg.OCRWorkers > 0, OCR: m.ocrAvailable() && cfg.OCREnabled,
-		Plan: plan.String(), MemCap: m.ocr.memCap, Cores: cores}
+		Plan: plan.String(), MemCap: m.ocr.memCap, Cores: cores, Model: model, Models: m.ocrCfg.Models(), Done: done}
 	if info.Note == "" && m.ocr.benchFail != "" {
 		info.Note = "测速失败：" + m.ocr.benchFail
 	}
@@ -449,6 +474,21 @@ func (m *Manager) RebenchOCR() error {
 	m.ocr.mu.Unlock()
 	m.kick()
 	return nil
+}
+
+// ReOCR 用现在的认字模型重新识别 OCR 识别过的文件（换了模型后可选），返回排队的文件数。
+// 旧文字保留到重新识别完成时替换，期间照样能搜到。
+func (m *Manager) ReOCR() (int64, error) {
+	if !m.ocrAvailable() || !m.Config().OCREnabled {
+		return 0, errors.New("OCR 组件没有安装或 OCR 已关闭")
+	}
+	n, err := m.DB.ResetOCR(prioOCR)
+	if err != nil {
+		return 0, err
+	}
+	m.logf("用 %s 重新识别已识别过的 %d 个文件（旧文字在重新识别完成前照样能搜到）", extract.OCRModelName(m.ocrModel()), n)
+	m.kick()
+	return n, nil
 }
 
 // ocrPageRe 匹配 OCR 逐页的进度（extract 包里写的「第 i/n 页」：开始识别第 i 页，前 i-1 页已完成）。

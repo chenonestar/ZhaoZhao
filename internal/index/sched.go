@@ -599,7 +599,7 @@ func copyLocal(ctx context.Context, src string, size int64, wantHash bool, repor
 func (m *Manager) extractOptions(cfg Config, withOCR bool) extract.Options {
 	o := extract.DefaultOptions()
 	if withOCR {
-		o.OCR = m.ocrCfg
+		o.OCR = m.ocrCfg.WithModel(m.ocrModel())
 		o.OCR.Threads = m.ocrPlanNow().threads // 每个 OCR 进程的线程数：总数不超过 CPU 核心数
 	}
 	o.MaxTextBytes = int64(cfg.MaxTextMB) << 20

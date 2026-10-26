@@ -1,25 +1,26 @@
-"""OCR 认字模型对比（CI 实验，只测不换）：同一批模拟扫描页，比较现在的 PP-OCRv4 和 PP-OCRv6 small 认字模型
-的速度和准确率。直接驱动发布包里的 RapidOCR-json（和找找用的同一个组件、同样的管道协议）。
+"""OCR 认字模型检查：同一批模拟扫描页，比较发布包里各个认字模型（组件自带的 PP-OCRv4、打包时放入的
+PP-OCRv6 small 和它的 INT8 量化版）的速度和准确率。直接驱动发布包里的 RapidOCR-json（和找找用的同一个组件、
+同样的管道协议）。新模型是找找默认用的：组件加载不了，或者准确率低于 97% 时以非 0 退出，打包失败。
+
+另外做一个实验（只测不换）：Windows 自带的 OCR（Windows.Media.Ocr）认同样的页面，速度和准确率如何。
 
 模拟扫描页：A4、200 DPI 的灰度 BMP（找找渲染 PDF 页后交给组件的格式），宋体随机常用字，加了模糊、噪点、轻微倾斜。
 第 1 页同时存一份 PNG，确认组件读 BMP 和读 PNG 的结果一样。
 
-用法：python ocr_model_test.py <组件目录 components\\ocr> <rapidocr 的 wheel 文件> <工作目录>
+用法：python ocr_model_test.py <组件目录 components\\ocr> <工作目录>
 """
 import json
 import os
 import random
-import shutil
 import subprocess
 import sys
 import time
-import zipfile
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 sys.stdout.reconfigure(encoding='utf-8')  # CI 的控制台默认是 cp1252，打印中文会出错
-COMPONENT, WHEEL, WORK = sys.argv[1], sys.argv[2], sys.argv[3]
+COMPONENT, WORK = sys.argv[1], sys.argv[2]
 PAGES, THREADS = 6, 2
 
 
@@ -134,11 +135,12 @@ def read_args(d):
 
 
 def run(name, exe, args, pages):
+    """返回 (每页秒数, 字准确率%)；组件启动失败、识别出错时返回 None。"""
     try:
         e = Engine(exe, args)
     except Exception as ex:
         print(f'{name}：{ex}', flush=True)
-        return
+        return None
     try:
         bmp0, png0 = e.ocr(pages[0][0]), e.ocr(pages[0][0][:-4] + '.png')  # 也当预热
         same = 'BMP、PNG 结果相同' if bmp0 == png0 else f'BMP、PNG 结果不同（{len(bmp0)} / {len(png0)} 字）'
@@ -149,12 +151,52 @@ def run(name, exe, args, pages):
             errs += edit(norm(got), norm(gt))
             total += len(norm(gt))
         per = (time.perf_counter() - t0) / len(pages)
-        print(f'{name}：每页 {per:.2f} 秒（{THREADS} 线程），字准确率 {100 * (1 - errs / total):.1f}%，'
-              f'加载 {e.init:.1f} 秒，{same}', flush=True)
+        acc = 100 * (1 - errs / total)
+        print(f'{name}：每页 {per:.2f} 秒（{THREADS} 线程），字准确率 {acc:.1f}%，加载 {e.init:.1f} 秒，{same}', flush=True)
+        return per, acc
     except Exception as ex:
         print(f'{name}：{ex}', flush=True)
+        return None
     finally:
         e.close()
+
+
+def windows_ocr(pages):
+    """实验：Windows 自带的 OCR（PowerShell 5.1 调 Windows.Media.Ocr），单线程逐页识别。"""
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'winocr_test.ps1')
+    d = os.path.dirname(pages[0][0])
+    try:
+        p = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, d],
+                           capture_output=True, timeout=900)
+    except Exception as ex:
+        print(f'Windows 自带 OCR：没能运行（{ex}）', flush=True)
+        return
+    out = p.stdout.decode('utf-8', 'replace').lstrip('\ufeff')
+    got, info = {}, []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith('{'):
+            r = json.loads(line)
+            got[r['file']] = r
+        elif line:
+            info.append(line)
+    if info:
+        print('Windows 自带 OCR：' + '；'.join(info), flush=True)
+    if p.returncode != 0 or not got:
+        print(f'Windows 自带 OCR：失败（退出码 {p.returncode}）：{p.stderr.decode("utf-8", "replace")[-800:]}', flush=True)
+        return
+    errs = total = 0
+    ms = []
+    for path, gt in pages:
+        r = got.get(os.path.basename(path))
+        if r is None:
+            continue
+        errs += edit(norm(r['text']), norm(gt))
+        total += len(norm(gt))
+        ms.append(r['ms'])
+    if total:
+        print(f'Windows 自带 OCR：每页 {sum(ms) / len(ms) / 1000:.2f} 秒（单线程），字准确率 {100 * (1 - errs / total):.1f}%，'
+              f'共 {len(ms)} 页', flush=True)
 
 
 def main():
@@ -166,29 +208,17 @@ def main():
     exe = next(os.path.join(COMPONENT, n) for n in ('RapidOCR-json.exe', 'RapidOCR_json.exe')
                if os.path.exists(os.path.join(COMPONENT, n)))
     base = read_args(COMPONENT)
-    run('现在的 PP-OCRv4', exe, base, pages)
-
-    # PP-OCRv6 small 认字模型：从 rapidocr 的安装包里取，字表在模型里（每行一个字，组件自己加空白和空格）
-    import onnx
-    v6 = os.path.join(WORK, 'ocr-v6')
-    shutil.rmtree(v6, ignore_errors=True)
-    shutil.copytree(COMPONENT, v6)
-    models = os.path.join(v6, 'models')
-    with zipfile.ZipFile(WHEEL) as z:
-        data = z.read('rapidocr/models/PP-OCRv6_rec_small.onnx')
-    m = onnx.load_from_string(data)
-    chars = dict((p.key, p.value) for p in m.metadata_props)['character'].split('\n')
-    with open(os.path.join(models, 'v6_keys.txt'), 'w', encoding='utf-8', newline='\n') as f:
-        f.write('\n'.join(chars) + '\n')
-    with open(os.path.join(models, 'v6_rec.onnx'), 'wb') as f:
-        f.write(data)
-    m.ir_version = 8  # 组件带的推理库较旧时可能不认新格式的模型：另存一份标成旧格式
-    onnx.save(m, os.path.join(models, 'v6_rec_ir8.onnx'))
-    print(f'PP-OCRv6 small：字表 {len(chars)} 个字，模型格式版本 {onnx.load_from_string(data).ir_version}', flush=True)
-    swap = lambda rec: [a for a in base if not a.startswith(('--rec=', '--keys='))] + [f'--rec={rec}', '--keys=v6_keys.txt']
-    v6exe = os.path.join(v6, os.path.basename(exe))
-    run('PP-OCRv6 small 认字', v6exe, swap('v6_rec.onnx'), pages)
-    run('PP-OCRv6 small 认字（标成旧格式）', v6exe, swap('v6_rec_ir8.onnx'), pages)
+    swap = lambda rec, keys: [a for a in base if not a.startswith(('--rec=', '--keys='))] + [f'--rec={rec}', f'--keys={keys}']
+    v4 = run('组件自带的 PP-OCRv4', exe, base, pages)
+    v6 = run('PP-OCRv6 small', exe, swap('PP-OCRv6_rec_small.onnx', 'PP-OCRv6_keys.txt'), pages)
+    v6q = run('PP-OCRv6 small 量化版', exe, swap('PP-OCRv6_rec_small_int8.onnx', 'PP-OCRv6_keys.txt'), pages)
+    if v4 and v6:
+        print(f'PP-OCRv6 small 比 PP-OCRv4 每页快 {100 * (1 - v6[0] / v4[0]):.0f}%', flush=True)
+    if v6 and v6q:
+        print(f'量化版比普通版每页快 {100 * (1 - v6q[0] / v6[0]):.0f}%', flush=True)
+    windows_ocr(pages)
+    if not v6 or v6[1] < 97:
+        raise SystemExit('新认字模型（找找默认用的）在组件里不能用或准确率太低')
 
 
 main()

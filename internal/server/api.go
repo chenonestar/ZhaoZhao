@@ -281,6 +281,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	h("/api/ocrbench/rerun", s.post(func(r *http.Request) (any, error) {
 		return ok(), s.M.RebenchOCR()
 	}))
+	h("/api/ocr/redo", s.post(func(r *http.Request) (any, error) {
+		n, err := s.M.ReOCR()
+		return map[string]int64{"files": n}, err
+	}))
 	h("/api/legacytest", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.M.LegacyTest()) })
 	h("/api/legacytest/start", s.post(func(r *http.Request) (any, error) {
 		var b struct {
