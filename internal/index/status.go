@@ -171,7 +171,7 @@ func (m *Manager) Status() Status {
 	st.FastQueue = st.Totals.Pending - st.LegacyQueue - st.OCRQueue
 	st.FastEtaSec = m.laneEta(prioFast, st.FastQueue)
 	st.LegacyEtaSec = m.laneEta(prioLegacy, st.LegacyQueue)
-	st.OCREtaSec = m.laneEta(prioOCR, st.OCRQueue)
+	st.OCREtaSec = m.ocrEta(st.OCRQueue)
 	st.StalledSec = int64(m.stalled().Seconds())
 	st.KeepingAwake = m.keepingAwake.Load()
 	st.OCRThreads, st.OCRPagesPerMin, st.OCRTuning = m.ocrStatus()

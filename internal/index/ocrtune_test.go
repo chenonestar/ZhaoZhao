@@ -659,3 +659,52 @@ func TestOCRTailBoost(t *testing.T) {
 		return note == ""
 	})
 }
+
+// OCR 剩余时间按页数估算：队列里的 PDF 按已识别的平均每页大小估页数，图片算一页，正在识别的按剩下的页数。
+func TestOCREtaByPages(t *testing.T) {
+	dir := t.TempDir()
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	e := newEnv(t, prov)
+	e.m.PauseAll()
+	r, err := e.m.AddRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+	add := func(name, ext string, size int64) int64 {
+		res, err := e.m.DB.W.Exec(`INSERT INTO files(root_id,volume_id,rel_path,inner,name,ext,kind,size,mtime,state,err,hash,text_len,ocr,meta,prio,indexed_at)
+VALUES(?,?,?,'',?,?,'',?,1,0,'','',0,0,'',?,0)`, r.ID, r.VolumeID, name, name, ext, size, prioOCR)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := res.LastInsertId()
+		return id
+	}
+	add("a.pdf", "pdf", 10*(200<<10))
+	add("b.pdf", "pdf", 10*(200<<10))
+	for _, n := range []string{"1.jpg", "2.jpg", "3.png"} {
+		add(n, "jpg", 100<<10)
+	}
+	big := add("大.pdf", "pdf", 50*(200<<10))
+	m := e.m
+	if eta := m.ocrEta(6); eta != 0 {
+		t.Fatalf("还没有速度时退回按文件数估算（还没完成过文件，无法估算）：%d", eta)
+	}
+	m.ocr.mu.Lock()
+	m.ocr.pdfBytes, m.ocr.pdfPages = 100*(200<<10), 100 // 平均每页 200 KB
+	m.ocr.rate.add(0, 0)
+	m.ocr.rate.add(2*time.Minute, 100) // 每分钟 50 页
+	m.ocr.mu.Unlock()
+	s := &m.sched
+	s.mu.Lock()
+	s.inflight[big] = &job{f: store.File{ID: big, Ext: "pdf", Size: 50 * (200 << 10)}, lane: s.lanes[prioOCR], pagesTotal: 50, pagesDone: 10}
+	s.mu.Unlock()
+	// 队列：2 个 PDF 各 10 页 + 3 张图片 = 23 页；正在识别的大文件还剩 40 页；共 63 页，每分钟 50 页
+	if eta := m.ocrEta(6); eta != 75 {
+		t.Fatalf("剩余时间应为 75 秒：%d", eta)
+	}
+	s.mu.Lock()
+	delete(s.inflight, big)
+	s.mu.Unlock()
+}

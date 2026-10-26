@@ -36,6 +36,8 @@ type ocrState struct {
 	tail      int       // 队列收尾时每个文件的线程数（0 表示没有在收尾）
 	tailSeen  int       // 连续几次看到队列已空、有进程空闲
 	userBusy  bool      // 开了「用电脑时放慢」、用户正在用电脑：OCR 只用一半核心
+	// 识别完的 PDF 的总大小、识别的总页数：估算队列里的 PDF 有多少页（剩余时间按页数算）
+	pdfBytes, pdfPages int64
 }
 
 // ocrTuneEvery：多久调整一次。
@@ -517,10 +519,63 @@ func (m *Manager) finishOCRPages(j *job) {
 		rest = j.pagesTotal - j.pagesDone
 	}
 	j.pagesDone += rest
+	pages := j.pagesDone
 	m.sched.mu.Unlock()
+	if j.f.Ext == "pdf" && pages > 0 {
+		m.ocr.mu.Lock()
+		m.ocr.pdfBytes += j.f.Size
+		m.ocr.pdfPages += int64(pages)
+		m.ocr.mu.Unlock()
+	}
 	if rest > 0 {
 		m.ocr.pages.Add(int64(rest))
 	}
+}
+
+// ocrEtaMinPages：识别完这么多页 PDF 后才按「每页多大」估算队列里的页数，之前按文件数估算。
+const ocrEtaMinPages = 20
+
+// ocrEta 按页数估算 OCR 还要多久（秒）：(正在识别的文件剩下的页数 + 队列里的页数) ÷ 最近每分钟页数。
+// 队列里的 PDF 按「已识别的 PDF 平均每页多大」由文件大小估算页数，图片算一页。
+// 0.2.6 以前按最近完成的文件数估算：OCR 队列小文件先做，最后剩下的都是几百页的大文件，某次估成 21 秒，
+// 实际正在识别的 3 个文件还剩 383 页。还没有足够的数据时退回按文件数估算。
+func (m *Manager) ocrEta(queue int64) int64 {
+	m.ocr.mu.Lock()
+	perMin := m.ocr.rate.perMin()
+	var bpp float64
+	if m.ocr.pdfPages >= ocrEtaMinPages {
+		bpp = float64(m.ocr.pdfBytes) / float64(m.ocr.pdfPages)
+	}
+	m.ocr.mu.Unlock()
+	if perMin <= 0 || bpp <= 0 {
+		return m.laneEta(prioOCR, queue)
+	}
+	pdfBytes, others, err := m.DB.OCRQueueSize(prioOCR)
+	if err != nil {
+		return m.laneEta(prioOCR, queue)
+	}
+	pages := float64(pdfBytes)/bpp + float64(others)
+	s := &m.sched
+	s.mu.Lock()
+	for _, j := range s.inflight {
+		if j.lane == nil || j.lane.prio != prioOCR {
+			continue
+		}
+		// 正在识别的文件在索引库里还是待处理，上面按整个文件算进去了：换成剩下的页数
+		full := 1.0
+		if j.f.Ext == "pdf" {
+			full = float64(j.f.Size) / bpp
+		}
+		pages -= full
+		if j.pagesTotal > 0 {
+			pages += float64(j.pagesTotal - j.pagesDone)
+		} else {
+			pages += max(1, full)
+		}
+	}
+	s.mu.Unlock()
+	pages = max(0, pages)
+	return int64(pages / perMin * 60)
 }
 
 // ocrStatus 返回界面显示的每个进程线程数、最近每分钟页数和说明（测速进度、队列收尾）。

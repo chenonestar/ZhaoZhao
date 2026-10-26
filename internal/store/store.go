@@ -839,6 +839,13 @@ func (d *DB) Requeue(ids []int64, prio int) error {
 	})
 }
 
+// OCRQueueSize 返回 OCR 队列（prio）里 PDF 的总大小和其他文件（图片）的个数，估算剩余页数用。
+func (d *DB) OCRQueueSize(prio int) (pdfBytes, others int64, err error) {
+	err = d.R.QueryRow(`SELECT COALESCE(SUM(CASE WHEN ext='pdf' THEN size END),0), COALESCE(SUM(ext<>'pdf'),0)
+FROM files WHERE state=0 AND prio=?`, prio).Scan(&pdfBytes, &others)
+	return
+}
+
 // ocrDoneCond 选出 OCR 识别过的顶层文件：识别出文字的，和识别过但没认出字的（排除图片太小跳过的）。
 const ocrDoneCond = `inner='' AND (ocr=1 OR (prio=? AND state=4 AND indexed_at>0 AND err NOT LIKE '%太小%'))`
 
