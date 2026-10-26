@@ -135,6 +135,7 @@ jobs:
       - name: 实验准备：安装 Windows 自带 OCR 的中文识别语言
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 20
         run: |
           $n = 'Language.OCR~~~zh-CN~0.0.1.0'
           $c = Get-WindowsCapability -Online -Name $n

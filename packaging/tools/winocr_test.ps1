@@ -1,6 +1,7 @@
-# 实验（只测不换）：用 Windows 自带的 OCR（Windows.Media.Ocr）识别目录里的 BMP，每页输出一行 JSON：
+﻿# 实验（只测不换）：用 Windows 自带的 OCR（Windows.Media.Ocr）识别目录里的 BMP，每页输出一行 JSON：
 # {"file": 文件名, "ms": 识别用时（毫秒，不含读图）, "text": 识别出的文字}。由 ocr_model_test.py 调用并算准确率。
 # 必须用 Windows PowerShell 5.1（powershell.exe）：它能直接调用 Windows 运行时的接口，PowerShell 7 不行。
+# 文件要带 BOM：PowerShell 5.1 读不带 BOM 的脚本时按系统代码页解码，中文会把引号弄乱。
 param([Parameter(Mandatory)][string]$Dir, [string]$Lang = 'zh-Hans-CN')
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
