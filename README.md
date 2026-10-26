@@ -93,10 +93,10 @@ iscc packaging\zhaozhao.iss
 | 工作流 | 触发 | 内容 |
 |---|---|---|
 | `.github/workflows/ci.yml` | push、PR | 界面类型检查与构建；Linux：`gofmt`、`go vet`、Windows 交叉编译检查、`go test -race`；Linux 集成测试（装 LibreOffice，真实样本 + OCR + 7z）；**Windows：`go vet` 与 `go test`**；通过后打包精简版便携 zip，可在 Actions 页面的 Artifacts 里下载 |
-| `.github/workflows/bundle.yml` | 手动、改动打包文件、被 release 调用 | **完整版**：choco 安装 LibreOffice，下载 RapidOCR-json（简体中文 V4 模型）和 PDFium，随包放入 VC++ 运行库，在真实 Windows 上冒烟测试（含组件自检、OCR 测速、退出后无残留进程）通过后，产出完整版 zip（约 340 MB）和离线安装包 |
+| `.github/workflows/bundle.yml` | 手动、改动打包文件、被 release 调用 | **完整版**：choco 安装 LibreOffice，下载 RapidOCR-json（简体中文 V4 模型）和 PDFium，另放入 PP-OCRv6 small 认字模型及其 INT8 量化版（`packaging/tools/make_ocr_models.py`，用 Windows 上的组件检查各模型的速度和准确率，新模型不能用时打包失败），随包放入 VC++ 运行库，在真实 Windows 上冒烟测试（含组件自检、OCR 测速、退出后无残留进程）通过后，产出完整版 zip（约 340 MB）和离线安装包 |
 | `.github/workflows/release.yml` | 推送 `v*` 标签；或提交信息里带 `[release vX.Y.Z]` | 调用完整版构建，并发布完整版 zip、安装包、精简版 zip 到 GitHub Release |
 
-发布版本：`git tag v0.2.6 && git push origin v0.2.6`，或在推送的提交信息里写 `[release v0.2.6]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice、OCR 和 PDFium 组件**；精简版（主程序 + PDFium）需要按 `components\README.txt` 自行放入 LibreOffice 和 OCR。
+发布版本：`git tag v0.2.7 && git push origin v0.2.7`，或在推送的提交信息里写 `[release v0.2.7]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice、OCR 和 PDFium 组件**；精简版（主程序 + PDFium）需要按 `components\README.txt` 自行放入 LibreOffice 和 OCR。
 
 ### 组件
 
@@ -243,12 +243,12 @@ ZHAOZHAO_SCALE=100000 go test ./internal/search -run TestScale -v -timeout 40m
 
 | 编号 | 状态 | 说明 |
 |---|---|---|
-| F-BG-01、02 实时监听、启动对账 | ✅ | |
+| F-BG-01、02 实时监听、启动对账 | ✅ | 同一个索引根同一时刻只扫一遍（0.2.7 起；扫描中途设置改了、变化事件溢出时扫完再补扫一次）；提取过但没有文字的文件重新扫描时不再处理 |
 | F-BG-03 内容哈希复用 | ✅ | 改名/复制后复用提取与 OCR 结果；移动、改名（含移到别的索引根）时删除的文件的文本保留 3 天，新位置内容相同就直接复用 |
 | F-BG-04 低优先级、用户活动降速 | ⚠ | 解析、转换子进程「低于正常」优先级，OCR 子进程最低（「空闲」）优先级：普通文件先用 CPU，OCR 用剩下的，所以普通文件还在处理时 OCR 也开满核心；用户活动检测（`GetLastInputInfo`）仅 Windows：设置里可以打开「用电脑时放慢建索引」（OCR 只用一半核心、每处理完一个文件停一下；默认关：子进程本来就是低优先级，开着时建索引慢很多） |
-| F-BG-05、06、07 | ✅ | 默认一半核心；OCR 进程数 × 线程数在每台电脑上用样张实测选择（结果按电脑保存，按每线程效率估算各种预算下最快的搭配，进程数受内存限制，队列收尾时空出的线程分给大文件）；电池检测仅 Windows ⚠；全局/单根暂停恢复；建立索引期间（接通电源时）不让电脑自动睡眠（`PowerSetRequest`） |
+| F-BG-05、06、07 | ✅ | 默认一半核心；OCR 进程数 × 线程数在每台电脑上用样张实测选择（结果按电脑保存，按每线程效率估算各种预算下最快的搭配，进程数受内存限制，队列收尾时空出的线程分给大文件；0.2.7 起认字模型默认 PP-OCRv6 small，测速时比较它的 INT8 量化版和组件自带的 PP-OCRv4，按本机实测选；内容相同的文件不同时识别，后到的等先到的写入后复用结果）；电池检测仅 Windows ⚠；全局/单根暂停恢复；建立索引期间（接通电源时）不让电脑自动睡眠（`PowerSetRequest`） |
 | F-BG-08 断点续跑 | ✅ | 待处理状态在库里，重启后继续 |
-| F-BG-09、10 状态面板、OCR 队列预计时间 | ✅ | 剩余时间按最近一小时实际完成的文件数估算 |
+| F-BG-09、10 状态面板、OCR 队列预计时间 | ✅ | 普通文件、老格式按最近一小时实际完成的文件数估算剩余时间；OCR 按页数估算（正在识别的文件剩下的页 + 队列里的页，PDF 按已识别的平均每页大小由文件大小估算）÷ 最近每分钟页数；「正在处理」和「排队」分开显示 |
 | F-BG-11 失败列表 | ✅ | 按原因类别、扩展名统计（后台统计），按路径筛选，按索引根筛选、按文件夹逐级查看；「失败和已加密」与「仅文件名（不是失败）」分开；每次加载 200 个、滚动自动加载；整类重试、导出 CSV、加入排除规则；每行打开、打开所在文件夹、复制路径 |
 | F-BG-12 重建、损坏检测 | ✅ | 启动自检，损坏时旧库改名保留并自动重建，索引根从 `roots.json` 恢复 |
 | F-BG-13 索引格式迁移（P1） | ✅ | 0.2.0 起：打开旧索引库时只改表结构（几秒），重新压缩、合并重复文本在后台分批进行，进度记在索引库里；0.2.4 起空闲时分步把全文索引合并成一个段；0.2.6 起写入积压时全文索引暂停边写边合并（写入快 55～70%），空闲后一次整理 |
