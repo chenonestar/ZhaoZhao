@@ -196,7 +196,8 @@ func CopyResult(tx *sql.Tx, src, dst int64, ftsText, nameFTS string) error {
 	if _, err := tx.Exec(`INSERT INTO fts(rowid,c,n) VALUES(?,?,?)`, dst, ftsText, nameFTS); err != nil {
 		return err
 	}
-	_, err := tx.Exec(`UPDATE files SET state=1, err='', text_id=?2, text_len=(SELECT text_len FROM files WHERE id=?1), ocr=(SELECT ocr FROM files WHERE id=?1), indexed_at=?3 WHERE id=?4`,
+	_, err := tx.Exec(`UPDATE files SET state=1, err='', text_id=?2, text_len=(SELECT text_len FROM files WHERE id=?1), ocr=(SELECT ocr FROM files WHERE id=?1),
+ocr_model=(SELECT ocr_model FROM files WHERE id=?1), indexed_at=?3 WHERE id=?4`,
 		src, textID, time.Now().Unix(), dst)
 	return err
 }

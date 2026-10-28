@@ -136,6 +136,10 @@ func Open(dir string) (*DB, error) {
 		w.Close()
 		return nil, fmt.Errorf("升级索引库失败: %w", err)
 	}
+	if err := addColumns(w); err != nil {
+		w.Close()
+		return nil, fmt.Errorf("升级索引库失败: %w", err)
+	}
 	if _, err := w.Exec(schemaV2); err != nil {
 		w.Close()
 		return nil, fmt.Errorf("初始化索引库失败: %w", err)
@@ -839,29 +843,58 @@ func (d *DB) Requeue(ids []int64, prio int) error {
 	})
 }
 
-// OCRQueueSize 返回 OCR 队列（prio）里 PDF 的总大小和其他文件（图片）的个数，估算剩余页数用。
-func (d *DB) OCRQueueSize(prio int) (pdfBytes, others int64, err error) {
-	err = d.R.QueryRow(`SELECT COALESCE(SUM(CASE WHEN ext='pdf' THEN size END),0), COALESCE(SUM(ext<>'pdf'),0)
-FROM files WHERE state=0 AND prio=?`, prio).Scan(&pdfBytes, &others)
+// OCRQueue 是 OCR 队列里要识别的页数：pages 是记下了页数的文件的页数之和（普通文件阶段发现的没有文字层的页、
+// 识别过的图片的页数）；没记下页数的 PDF 只知道总大小 pdfBytes，图片 others 个（多页 TIFF 也算一页）。
+type OCRQueue struct {
+	Pages, PDFBytes, Others int64
+}
+
+// OCRQueueSize 返回 OCR 队列（prio）里要识别的页数，估算剩余时间用。
+func (d *DB) OCRQueueSize(prio int) (q OCRQueue, err error) {
+	err = d.R.QueryRow(`SELECT COALESCE(SUM(ocr_pages),0), COALESCE(SUM(CASE WHEN ext='pdf' AND ocr_pages=0 THEN size END),0),
+COALESCE(SUM(ext<>'pdf' AND ocr_pages=0),0) FROM files WHERE state=0 AND prio=?`, prio).Scan(&q.Pages, &q.PDFBytes, &q.Others)
 	return
+}
+
+// OCRPagesOf 返回这些文件记下的需要 OCR 的页数（没记下的为 0）。
+func (d *DB) OCRPagesOf(ids []int64) (map[int64]int, error) {
+	out := map[int64]int{}
+	for _, id := range ids {
+		var n int
+		if err := d.R.QueryRow(`SELECT ocr_pages FROM files WHERE id=?`, id).Scan(&n); err != nil && err != sql.ErrNoRows {
+			return nil, err
+		}
+		out[id] = n
+	}
+	return out, nil
+}
+
+// SetOCRInfo 记下文件需要 OCR 的页数（pages 为 0 时不改）和识别时用的认字模型（model 为空时不改）。
+func SetOCRInfo(tx *sql.Tx, id int64, pages int, model string) error {
+	_, err := tx.Exec(`UPDATE files SET ocr_pages=CASE WHEN ?1>0 THEN ?1 ELSE ocr_pages END,
+ocr_model=CASE WHEN ?2<>'' THEN ?2 ELSE ocr_model END WHERE id=?3`, pages, model, id)
+	return err
 }
 
 // ocrDoneCond 选出 OCR 识别过的顶层文件：识别出文字的，和识别过但没认出字的（排除图片太小跳过的）。
 const ocrDoneCond = `inner='' AND (ocr=1 OR (prio=? AND state=4 AND indexed_at>0 AND err NOT LIKE '%太小%'))`
 
-// CountOCRDone 返回 OCR 识别过的文件数（prioOCR 是 OCR 队列的 prio）。
-func (d *DB) CountOCRDone(prioOCR int) (int64, error) {
-	var n int64
-	err := d.R.QueryRow(`SELECT count(*) FROM files WHERE `+ocrDoneCond, prioOCR).Scan(&n)
-	return n, err
+// CountOCRDone 返回 OCR 识别过、用的不是认字模型 model 的文件数（prioOCR 是 OCR 队列的 prio），其中 unknown 个
+// 是 0.2.8 以前识别的（没记下模型）。
+func (d *DB) CountOCRDone(prioOCR int, model string) (other, unknown int64, err error) {
+	err = d.R.QueryRow(`SELECT count(*), COALESCE(SUM(ocr_model=''),0) FROM files WHERE `+ocrDoneCond+` AND ocr_model<>?`,
+		prioOCR, model).Scan(&other, &unknown)
+	return
 }
 
-// ResetOCR 把 OCR 识别过的文件重新排到 OCR 队列（换了认字模型后重新识别），返回个数。旧文字保留到重新识别
-// 完成时替换，期间照样能搜到；内容相同的文件不会复用旧模型的结果（刚删除的文件留着的旧结果也一并丢掉）。
-func (d *DB) ResetOCR(prioOCR int) (int64, error) {
+// ResetOCR 把用别的认字模型（不是 model）识别过的文件重新排到 OCR 队列（换了认字模型后重新识别），返回个数。
+// 旧文字保留到重新识别完成时替换，期间照样能搜到；内容相同的文件不会复用旧模型的结果（刚删除的文件留着的
+// 旧结果也一并丢掉）。
+func (d *DB) ResetOCR(prioOCR int, model string) (int64, error) {
 	var n int64
 	err := d.Tx(func(tx *sql.Tx) error {
-		res, err := tx.Exec(`UPDATE files SET state=0, err='', indexed_at=0, prio=? WHERE `+ocrDoneCond, prioOCR, prioOCR)
+		res, err := tx.Exec(`UPDATE files SET state=0, err='', indexed_at=0, prio=? WHERE `+ocrDoneCond+` AND ocr_model<>?`,
+			prioOCR, prioOCR, model)
 		if err != nil {
 			return err
 		}
@@ -1055,6 +1088,29 @@ func (d *DB) TopRanked(match string, k int) ([]Ranked, error) {
 		}
 	}
 	return out, nil
+}
+
+// newColumns 是后来加的列（旧索引库启动时补上，很快）。
+var newColumns = []struct{ table, name, def string }{
+	// 0.2.8：需要 OCR 的页数（普通文件阶段发现没有文字层的页，剩余时间按它算）、识别时用的认字模型
+	// （换了模型后「重新识别」只算用别的模型识别的文件；0.2.8 以前识别的为空，不知道用的哪个）
+	{"files", "ocr_pages", "INTEGER NOT NULL DEFAULT 0"},
+	{"files", "ocr_model", "TEXT NOT NULL DEFAULT ''"},
+}
+
+func addColumns(w *sql.DB) error {
+	for _, c := range newColumns {
+		var has int
+		if err := w.QueryRow(`SELECT count(*) FROM pragma_table_info(?) WHERE name=?`, c.table, c.name).Scan(&has); err != nil {
+			return err
+		}
+		if has == 0 {
+			if _, err := w.Exec(`ALTER TABLE ` + c.table + ` ADD COLUMN ` + c.name + ` ` + c.def); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // upgradeSchema 把旧版本的索引库升级到当前格式。升级只改表结构（很快），

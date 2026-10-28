@@ -30,6 +30,7 @@ type Result struct {
 	LineBased bool   `json:"lineBased,omitempty"` // 位置以行号表示
 	OCR       bool   `json:"ocr,omitempty"`       // 文本含 OCR 结果
 	NeedOCR   bool   `json:"needOcr,omitempty"`   // 有页面没有文字层，需要 OCR（本次未做）
+	OCRPages  int    `json:"ocrPages,omitempty"`  // 需要 OCR 的页数（PDF 没有文字层的页、图片的页数）
 	// NeedConvert 表示内置解析器处理不了这个老格式文件，需要排到老格式转换队列用 LibreOffice 转换。
 	NeedConvert bool   `json:"needConvert,omitempty"`
 	Hash        string `json:"hash,omitempty"`

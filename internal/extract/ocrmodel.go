@@ -41,8 +41,8 @@ func OCRModelName(model string) string {
 	return model
 }
 
-// model 返回这个配置用的认字模型（看 Engine 和 --rec 参数）。
-func (c OCRConfig) model() string {
+// Model 返回这个配置用的认字模型（看 Engine 和 --rec 参数）。
+func (c OCRConfig) Model() string {
 	if c.Engine == OCRModelWin {
 		return OCRModelWin
 	}

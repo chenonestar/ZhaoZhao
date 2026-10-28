@@ -500,7 +500,10 @@ type OCRBenchInfo struct {
 	Cores   int       `json:"cores"`          // 本机物理核心数
 	Model   string    `json:"model"`          // 现在用的认字模型
 	Models  []string  `json:"models"`         // 组件里有的认字模型
-	Done    int64     `json:"done"`           // OCR 识别过的文件数（可以用现在的模型重新识别）
+	// ReOCR 是用别的认字模型识别过的文件数（可以用现在的模型重新识别），其中 ReOCRUnknown 个是 0.2.8 以前
+	// 识别的（没记下用的哪个模型）
+	ReOCR        int64 `json:"reocr"`
+	ReOCRUnknown int64 `json:"reocrUnknown"`
 }
 
 // OCRBenchInfo 返回本机的 OCR 测速情况。
@@ -509,12 +512,12 @@ func (m *Manager) OCRBenchInfo() OCRBenchInfo {
 	plan := m.ocrPlanNow()
 	cores := m.physCores()
 	model := m.ocrModel()
-	done, _ := m.DB.CountOCRDone(prioOCR)
+	reocr, unknown, _ := m.DB.CountOCRDone(prioOCR, model)
 	m.ocr.mu.Lock()
 	defer m.ocr.mu.Unlock()
 	info := OCRBenchInfo{Bench: m.ocrBenchLocked(), Running: m.ocrBenching.Load(), Asked: m.ocr.benchAsk,
 		Note: m.ocr.benchNote, Manual: cfg.OCRWorkers > 0, OCR: m.ocrAvailable() && cfg.OCREnabled,
-		Plan: plan.String(), MemCap: m.ocr.memCap, Cores: cores, Model: model, Models: m.ocrCfg.Models(), Done: done}
+		Plan: plan.String(), MemCap: m.ocr.memCap, Cores: cores, Model: model, Models: m.ocrCfg.Models(), ReOCR: reocr, ReOCRUnknown: unknown}
 	if info.Note == "" && m.ocr.benchFail != "" {
 		info.Note = "测速失败：" + m.ocr.benchFail
 	}
@@ -537,17 +540,18 @@ func (m *Manager) RebenchOCR() error {
 	return nil
 }
 
-// ReOCR 用现在的认字模型重新识别 OCR 识别过的文件（换了模型后可选），返回排队的文件数。
+// ReOCR 用现在的认字模型重新识别用别的模型识别过的文件（换了模型后可选；0.2.8 以前识别的也算），返回排队的文件数。
 // 旧文字保留到重新识别完成时替换，期间照样能搜到。
 func (m *Manager) ReOCR() (int64, error) {
 	if !m.ocrAvailable() || !m.Config().OCREnabled {
 		return 0, errors.New("OCR 组件没有安装或 OCR 已关闭")
 	}
-	n, err := m.DB.ResetOCR(prioOCR)
+	model := m.ocrModel()
+	n, err := m.DB.ResetOCR(prioOCR, model)
 	if err != nil {
 		return 0, err
 	}
-	m.logf("用 %s 重新识别已识别过的 %d 个文件（旧文字在重新识别完成前照样能搜到）", extract.OCRModelName(m.ocrModel()), n)
+	m.logf("用 %s 重新识别用别的模型识别过的 %d 个文件（旧文字在重新识别完成前照样能搜到）", extract.OCRModelName(model), n)
 	m.kick()
 	return n, nil
 }
@@ -570,8 +574,8 @@ func (m *Manager) countOCRProgress(j *job, p string) {
 	j.pagesTotal = n
 }
 
-// finishOCRPages：OCR 文件处理完，补上最后一页（单张图片算一页）。
-func (m *Manager) finishOCRPages(j *job) {
+// finishOCRPages：OCR 文件处理完，补上最后一页（单张图片算一页），返回这个文件识别了几页。
+func (m *Manager) finishOCRPages(j *job) int {
 	m.sched.mu.Lock()
 	rest := 1
 	if j.pagesTotal > 0 {
@@ -589,15 +593,17 @@ func (m *Manager) finishOCRPages(j *job) {
 	if rest > 0 {
 		m.ocr.pages.Add(int64(rest))
 	}
+	return pages
 }
 
-// ocrEtaMinPages：识别完这么多页 PDF 后才按「每页多大」估算队列里的页数，之前按文件数估算。
+// ocrEtaMinPages：识别完这么多页 PDF 后才按「每页多大」估算没记下页数的 PDF 有多少页。
 const ocrEtaMinPages = 20
 
 // ocrEta 按页数估算 OCR 还要多久（秒）：(正在识别的文件剩下的页数 + 队列里的页数) ÷ 最近每分钟页数。
-// 队列里的 PDF 按「已识别的 PDF 平均每页多大」由文件大小估算页数，图片算一页。
-// 0.2.6 以前按最近完成的文件数估算：OCR 队列小文件先做，最后剩下的都是几百页的大文件，某次估成 21 秒，
-// 实际正在识别的 3 个文件还剩 383 页。还没有足够的数据时退回按文件数估算。
+// 队列里的 PDF 用普通文件阶段记下的页数（没有文字层的页）；没记下的（0.2.8 以前排进队列的）按「已识别的
+// PDF 平均每页多大」由文件大小估算，图片算一页。
+// 0.2.7 全部按大小估算，可大文件每页也大（某位用户不到 500 KB 的 PDF 平均每页 106 KB，10 MB 以上的每页
+// 1.8 MB），刚开始时小文件先做，估出的剩余时间比实际多一倍多。
 func (m *Manager) ocrEta(queue int64) int64 {
 	m.ocr.mu.Lock()
 	perMin := m.ocr.rate.perMin()
@@ -606,33 +612,52 @@ func (m *Manager) ocrEta(queue int64) int64 {
 		bpp = float64(m.ocr.pdfBytes) / float64(m.ocr.pdfPages)
 	}
 	m.ocr.mu.Unlock()
-	if perMin <= 0 || bpp <= 0 {
+	if perMin <= 0 {
 		return m.laneEta(prioOCR, queue)
 	}
-	pdfBytes, others, err := m.DB.OCRQueueSize(prioOCR)
-	if err != nil {
+	q, err := m.DB.OCRQueueSize(prioOCR)
+	if err != nil || (q.PDFBytes > 0 && bpp <= 0) {
 		return m.laneEta(prioOCR, queue)
 	}
-	pages := float64(pdfBytes)/bpp + float64(others)
+	pages := float64(q.Pages) + float64(q.Others)
+	if q.PDFBytes > 0 {
+		pages += float64(q.PDFBytes) / bpp
+	}
+	type running struct {
+		id               int64
+		pdf              bool
+		size             int64
+		pagesTotal, done int
+	}
+	var rs []running
+	var ids []int64
 	s := &m.sched
 	s.mu.Lock()
 	for _, j := range s.inflight {
 		if j.lane == nil || j.lane.prio != prioOCR {
 			continue
 		}
+		rs = append(rs, running{j.f.ID, j.f.Ext == "pdf", j.f.Size, j.pagesTotal, j.pagesDone})
+		ids = append(ids, j.f.ID)
+	}
+	s.mu.Unlock()
+	known, _ := m.DB.OCRPagesOf(ids)
+	for _, r := range rs {
 		// 正在识别的文件在索引库里还是待处理，上面按整个文件算进去了：换成剩下的页数
 		full := 1.0
-		if j.f.Ext == "pdf" {
-			full = float64(j.f.Size) / bpp
+		switch {
+		case known[r.id] > 0:
+			full = float64(known[r.id])
+		case r.pdf && bpp > 0:
+			full = float64(r.size) / bpp
 		}
 		pages -= full
-		if j.pagesTotal > 0 {
-			pages += float64(j.pagesTotal - j.pagesDone)
+		if r.pagesTotal > 0 {
+			pages += float64(r.pagesTotal - r.done)
 		} else {
 			pages += max(1, full)
 		}
 	}
-	s.mu.Unlock()
 	pages = max(0, pages)
 	return int64(pages / perMin * 60)
 }

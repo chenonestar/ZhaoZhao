@@ -127,6 +127,8 @@ type prepared struct {
 	reuse    int64           // 复用该文件的提取结果（内容相同）
 	recycled *store.Recycled // 复用回收区里刚删除的文件的提取结果（文件被移动、改名）
 	requeue  int             // 非 0 时保存结果后把文件重新排到这个队列（OCR、老格式转换）
+	ocrPages int             // 需要 OCR 的页数（0 表示不改）
+	ocrModel string          // OCR 识别时用的认字模型（空表示不是 OCR 通道处理的）
 	children []*preparedChild
 	sent     time.Time // 交给写入协程的时间（统计等写入的时间）
 }
@@ -800,8 +802,11 @@ func (m *Manager) runJob(j *job) {
 	if m.ctx.Err() != nil {
 		return
 	}
+	ocrPages := res.OCRPages
 	if useOCR {
-		m.finishOCRPages(j)
+		if n := m.finishOCRPages(j); ocrPages == 0 {
+			ocrPages = n // 图片：识别了几页
+		}
 	}
 	if src != abs && res.Err != "" {
 		res.Err = strings.ReplaceAll(res.Err, src, abs) // 错误信息里不出现临时副本的路径
@@ -812,6 +817,10 @@ func (m *Manager) runJob(j *job) {
 	m.logJob(j, res, start, netWait, readDur)
 	t2 := time.Now()
 	p := m.prepare(f, res)
+	p.ocrPages = ocrPages
+	if useOCR && (res.Status == doc.StatusOK || res.Status == doc.StatusNoContent) {
+		p.ocrModel = opts.OCR.Model()
+	}
 	m.statJob(j, read, extracted, time.Since(t2), false)
 	m.sendJob(j, p)
 }
@@ -1149,6 +1158,11 @@ func (m *Manager) writeOne(tx *sql.Tx, p *prepared) error {
 	}
 	if err := m.putResult(tx, f.ID, f.Size, p.res.Hash, p.state, p.res.Err, p.res.OCR, p.text, p.fts, p.nameFTS); err != nil {
 		return err
+	}
+	if p.ocrPages > 0 || p.ocrModel != "" {
+		if err := store.SetOCRInfo(tx, f.ID, p.ocrPages, p.ocrModel); err != nil {
+			return err
+		}
 	}
 	if p.requeue != 0 {
 		if _, err := tx.Exec(`UPDATE files SET state=?, err='', prio=? WHERE id=?`, store.StatePending, p.requeue, f.ID); err != nil {

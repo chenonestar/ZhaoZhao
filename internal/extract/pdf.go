@@ -146,17 +146,17 @@ func pdfResult(n int, texts map[int]string, blank []int, got pdfOCRResult, ocrEr
 	needOCR := len(blank) > 0 && !opt.OCR.Enabled()
 	if b.Len() == 0 {
 		if ocrErr != nil {
-			return doc.Result{Status: doc.StatusFailed, Err: ocrErr.Error()}
+			return doc.Result{Status: doc.StatusFailed, Err: ocrErr.Error(), OCRPages: len(blank)}
 		}
 		if !opt.OCR.Enabled() {
-			return doc.Result{Status: doc.StatusNoContent, Err: "没有文字层，需要 OCR", NeedOCR: needOCR}
+			return doc.Result{Status: doc.StatusNoContent, Err: "没有文字层，需要 OCR", NeedOCR: needOCR, OCRPages: len(blank)}
 		}
 		if ocrNote != "" {
-			return doc.Result{Status: doc.StatusNoContent, Err: "没有文字层，OCR 也没有识别到文字：" + ocrNote}
+			return doc.Result{Status: doc.StatusNoContent, Err: "没有文字层，OCR 也没有识别到文字：" + ocrNote, OCRPages: len(blank)}
 		}
-		return doc.Result{Status: doc.StatusNoContent, Err: "没有文字层，OCR 也没有识别到文字"}
+		return doc.Result{Status: doc.StatusNoContent, Err: "没有文字层，OCR 也没有识别到文字", OCRPages: len(blank)}
 	}
-	return doc.Result{Status: doc.StatusOK, Text: b.String(), Locs: b.Locs, OCR: usedOCR, NeedOCR: needOCR, Err: ocrNote}
+	return doc.Result{Status: doc.StatusOK, Text: b.String(), Locs: b.Locs, OCR: usedOCR, NeedOCR: needOCR, Err: ocrNote, OCRPages: len(blank)}
 }
 
 func safePageText(p pdf.Page) (s string, err error) {

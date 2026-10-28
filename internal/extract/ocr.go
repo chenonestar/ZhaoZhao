@@ -237,7 +237,7 @@ func startOCR(c OCRConfig) (*ocrProc, error) {
 		threads = fmt.Sprintf("%d 线程", c.Threads)
 	}
 	log.Printf("OCR 组件已启动（进程 %d，认字模型 %s，%s，加载模型用时 %.1fs）", cmd.Process.Pid,
-		OCRModelName(c.model()), threads, time.Since(t0).Seconds())
+		OCRModelName(c.Model()), threads, time.Since(t0).Seconds())
 	return p, nil
 }
 

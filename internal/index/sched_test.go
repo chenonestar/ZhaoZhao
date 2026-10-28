@@ -441,8 +441,20 @@ func TestReOCR(t *testing.T) {
 		c, _ := e.m.DB.AllCounts()
 		return c.Total == 2 && c.Pending == 0
 	})
-	if n, _ := e.m.DB.CountOCRDone(prioOCR); n != 1 {
-		t.Fatalf("OCR 识别过的文件应为 1 个：%d", n)
+	model := e.m.ocrModel()
+	var got string
+	var pages int
+	e.m.DB.R.QueryRow(`SELECT ocr_model, ocr_pages FROM files WHERE name='扫描.png'`).Scan(&got, &pages)
+	if got != model || pages != 1 {
+		t.Fatalf("应记下认字模型 %q 和页数 1：%q %d", model, got, pages)
+	}
+	if n, _, _ := e.m.DB.CountOCRDone(prioOCR, model); n != 0 {
+		t.Fatalf("用现在的模型识别的不用重新识别：%d", n)
+	}
+	// 0.2.8 以前识别的：没记下模型，算作要重新识别
+	e.m.DB.W.Exec(`UPDATE files SET ocr_model='' WHERE name='扫描.png'`)
+	if n, unknown, _ := e.m.DB.CountOCRDone(prioOCR, model); n != 1 || unknown != 1 {
+		t.Fatalf("以前识别的文件应为 1 个：%d %d", n, unknown)
 	}
 	n, err := e.m.ReOCR()
 	if err != nil || n != 1 {
@@ -458,7 +470,10 @@ func TestReOCR(t *testing.T) {
 		c, _ := e.m.DB.AllCounts()
 		return strings.Count(string(data), "\n") == 2 && c.Pending == 0
 	})
-	if n, _ := e.m.DB.CountOCRDone(prioOCR); n != 1 {
-		t.Fatalf("重新识别后仍应算识别过：%d", n)
+	if n, _, _ := e.m.DB.CountOCRDone(prioOCR, model); n != 0 {
+		t.Fatalf("重新识别后不用再识别：%d", n)
+	}
+	if n, _, _ := e.m.DB.CountOCRDone(prioOCR, "其他模型"); n != 1 {
+		t.Fatalf("换了模型后应算要重新识别：%d", n)
 	}
 }

@@ -714,7 +714,7 @@ VALUES(?,?,?,'',?,?,'',?,1,0,'','',0,0,'',?,0)`, r.ID, r.VolumeID, name, name, e
 		return id
 	}
 	add("a.pdf", "pdf", 10*(200<<10))
-	add("b.pdf", "pdf", 10*(200<<10))
+	b := add("b.pdf", "pdf", 10*(200<<10))
 	for _, n := range []string{"1.jpg", "2.jpg", "3.png"} {
 		add(n, "jpg", 100<<10)
 	}
@@ -735,6 +735,13 @@ VALUES(?,?,?,'',?,?,'',?,1,0,'','',0,0,'',?,0)`, r.ID, r.VolumeID, name, name, e
 	// 队列：2 个 PDF 各 10 页 + 3 张图片 = 23 页；正在识别的大文件还剩 40 页；共 63 页，每分钟 50 页
 	if eta := m.ocrEta(6); eta != 75 {
 		t.Fatalf("剩余时间应为 75 秒：%d", eta)
+	}
+	// 普通文件阶段记下了真实页数的按真实页数算：b.pdf 虽然只有 2 MB，没有文字层的有 30 页；
+	// 大文件记下的 50 页和按大小估算的相同
+	m.DB.W.Exec(`UPDATE files SET ocr_pages=30 WHERE id=?`, b)
+	m.DB.W.Exec(`UPDATE files SET ocr_pages=50 WHERE id=?`, big)
+	if eta := m.ocrEta(6); eta != 99 {
+		t.Fatalf("剩余时间应为 99 秒（83 页）：%d", eta)
 	}
 	s.mu.Lock()
 	delete(s.inflight, big)

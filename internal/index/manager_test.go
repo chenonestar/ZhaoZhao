@@ -402,6 +402,13 @@ func TestOCRPipeline(t *testing.T) {
 	if len(r.Results) != 1 || r.Results[0].Name != "scanned.pdf" || !r.Results[0].OCR || r.Results[0].Snippets[0].Loc != "第2页" {
 		t.Fatalf("扫描 PDF 的 OCR 结果应带页码: %+v", r.Results)
 	}
+	// 普通文件阶段记下没有文字层的页数，OCR 时记下认字模型
+	var pages int
+	var model string
+	e.m.DB.R.QueryRow(`SELECT ocr_pages, ocr_model FROM files WHERE name='scanned.pdf'`).Scan(&pages, &model)
+	if pages == 0 || model == "" {
+		t.Fatalf("应记下要 OCR 的页数和认字模型：%d %q", pages, model)
+	}
 	if got := e.names("name:icon"); !has(got, "icon.png") {
 		t.Fatalf("小图仍可按文件名搜索: %v", got)
 	}
