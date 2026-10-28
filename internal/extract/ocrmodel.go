@@ -41,6 +41,23 @@ func OCRModelName(model string) string {
 	return model
 }
 
+// model 返回这个配置用的认字模型（看 Engine 和 --rec 参数）。
+func (c OCRConfig) model() string {
+	if c.Engine == OCRModelWin {
+		return OCRModelWin
+	}
+	for _, a := range c.Args {
+		if v, ok := strings.CutPrefix(a, "--rec="); ok {
+			for m, files := range ocrModelFiles {
+				if filepath.Base(v) == files[0] {
+					return m
+				}
+			}
+		}
+	}
+	return OCRModelV4
+}
+
 // modelsDir 返回组件的模型目录（--models= 参数，相对组件所在目录）。
 func (c OCRConfig) modelsDir() string {
 	for _, a := range c.Args {

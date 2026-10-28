@@ -232,7 +232,12 @@ func startOCR(c OCRConfig) (*ocrProc, error) {
 		killOCR(p)
 		return nil, fmt.Errorf("OCR 组件启动超时（90 秒内没有完成初始化）%s", suffix(errBuf.String()))
 	}
-	logx.Debugf("OCR 组件已启动（进程 %d，加载模型用时 %.1fs）", cmd.Process.Pid, time.Since(t0).Seconds())
+	threads := "默认线程数"
+	if c.Threads > 0 {
+		threads = fmt.Sprintf("%d 线程", c.Threads)
+	}
+	log.Printf("OCR 组件已启动（进程 %d，认字模型 %s，%s，加载模型用时 %.1fs）", cmd.Process.Pid,
+		OCRModelName(c.model()), threads, time.Since(t0).Seconds())
 	return p, nil
 }
 

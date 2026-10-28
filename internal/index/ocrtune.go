@@ -137,18 +137,27 @@ func ocrMemSlots(total, avail, slot uint64, live int) float64 {
 	return usable / float64(slot)
 }
 
-// nextMemCap 由 ocrMemSlots 的结果更新内存允许的进程数 cur（0 表示还没算过）：内存紧张时立即减少；
-// 宽裕时要多出半个名额才增加，免得在边界上来回增减进程。
+// nextMemCap 由 ocrMemSlots 的结果更新内存允许的进程数 cur（0 表示还没算过）：少了半个名额以上才减少，
+// 多出一个半名额才增加，免得在边界上来回增减进程（每个名额已按实测峰值的 1.25 倍算，还留着给用户的内存，
+// 少一点没关系）。0.2.7 某次识别期间可用内存在边界附近上下波动，OCR 进程数在 9～12 之间变了十几次。
 func nextMemCap(cur int, slots float64) int {
 	if slots < 0 {
 		return ocrMaxProcs
 	}
 	n := min(max(1, int(slots)), ocrMaxProcs)
-	if cur == 0 || n < cur || slots >= float64(cur)+1.5 {
+	switch {
+	case cur == 0:
+		return n
+	case slots < float64(cur)-0.5:
+		return max(1, min(int(slots+0.5), cur-1))
+	case slots >= float64(cur)+1.5:
 		return n
 	}
 	return cur
 }
+
+// ocrMemUpDelay：内存允许的进程数减少后，至少这么久才再增加（可用内存刚降下来又回升，多半还会再降）。
+const ocrMemUpDelay = 10 * time.Minute
 
 // tailThreads：OCR 队列已经空了、只剩 running 个文件在识别（少于进程数）时，把线程预算平分给它们，
 // 大文件剩下的页能识别得快一些。返回每个文件的线程数；不需要调整时返回 0。

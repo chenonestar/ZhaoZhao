@@ -136,6 +136,7 @@ type Manager struct {
 	spaceAt      time.Time
 	components   []extract.ComponentStatus
 	compChecking bool
+	compModel    string // 自检 OCR 时用的认字模型
 }
 
 // New 创建管理器。pool 为 nil 时在进程内提取（测试用）。
@@ -200,6 +201,9 @@ func (m *Manager) SetConfig(c Config) error {
 	}
 	if old.OCRWorkers != c.OCRWorkers {
 		m.resetOCRPlan()
+	}
+	if old.OCRModel != c.OCRModel {
+		m.recheckOCRModel()
 	}
 	m.applyWorkers()
 	m.refreshRules()

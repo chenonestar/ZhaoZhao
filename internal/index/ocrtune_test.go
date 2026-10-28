@@ -129,7 +129,7 @@ func TestOCRSMT(t *testing.T) {
 	if b.smtFaster() {
 		t.Fatal("超线程只快 2.5% 时不用")
 	}
-	if !strings.Contains(b.Summary(), "超线程对 OCR 没有明显帮助") {
+	if !strings.Contains(b.Summary(), "用上超线程只快 2%，不到 10%") {
 		t.Fatal(b.Summary())
 	}
 }
@@ -226,7 +226,7 @@ func sprint(ps []ocrPlan) string {
 	return "[" + strings.Join(parts, " ") + "]"
 }
 
-// 测速：每种搭配识别同样多的页（线程预算），选最快的；某种失败不影响其余的，全部失败时没有结果。
+// 测速：每种搭配识别同样多的页（线程预算），交替测两轮，选最快的；某种失败不影响其余的，全部失败时没有结果。
 func TestRunOCRBench(t *testing.T) {
 	speed := map[ocrPlan]float64{{4, 1}: 26, {2, 2}: 20, {1, 4}: 16}
 	var calls []string
@@ -242,10 +242,10 @@ func TestRunOCRBench(t *testing.T) {
 		t.Fatalf("%+v", b)
 	}
 	// 失败的搭配再试一次（同时启动很多个组件时偶尔有一个启动失败）
-	if strings.Join(calls, " ") != "4 个进程 × 1 线程:4 2 个进程 × 2 线程:4 2 个进程 × 2 线程:4 1 个进程 × 4 线程:4" {
-		t.Fatalf("每种都应识别 4 页，失败的再试一次：%v", calls)
+	if strings.Join(calls, " ") != "4 个进程 × 1 线程:4 2 个进程 × 2 线程:4 2 个进程 × 2 线程:4 1 个进程 × 4 线程:4 4 个进程 × 1 线程:4 1 个进程 × 4 线程:4" {
+		t.Fatalf("每种都应识别 4 页，失败的再试一次，第二轮不再测：%v", calls)
 	}
-	if s := b.Summary(); !strings.Contains(s, "4 个进程 × 1 线程 每分钟 26.0 页（每个约 300 MB，实际占用约 5.5 个逻辑处理器）") || !strings.Contains(s, "最快：4 个进程 × 1 线程") {
+	if s := b.Summary(); !strings.Contains(s, "4 个进程 × 1 线程 每分钟 26.0 页（各轮 26.0/26.0，每个约 300 MB，实际占用约 5.5 个逻辑处理器）") || !strings.Contains(s, "最快：4 个进程 × 1 线程") {
 		t.Fatal(s)
 	}
 	if ocrBenchPages(2) != 4 || ocrBenchPages(8) != 8 {
@@ -259,11 +259,13 @@ func TestRunOCRBench(t *testing.T) {
 	}
 }
 
-// 认字模型：先用新模型比较搭配，再用最快的搭配比较量化版和旧模型；量化版认出的字几乎一样又更快时选它。
-// 新模型在这台电脑上用不了时，用旧模型比较搭配、选旧模型。
+// 认字模型：先用新模型比较搭配，再用最快的搭配比较量化版、旧模型和 Windows 自带的 OCR（只供参考）；自动时
+// 总是用新模型的普通版，量化版再快、样张上认的字再一样也不换。新模型在这台电脑上用不了时，用旧模型比较搭配、
+// 用旧模型。
 func TestRunOCRBenchModels(t *testing.T) {
-	text := map[string]string{"v6": "通知各部门做好安全检查工作", "v6q": "通知各部门做好安全检查工作", "v4": "通知各部门做奸安全检查工伤"}
-	speed := map[string]float64{"v6": 20, "v6q": 24, "v4": 18}
+	text := map[string]string{"v6": "通知各部门做好安全检查工作", "v6q": "通知各部门做好安全检查工作", "v4": "通知各部门做奸安全检查工伤",
+		"win": "通知各部门做好安全检查工作"}
+	speed := map[string]float64{"v6": 20, "v6q": 24, "v4": 18, "win": 60}
 	var calls []string
 	run := func(ctx context.Context, model string, p ocrPlan, pages int) (benchRun, error) {
 		calls = append(calls, model+"@"+p.String())
@@ -272,26 +274,21 @@ func TestRunOCRBenchModels(t *testing.T) {
 		}
 		return benchRun{perMin: speed[model] * float64(p.procs) / float64(p.procs+p.threads-1), text: text[model]}, nil
 	}
-	models := []string{"v6", "v6q", "v4"}
+	models := []string{"v6", "v6q", "v4", "win"}
 	b := runOCRBench(context.Background(), 2, ocrCandidates(2, 32), models, run, nil)
-	if b.PlanModel != "v6" || b.Model != "v6q" || len(b.Models) != 3 {
+	if b.PlanModel != "v6" || b.Model != "v6" || len(b.Models) != 4 {
 		t.Fatalf("%+v", b)
 	}
-	if b.Models[2].Name != "v4" || b.Models[2].Agree > 90 || b.Models[1].Agree != 100 {
+	if b.Models[2].Name != "v4" || b.Models[2].Agree > 90 || b.Models[1].Agree != 100 || b.Models[3].Name != "win" {
 		t.Fatalf("一致比例：%+v", b.Models)
 	}
-	if s := b.Summary(); !strings.Contains(s, "选用 PP-OCRv6 small（量化版）") {
+	for _, c := range calls {
+		if (strings.HasPrefix(c, "v6q@") || strings.HasPrefix(c, "win@")) && c != "v6q@2 个进程 × 1 线程" && c != "win@2 个进程 × 1 线程" {
+			t.Fatalf("量化版和 Windows 自带的 OCR 不用来比较搭配：%v", calls)
+		}
+	}
+	if s := b.Summary(); !strings.Contains(s, "自动时用 PP-OCRv6 small") || strings.Contains(s, "自动时用 PP-OCRv6 small（量化版）") {
 		t.Fatal(s)
-	}
-	// 量化版认出的字不一样：不选
-	text["v6q"] = "通知各部门做好安全检查工伤伤"
-	if b := runOCRBench(context.Background(), 2, ocrCandidates(2, 32), models, run, nil); b.Model != "v6" {
-		t.Fatalf("量化版认得不一样时应选普通版：%+v", b.Models)
-	}
-	// 量化版快得不多：不选
-	text["v6q"], speed["v6q"] = text["v6"], 20.4
-	if b := runOCRBench(context.Background(), 2, ocrCandidates(2, 32), models, run, nil); b.Model != "v6" {
-		t.Fatalf("量化版快得不多时应选普通版：%+v", b.Models)
 	}
 	// 新模型用不了：用旧模型比较搭配
 	speed["v6"], speed["v6q"] = 0, 0
@@ -302,6 +299,41 @@ func TestRunOCRBenchModels(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(calls, " "), "v6q@") {
 		t.Fatalf("新模型用不了时不用再试量化版：%v", calls)
+	}
+}
+
+// 测速结果忽高忽低（同一种搭配两轮差 10% 以上）时再测一轮，取中位数。超线程要每一轮都快 10% 以上才用。
+func TestRunOCRBenchRounds(t *testing.T) {
+	seq := map[ocrPlan][]float64{{6, 1}: {30, 40, 31}, {3, 2}: {28, 28, 28}, {1, 6}: {15, 15, 15}, {12, 1}: {36, 33, 34}, {6, 2}: {30, 30, 30}}
+	n := map[ocrPlan]int{}
+	run := func(ctx context.Context, model string, p ocrPlan, pages int) (benchRun, error) {
+		v := seq[p][n[p]]
+		n[p]++
+		return benchRun{perMin: v}, nil
+	}
+	b := runOCRBench(context.Background(), 6, ocrBenchCandidates(6, 12, 32), nil, run, nil)
+	b.Logical = 12
+	if n[ocrPlan{6, 1}] != 3 || n[ocrPlan{3, 2}] != 3 {
+		t.Fatalf("6×1 两轮差 33%%，应全部再测一轮：%v", n)
+	}
+	if b.Plans[0].PerMin != 31 || len(b.Plans[0].Runs) != 3 {
+		t.Fatalf("应取中位数：%+v", b.Plans[0])
+	}
+	// 12×1 的中位数 34 比 6×1 的 31 快 9.7%：不到 10%，不用超线程
+	if bp, _ := b.best(); bp.plan() != (ocrPlan{12, 1}) || b.smtFaster() {
+		t.Fatalf("%+v", b.Plans)
+	}
+	if s := b.Summary(); !strings.Contains(s, "用上超线程只快 10%，不到 10%") {
+		t.Fatal(s)
+	}
+	// 中位数快 16%，但第二轮反而慢 17%（物理核心那轮碰巧快）：不稳定，不用
+	b.Plans[3].PerMin, b.Plans[3].Runs = 36, []float64{36, 33, 36}
+	if b.smtFaster() {
+		t.Fatal("有一轮超线程不快时不用")
+	}
+	b.Plans[0].Runs, b.Plans[3].Runs = []float64{30, 30, 31}, []float64{36, 34, 36}
+	if !b.smtFaster() {
+		t.Fatal("每轮都快 10% 以上时用超线程")
 	}
 }
 
@@ -436,8 +468,8 @@ func TestOCRBenchBeforeFirstOCR(t *testing.T) {
 		c, _ := m.DB.AllCounts()
 		return c.Total == 12 && c.Pending == 0
 	})
-	if fb.count() != 3 {
-		t.Fatalf("应测 3 种搭配：%v", fb.calls)
+	if fb.count() != 6 {
+		t.Fatalf("应测 3 种搭配、各两轮：%v", fb.calls)
 	}
 	for _, d := range during {
 		if d != "测速中=true 其他在处理=0" {
@@ -462,7 +494,7 @@ func TestOCRBenchBeforeFirstOCR(t *testing.T) {
 	if err := m.RebenchOCR(); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "重新测速", 20*time.Second, func() bool { return fb.count() == 6 && !m.ocrBenching.Load() })
+	waitFor(t, "重新测速", 20*time.Second, func() bool { return fb.count() == 12 && !m.ocrBenching.Load() })
 	m.Stop()
 
 	// 换了 OCR 组件：重新测
@@ -707,4 +739,31 @@ VALUES(?,?,?,'',?,?,'',?,1,0,'','',0,0,'',?,0)`, r.ID, r.VolumeID, name, name, e
 	s.mu.Lock()
 	delete(s.inflight, big)
 	s.mu.Unlock()
+}
+
+// 内存允许的进程数：在边界附近小幅波动时不变；少了半个名额以上才减少，减少后 10 分钟内不增加。
+func TestOCRMemCapHysteresis(t *testing.T) {
+	for _, c := range []struct {
+		cur   int
+		slots float64
+		want  int
+	}{
+		{0, 10.7, 10}, {10, 9.6, 10}, {10, 9.4, 9}, {10, 7.2, 7}, {10, 11.4, 10}, {10, 11.6, 11}, {10, -1, ocrMaxProcs}, {1, 0.2, 1},
+	} {
+		if got := nextMemCap(c.cur, c.slots); got != c.want {
+			t.Errorf("现在 %d 个、内存够 %.1f 个：%d，应为 %d", c.cur, c.slots, got, c.want)
+		}
+	}
+	e := newEnvWith(t, &fakeProv{}, "", nil)
+	m := e.m
+	m.ocr.mu.Lock()
+	defer m.ocr.mu.Unlock()
+	m.ocr.memCap = 12
+	m.ocr.memCap = m.memCapLocked(9, time.Hour)
+	if got := m.memCapLocked(12, time.Hour+5*time.Minute); m.ocr.memCap != 9 || got != 9 {
+		t.Fatalf("刚减少 5 分钟不应增加：%d", got)
+	}
+	if got := m.memCapLocked(12, time.Hour+11*time.Minute); got != 12 {
+		t.Fatalf("过了 10 分钟可以增加：%d", got)
+	}
 }

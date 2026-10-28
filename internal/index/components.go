@@ -16,17 +16,49 @@ func (m *Manager) CheckComponents() {
 	m.compChecking = true
 	m.compMu.Unlock()
 	model := m.ocrModel()
-	ocr := m.ocrCfg.WithModel(model)
 	go func() {
-		res := []extract.ComponentStatus{extract.CheckSoffice(), extract.CheckOCR(ocr), extract.CheckPDFium()}
-		if ocr.Enabled() {
-			res[1].Message += "，认字模型 " + extract.OCRModelName(model)
-		}
-		for _, c := range res {
-			m.logf("组件自检：%s：%s %s", c.Name, c.Message, logx.P(c.Path))
+		res := []extract.ComponentStatus{extract.CheckSoffice(), m.checkOCR(model), extract.CheckPDFium()}
+		for i, c := range res {
+			if i != 1 {
+				m.logf("组件自检：%s：%s %s", c.Name, c.Message, logx.P(c.Path))
+			}
 		}
 		m.compMu.Lock()
-		m.components, m.compChecking = res, false
+		m.components, m.compModel, m.compChecking = res, model, false
+		m.compMu.Unlock()
+		m.recheckOCRModel() // 自检期间认字模型变了（测速完成、改了设置）
+	}()
+}
+
+// checkOCR 用认字模型 model 检查 OCR 组件能否工作，并写进日志。
+func (m *Manager) checkOCR(model string) extract.ComponentStatus {
+	ocr := m.ocrCfg.WithModel(model)
+	st := extract.CheckOCR(ocr)
+	if ocr.Enabled() {
+		st.Message += "，认字模型 " + extract.OCRModelName(model)
+		if m.Config().OCRModel == "" {
+			st.Message += "（自动）"
+		}
+	}
+	m.logf("组件自检：%s：%s %s", st.Name, st.Message, logx.P(st.Path))
+	return st
+}
+
+// recheckOCRModel：认字模型变了（改了设置、测速后）时重新检查 OCR，自检结果写明实际用的模型。
+// 0.2.7 的自检在测速前做，写的是还没测速时的模型。
+func (m *Manager) recheckOCRModel() {
+	model := m.ocrModel()
+	m.compMu.Lock()
+	if m.compChecking || len(m.components) < 2 || m.compModel == model {
+		m.compMu.Unlock()
+		return
+	}
+	m.compChecking = true
+	m.compMu.Unlock()
+	go func() {
+		st := m.checkOCR(model)
+		m.compMu.Lock()
+		m.components[1], m.compModel, m.compChecking = st, model, false
 		m.compMu.Unlock()
 	}()
 }

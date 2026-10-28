@@ -310,7 +310,7 @@ func (m *Manager) laneDispatcher(l *lane) {
 			continue
 		}
 		if l.prio != prioOCR && m.ocrBenching.Load() {
-			s.idle.Store(false) // 正在测试 OCR 速度：暂停派发（约 1～2 分钟）
+			s.idle.Store(false) // 正在测试 OCR 速度：暂停派发（约 3～5 分钟）
 			m.waitLane(l, time.Second)
 			continue
 		}
@@ -331,6 +331,12 @@ func (m *Manager) laneDispatcher(l *lane) {
 			continue
 		}
 		if l.prio == prioOCR && m.ocrBenchDue() {
+			if m.ocrBenchWait() {
+				l.wantWork.Store(true)
+				s.idle.Store(false)
+				m.waitLane(l, 2*time.Second)
+				continue
+			}
 			m.ocrBench() // 本机还没测过 OCR 速度：先测，再按结果开进程
 			continue
 		}

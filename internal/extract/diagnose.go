@@ -178,6 +178,17 @@ func CheckOCR(c OCRConfig) ComponentStatus {
 		img.Pix[i] = 255
 	}
 	img.Set(0, 0, color.Gray{0})
+	if c.Engine == OCRModelWin {
+		st.Name = "OCR（Windows 自带，实验）"
+		start := time.Now()
+		if _, err := winOCRImage(img, time.Minute); err != nil {
+			st.Message = "不可用：" + err.Error()
+			return st
+		}
+		st.Seconds = time.Since(start).Seconds()
+		st.OK, st.Message = true, fmt.Sprintf("可用（识别用时 %.1f 秒）", st.Seconds)
+		return st
+	}
 	p := filepath.Join(dir, "blank.png")
 	f, err := os.Create(p)
 	if err != nil {

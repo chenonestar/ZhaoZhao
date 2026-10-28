@@ -26,16 +26,18 @@ type ocrState struct {
 	pages atomic.Int64 // OCR 通道累计识别的页数
 
 	machine   sysinfo.Machine
-	key       string    // 本机连同 OCR 组件的指纹
-	keyFor    string    // 算指纹时的 OCR 组件（组件变了要重新算、重新读测速结果）
-	bench     *OCRBench // 本机的测速结果；nil 表示还没测
-	benchNote string    // 测速进度（界面显示）
-	benchFail string    // 本次运行测速失败的原因：不再自动重试，下次启动再测
-	benchAsk  bool      // 用户要求重新测速
-	memCap    int       // 内存允许的 OCR 进程数（0 表示还没算）
-	tail      int       // 队列收尾时每个文件的线程数（0 表示没有在收尾）
-	tailSeen  int       // 连续几次看到队列已空、有进程空闲
-	userBusy  bool      // 开了「用电脑时放慢」、用户正在用电脑：OCR 只用一半核心
+	key       string        // 本机连同 OCR 组件的指纹
+	keyFor    string        // 算指纹时的 OCR 组件（组件变了要重新算、重新读测速结果）
+	bench     *OCRBench     // 本机的测速结果；nil 表示还没测
+	benchNote string        // 测速进度（界面显示）
+	benchFail string        // 本次运行测速失败的原因：不再自动重试，下次启动再测
+	benchAsk  bool          // 用户要求重新测速
+	memCap    int           // 内存允许的 OCR 进程数（0 表示还没算）
+	memDown   time.Duration // 内存允许的进程数上次减少的时间（awake.Now）
+	waitScan  time.Duration // 开始等扫描完成再测速的时间（awake.Now；0 表示没在等）
+	tail      int           // 队列收尾时每个文件的线程数（0 表示没有在收尾）
+	tailSeen  int           // 连续几次看到队列已空、有进程空闲
+	userBusy  bool          // 开了「用电脑时放慢」、用户正在用电脑：OCR 只用一半核心
 	// 识别完的 PDF 的总大小、识别的总页数：估算队列里的 PDF 有多少页（剩余时间按页数算）
 	pdfBytes, pdfPages int64
 }
@@ -55,7 +57,8 @@ var newOCRBenchRunner = func(m *Manager, pool *worker.Pool, sample string) ocrBe
 	return poolBench(pool, opts, sample)
 }
 
-// ocrModel 返回现在用的认字模型：设置里指定的（组件里有的话）；自动时用测速选的，还没测时用新模型。
+// ocrModel 返回现在用的认字模型：设置里指定的（组件里有的话）；自动时用新模型的普通版（测速时它在这台电脑上
+// 用不了的话用组件自带的）。量化版、Windows 自带的 OCR 只在设置里指定时用。
 func (m *Manager) ocrModel() string {
 	if want := m.Config().OCRModel; want != "" && m.ocrCfg.HasModel(want) {
 		return want
@@ -63,7 +66,7 @@ func (m *Manager) ocrModel() string {
 	m.ocr.mu.Lock()
 	b := m.ocrBenchLocked()
 	m.ocr.mu.Unlock()
-	if b != nil && b.Model != "" && m.ocrCfg.HasModel(b.Model) {
+	if b != nil && b.Model != "" && b.Model != extract.OCRModelV6Q && b.Model != extract.OCRModelWin && m.ocrCfg.HasModel(b.Model) {
 		return b.Model
 	}
 	if ms := m.ocrCfg.Models(); len(ms) > 0 {
@@ -135,13 +138,25 @@ func (m *Manager) autoPlanLocked(cores int, half bool, live int) (ocrPlan, int) 
 		slot = bp.SlotMem * 5 / 4 // 留些余量：大页面、大 PDF 占得更多
 	}
 	total, avail := sysinfo.Memory()
-	m.ocr.memCap = nextMemCap(m.ocr.memCap, ocrMemSlots(total, avail, slot, live))
+	m.ocr.memCap = m.memCapLocked(nextMemCap(m.ocr.memCap, ocrMemSlots(total, avail, slot, live)), awake.Now())
 	budget := ocrBudget(cores, half)
 	phys, smt := b.curves()
 	if !half && b.smtFaster() {
 		return smt.bestPlan(b.Logical, m.ocr.memCap), b.Logical
 	}
 	return phys.bestPlan(budget, m.ocr.memCap), budget
+}
+
+// memCapLocked 由 nextMemCap 的结果 next 定出内存允许的进程数：减少后 ocrMemUpDelay 之内不增加。调用时持有 m.ocr.mu。
+func (m *Manager) memCapLocked(next int, now time.Duration) int {
+	cur := m.ocr.memCap
+	switch {
+	case cur > 0 && next < cur:
+		m.ocr.memDown = now
+	case cur > 0 && next > cur && m.ocr.memDown > 0 && now-m.ocr.memDown < ocrMemUpDelay:
+		return cur
+	}
+	return next
 }
 
 // ocrPlanNow 返回当前搭配；还没调整过时按设置给出初值。
@@ -308,6 +323,37 @@ func (m *Manager) ocrBenchDue() bool {
 	return m.ocr.benchAsk || (m.ocrBenchLocked() == nil && m.ocr.benchFail == "")
 }
 
+// ocrBenchScanWait：本机还没测过 OCR 速度时，等扫描完成再测（扫描读盘、占 CPU，测出来不准），最多等这么久。
+const ocrBenchScanWait = 10 * time.Minute
+
+const benchWaitNote = "等扫描完成后测试本机 OCR 速度，再开始识别"
+
+// ocrBenchWait：测速前还要等扫描完成。0.2.7 测速时扫描还在进行，同一台电脑两次测速的结果差得很多。
+func (m *Manager) ocrBenchWait() bool {
+	scanning := m.scanning()
+	now := awake.Now()
+	m.ocr.mu.Lock()
+	defer m.ocr.mu.Unlock()
+	if !scanning || (m.ocr.waitScan > 0 && now-m.ocr.waitScan > ocrBenchScanWait) {
+		if m.ocr.benchNote == benchWaitNote {
+			m.ocr.benchNote = ""
+		}
+		return false
+	}
+	if m.ocr.waitScan == 0 {
+		m.ocr.waitScan = now
+	}
+	m.ocr.benchNote = benchWaitNote
+	return true
+}
+
+// scanning：有索引根或文件夹正在扫描（或排队等扫描）。
+func (m *Manager) scanning() bool {
+	m.scanMu.Lock()
+	defer m.scanMu.Unlock()
+	return len(m.scanRun) > 0 || len(m.scanSet) > 0
+}
+
 // ocrBenchAsked：用户要求了重新测速（没有要识别的文件时也测）。
 func (m *Manager) ocrBenchAsked() bool {
 	if !m.ocrAuto() {
@@ -343,7 +389,7 @@ func (m *Manager) sleepCtx(d time.Duration) bool {
 }
 
 // ocrBench 在 OCR 通道的派发协程里测速：正在识别的文件先做完；测速期间普通文件、老格式也暂停
-// （手头的做完，最多等 1 分钟），CPU 不被别的任务占用，结果才准。约 1～2 分钟。
+// （手头的做完，最多等 1 分钟），CPU 不被别的任务占用，结果才准。约 3～5 分钟。
 func (m *Manager) ocrBench() {
 	if !m.runOCRBench() || m.ctx.Err() != nil {
 		return
@@ -376,7 +422,7 @@ func (m *Manager) runOCRBench() bool {
 		m.setBenchNote("")
 		m.kick()
 	}()
-	m.setBenchNote("正在测试本机 OCR 速度，其他文件暂停约 1～2 分钟")
+	m.setBenchNote("正在测试本机 OCR 速度，其他文件暂停约 3～5 分钟")
 	for end := awake.Now() + time.Minute; (running(prioFast) > 0 || running(prioLegacy) > 0) && awake.Now() < end; {
 		if !m.sleepCtx(time.Second) {
 			return false
@@ -407,11 +453,11 @@ func (m *Manager) runOCRBench() bool {
 	if pool == nil {
 		pool = m.Pool
 	}
-	m.logf("测试本机 OCR 速度：比较 %d 种搭配（%s），普通文件暂停约 2 分钟", len(cands), planList(cands))
+	m.logf("测试本机 OCR 速度：比较 %d 种搭配（%s），交替测两轮，普通文件暂停约 3～5 分钟", len(cands), planList(cands))
 	t0 := awake.Now()
 	cpu := sysinfo.NewCPUMonitor(worker.ChildrenCPU)
 	b := runOCRBench(m.ctx, cores, cands, m.ocrCfg.Models(), newOCRBenchRunner(m, pool, sample), func(i, n int, what string) {
-		m.setBenchNote(fmt.Sprintf("正在测试本机 OCR 速度（第 %d/%d 项：%s），其他文件暂停约 2 分钟", i+1, n, what))
+		m.setBenchNote(fmt.Sprintf("正在测试本机 OCR 速度（第 %d/%d 项：%s），其他文件暂停约 3～5 分钟", i+1, n, what))
 		m.activity()
 	})
 	if m.ctx.Err() != nil {
@@ -426,9 +472,10 @@ func (m *Manager) runOCRBench() bool {
 		m.logf("保存 OCR 测速结果失败: %v", err)
 	}
 	m.ocr.mu.Lock()
-	m.ocr.bench, m.ocr.benchFail, m.ocr.memCap = b, "", 0
+	m.ocr.bench, m.ocr.benchFail, m.ocr.memCap, m.ocr.memDown = b, "", 0, 0
 	m.ocr.mu.Unlock()
 	m.logf("本机 OCR 测速（%s，%d 个物理核心，用时 %d 秒）：%s", mc.CPU, mc.Cores, int(awake.Since(t0).Seconds()), b.Summary())
+	m.recheckOCRModel() // 测速后认字模型可能变了（新模型在这台电脑上用不了）：自检结果写明实际用的模型
 	return true
 }
 
