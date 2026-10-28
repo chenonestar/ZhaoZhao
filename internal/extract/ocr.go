@@ -48,6 +48,8 @@ type OCRConfig struct {
 	// Threads 是每个 OCR 进程用的线程数（RapidOCR 的 --numThread，它默认 4）。0 表示不指定。
 	// 多个 OCR 进程的线程总数超过 CPU 核心数时互相争抢，总速度反而下降（实测可慢一倍）。
 	Threads int `json:"threads,omitempty"`
+	// Engine 为 "win" 时改用 Windows 自带的 OCR（在解析进程里直接调用，不启动 OCR 组件，见 winocr_windows.go）。
+	Engine string `json:"engine,omitempty"`
 }
 
 // args 返回启动 OCR 进程的参数。
@@ -163,7 +165,9 @@ func OCRPeakMem() uint64 {
 	return sysinfo.PeakMem(ocrCur.cmd.Process.Pid)
 }
 
-func (c OCRConfig) key() string { return c.Command + "\x00" + strings.Join(c.args(), "\x00") }
+func (c OCRConfig) key() string {
+	return c.Engine + "\x00" + c.Command + "\x00" + strings.Join(c.args(), "\x00")
+}
 
 func startOCR(c OCRConfig) (*ocrProc, error) {
 	cmd := exec.Command(c.Command, c.args()...)
@@ -288,6 +292,9 @@ type ocrResp struct {
 
 // ocrImage 识别一张图片，返回按阅读顺序拼接的文字。
 func ocrImage(c OCRConfig, imgPath string) (string, error) {
+	if c.Engine == OCRModelWin {
+		return ocrImageWin(c, imgPath)
+	}
 	if n := ocrThreads.Load(); n > 0 {
 		c.Threads = int(n)
 	}
@@ -311,6 +318,32 @@ func ocrImage(c OCRConfig, imgPath string) (string, error) {
 		log.Printf("OCR 组件（进程 %d）%v，结束后重新启动", p.cmd.Process.Pid, err)
 		killOCR(p) // 进程已退出或卡住：下次重新启动
 		ocrCur = nil
+	}
+	return text, err
+}
+
+// ocrImageWin 用 Windows 自带的 OCR 识别图片文件。之前常驻的 OCR 组件进程（换模型前用的）先结束，省内存。
+func ocrImageWin(c OCRConfig, imgPath string) (string, error) {
+	ocrMu.Lock()
+	killOCR(ocrCur)
+	ocrCur = nil
+	ocrMu.Unlock()
+	f, err := os.Open(imgPath)
+	if err != nil {
+		return "", err
+	}
+	img, _, err := image.Decode(bufio.NewReaderSize(f, 1<<20))
+	f.Close()
+	if err != nil {
+		return "", fmt.Errorf("OCR 读图失败：%v", err)
+	}
+	sec := c.PageSec
+	if sec <= 0 {
+		sec = 120
+	}
+	text, err := winOCRImage(img, time.Duration(sec)*time.Second)
+	if err != nil && !errors.Is(err, errOCRTimeout) {
+		err = fmt.Errorf("OCR 识别失败（%v）", err)
 	}
 	return text, err
 }
