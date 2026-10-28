@@ -131,8 +131,8 @@ jobs:
           $left = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(zhaozhao|RapidOCR)' }
           if ($left) { $left | Format-Table Name, Id; throw "测速结束后还有进程没有退出" }
 
-      # 实验准备（只测不换）：Windows 自带的 OCR 要装了中文识别语言才能认中文，服务器版 Windows 默认没有
-      - name: 实验准备：安装 Windows 自带 OCR 的中文识别语言
+      # Windows 自带的 OCR 要装了中文识别语言才能认中文，服务器版 Windows 默认没有（装不上时下一步只记录）
+      - name: 安装 Windows 自带 OCR 的中文识别语言
         shell: pwsh
         continue-on-error: true
         timeout-minutes: 20
@@ -144,12 +144,13 @@ jobs:
 
       # 同一批模拟扫描页，直接驱动发布包里的 RapidOCR-json，比较各个认字模型的速度和准确率；新模型（默认用的）
       # 不能用或准确率太低时打包失败。顺带确认组件读 BMP（找找交给它的格式）没问题。
-      # 另做实验：Windows 自带的 OCR 认同样的页面（只记录）
-      - name: OCR 认字模型检查（各模型速度和准确率）+ Windows 自带 OCR 实验
+      # 再用找找里的 Windows 自带 OCR（可选的实验模型）认同样的页面：装上了中文识别语言、准确率却太低时也失败
+      - name: OCR 认字模型检查（各模型速度和准确率，含 Windows 自带的 OCR）
         shell: pwsh
         run: |
           $env:PYTHONIOENCODING = 'utf-8'
-          python packaging/tools/ocr_model_test.py ZhaoZhao\components\ocr (Join-Path $env:RUNNER_TEMP 'ocr-model')
+          go build -o winocr.exe ./packaging/tools/winocr
+          python packaging/tools/ocr_model_test.py ZhaoZhao\components\ocr (Join-Path $env:RUNNER_TEMP 'ocr-model') (Resolve-Path winocr.exe).Path
           if ($LASTEXITCODE -ne 0) { throw "新认字模型检查没通过" }
 
       - name: 打包完整版 zip

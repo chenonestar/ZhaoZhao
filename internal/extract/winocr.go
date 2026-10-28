@@ -1,7 +1,9 @@
 package extract
 
 import (
+	"image"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -28,3 +30,6 @@ func wideRune(r rune) bool {
 	return unicode.Is(unicode.Han, r) || unicode.In(r, unicode.Hiragana, unicode.Katakana, unicode.Hangul) ||
 		(r >= 0x3000 && r <= 0x303f) || (r >= 0xff00 && r <= 0xffef)
 }
+
+// WinOCRImage 用 Windows 自带的 OCR 认一张图片（打包测试的 packaging/tools/winocr 用）。
+func WinOCRImage(img image.Image) (string, error) { return winOCRImage(img, 2*time.Minute) }

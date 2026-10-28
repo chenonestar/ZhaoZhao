@@ -2,12 +2,13 @@
 PP-OCRv6 small 和它的 INT8 量化版）的速度和准确率。直接驱动发布包里的 RapidOCR-json（和找找用的同一个组件、
 同样的管道协议）。新模型是找找默认用的：组件加载不了，或者准确率低于 97% 时以非 0 退出，打包失败。
 
-另外做一个实验（只测不换）：Windows 自带的 OCR（Windows.Media.Ocr）认同样的页面，速度和准确率如何。
+另外检查 Windows 自带的 OCR（找找里可选的「Windows 自带 OCR（实验）」）：用找找里的实现（packaging/tools/winocr，
+直接调用 Windows.Media.Ocr）认同样的页面，记下速度和准确率；系统装了中文识别语言、准确率却低于 90% 时也以非 0 退出。
 
 模拟扫描页：A4、200 DPI 的灰度 BMP（找找渲染 PDF 页后交给组件的格式），宋体随机常用字，加了模糊、噪点、轻微倾斜。
 第 1 页同时存一份 PNG，确认组件读 BMP 和读 PNG 的结果一样。
 
-用法：python ocr_model_test.py <组件目录 components\\ocr> <工作目录>
+用法：python ocr_model_test.py <组件目录 components\\ocr> <工作目录> [winocr.exe]
 """
 import json
 import os
@@ -21,6 +22,8 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 sys.stdout.reconfigure(encoding='utf-8')  # CI 的控制台默认是 cp1252，打印中文会出错
 COMPONENT, WORK = sys.argv[1], sys.argv[2]
+WINOCR = sys.argv[3] if len(sys.argv) > 3 else ''
+
 PAGES, THREADS = 6, 2
 
 
@@ -162,29 +165,25 @@ def run(name, exe, args, pages):
 
 
 def windows_ocr(pages):
-    """实验：Windows 自带的 OCR（PowerShell 5.1 调 Windows.Media.Ocr），单线程逐页识别。"""
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'winocr_test.ps1')
+    """Windows 自带的 OCR（找找里的实现，单线程逐页识别）。返回字准确率（%）；用不了时返回 None。"""
+    if not WINOCR:
+        return None
     d = os.path.dirname(pages[0][0])
     try:
-        p = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, d],
-                           capture_output=True, timeout=900)
+        p = subprocess.run([WINOCR, d], capture_output=True, timeout=900)
     except Exception as ex:
-        print(f'Windows 自带 OCR：没能运行（{ex}）', flush=True)
-        return
-    out = p.stdout.decode('utf-8', 'replace').lstrip('\ufeff')
-    got, info = {}, []
+        raise SystemExit(f'Windows 自带 OCR：没能运行（{ex}）')
+    out = p.stdout.decode('utf-8', 'replace')
+    if p.returncode == 3:
+        print('Windows 自带 OCR：' + out.strip(), flush=True)
+        return None
+    if p.returncode != 0:
+        raise SystemExit(f'Windows 自带 OCR：失败（退出码 {p.returncode}）：{p.stderr.decode("utf-8", "replace")[-800:]}')
+    got = {}
     for line in out.splitlines():
-        line = line.strip()
-        if line.startswith('{'):
+        if line.strip().startswith('{'):
             r = json.loads(line)
             got[r['file']] = r
-        elif line:
-            info.append(line)
-    if info:
-        print('Windows 自带 OCR：' + '；'.join(info), flush=True)
-    if p.returncode != 0 or not got:
-        print(f'Windows 自带 OCR：失败（退出码 {p.returncode}）：{p.stderr.decode("utf-8", "replace")[-800:]}', flush=True)
-        return
     errs = total = 0
     ms = []
     for path, gt in pages:
@@ -194,9 +193,11 @@ def windows_ocr(pages):
         errs += edit(norm(r['text']), norm(gt))
         total += len(norm(gt))
         ms.append(r['ms'])
-    if total:
-        print(f'Windows 自带 OCR：每页 {sum(ms) / len(ms) / 1000:.2f} 秒（单线程），字准确率 {100 * (1 - errs / total):.1f}%，'
-              f'共 {len(ms)} 页', flush=True)
+    if not total:
+        raise SystemExit('Windows 自带 OCR：没有结果')
+    acc = 100 * (1 - errs / total)
+    print(f'Windows 自带 OCR：每页 {sum(ms) / len(ms) / 1000:.2f} 秒（单线程），字准确率 {acc:.1f}%，共 {len(ms)} 页', flush=True)
+    return acc
 
 
 def main():
@@ -216,9 +217,11 @@ def main():
         print(f'PP-OCRv6 small 比 PP-OCRv4 每页快 {100 * (1 - v6[0] / v4[0]):.0f}%', flush=True)
     if v6 and v6q:
         print(f'量化版比普通版每页快 {100 * (1 - v6q[0] / v6[0]):.0f}%', flush=True)
-    windows_ocr(pages)
+    win = windows_ocr(pages)
     if not v6 or v6[1] < 97:
         raise SystemExit('新认字模型（找找默认用的）在组件里不能用或准确率太低')
+    if win is not None and win < 90:
+        raise SystemExit('Windows 自带 OCR（找找里的实现）准确率太低')
 
 
 main()
