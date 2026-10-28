@@ -142,9 +142,9 @@ func (b *OCRBench) curves() (phys, smt effCurve) {
 const ocrSMTGain = 1.10
 
 // smtGain 返回用上超线程的最快搭配比只用物理核心的最快搭配快多少（倍数）；每一轮都要快 ocrSMTGain 以上才算
-// 稳定地快（steady 为 true）。没有可比的结果时返回 0。
+// 稳定地快（steady 为 true）。没有可比的结果（没有超线程，或某一类全部失败）时返回 0。
 func (b *OCRBench) smtGain() (gain float64, steady bool) {
-	if b == nil || b.Logical <= b.Budget {
+	if b == nil {
 		return 0, false
 	}
 	var phys, smt float64
@@ -217,7 +217,7 @@ func (b *OCRBench) Summary() string {
 	}
 	s := strings.Join(parts, "，")
 	if bp, ok := b.best(); ok {
-		s += "；最快：" + bp.plan().String()
+		s += "；选用：" + bp.plan().String()
 		if b.Logical > b.Budget {
 			s += smtNote(b)
 		}
@@ -423,10 +423,8 @@ func runOCRBench(ctx context.Context, budget int, cands []ocrPlan, models []stri
 				continue
 			}
 			p.PerMin = median(p.Runs)
-			if b.Best < 0 || p.PerMin > b.Plans[b.Best].PerMin {
-				b.Best = i
-			}
 		}
+		b.Best = b.choose()
 		if b.Best >= 0 || ctx.Err() != nil {
 			if b.Best >= 0 {
 				baseText = texts[b.Best]
@@ -468,6 +466,22 @@ func runOCRBench(ctx context.Context, budget int, cands []ocrPlan, models []stri
 	// 两万多页真实扫描件上，量化版比普通版少认 0.4% 的字，173 页少了一成以上，所以只在用户手动选择时用。
 	b.Model = b.PlanModel
 	return b
+}
+
+// choose 返回选用的搭配（Plans 的下标；-1 表示全部失败）：最快的；超线程没有每一轮都快 10% 以上时，只在只用
+// 物理核心的搭配里选（0.2.8 打包测试里 2×2 比 2×1 只快 0.1%，以前标成「最快」，实际却按只用物理核心开进程）。
+func (b *OCRBench) choose() int {
+	_, smtOK := b.smtGain()
+	best := -1
+	for i, p := range b.Plans {
+		if p.Err != "" || p.PerMin <= 0 || (!smtOK && p.smt(b.Budget)) {
+			continue
+		}
+		if best < 0 || p.PerMin > b.Plans[best].PerMin {
+			best = i
+		}
+	}
+	return best
 }
 
 func countPlans(ps []OCRBenchPlan, f func(OCRBenchPlan) bool) int {

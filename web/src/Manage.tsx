@@ -736,7 +736,7 @@ function OCRSpeed() {
         {st.manual
           ? `OCR 进程数是手动设置的（现在 ${st.plan}），不测速。`
           : best && b
-            ? `本机实测（${new Date(b.at * 1000).toLocaleDateString()}，${b.cpu}，${b.cores} 个物理核心${(b.logical ?? 0) > b.cores ? `、${b.logical} 个逻辑处理器` : ""}）：${best.procs} 个进程 × ${best.threads} 线程最快，约每分钟 ${best.perMin.toFixed(1)} 页 A4 扫描页。现在用 ${st.plan}${memNote}。`
+            ? `本机实测（${new Date(b.at * 1000).toLocaleDateString()}，${b.cpu}，${b.cores} 个物理核心${(b.logical ?? 0) > b.cores ? `、${b.logical} 个逻辑处理器` : ""}）：选用 ${best.procs} 个进程 × ${best.threads} 线程，约每分钟 ${best.perMin.toFixed(1)} 页 A4 扫描页。现在用 ${st.plan}${memNote}。`
             : "还没有测过本机的 OCR 速度：第一次有图片要识别、扫描完成后自动测（约 3～5 分钟，期间普通文件暂停）。"}
         {` 认字模型：${modelName(st.model)}。`}
       </div>
@@ -748,7 +748,7 @@ function OCRSpeed() {
           <tbody>
             {plans.map((p, i) => (
               <tr key={i}>
-                <td>{p.procs} 个进程 × {p.threads} 线程{p.procs * p.threads > b.budget ? "（用上超线程）" : ""}{i === b.best ? "（最快）" : ""}</td>
+                <td>{p.procs} 个进程 × {p.threads} 线程{p.procs * p.threads > b.budget ? "（用上超线程）" : ""}{i === b.best ? "（选用）" : ""}</td>
                 <td className="num">{p.err ? `失败：${p.err}` : p.perMin.toFixed(1)}{!p.err && (p.runs?.length ?? 0) > 1 && <span className="dim small">（各轮 {p.runs!.map((x) => x.toFixed(1)).join(" / ")}）</span>}</td>
                 <td className="num">{p.slotMem > 0 ? `${Math.round(p.slotMem / 1048576)} MB` : "—"}</td>
                 {plans.some((x) => x.cpu) && <td className="num">{p.cpu ? `${p.cpu.toFixed(1)} 个逻辑处理器` : "—"}</td>}

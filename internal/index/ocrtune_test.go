@@ -246,7 +246,7 @@ func TestRunOCRBench(t *testing.T) {
 	if strings.Join(calls, " ") != "4 个进程 × 1 线程:4 2 个进程 × 2 线程:4 2 个进程 × 2 线程:4 1 个进程 × 4 线程:4 4 个进程 × 1 线程:4 1 个进程 × 4 线程:4" {
 		t.Fatalf("每种都应识别 4 页，失败的再试一次，第二轮不再测：%v", calls)
 	}
-	if s := b.Summary(); !strings.Contains(s, "4 个进程 × 1 线程 每分钟 26.0 页（各轮 26.0/26.0，每个约 300 MB，实际占用约 5.5 个逻辑处理器）") || !strings.Contains(s, "最快：4 个进程 × 1 线程") {
+	if s := b.Summary(); !strings.Contains(s, "4 个进程 × 1 线程 每分钟 26.0 页（各轮 26.0/26.0，每个约 300 MB，实际占用约 5.5 个逻辑处理器）") || !strings.Contains(s, "选用：4 个进程 × 1 线程") {
 		t.Fatal(s)
 	}
 	if ocrBenchPages(2) != 4 || ocrBenchPages(8) != 8 {
@@ -320,8 +320,8 @@ func TestRunOCRBenchRounds(t *testing.T) {
 	if b.Plans[0].PerMin != 31 || len(b.Plans[0].Runs) != 3 {
 		t.Fatalf("应取中位数：%+v", b.Plans[0])
 	}
-	// 12×1 的中位数 34 比 6×1 的 31 快 9.7%：不到 10%，不用超线程
-	if bp, _ := b.best(); bp.plan() != (ocrPlan{12, 1}) || b.smtFaster() {
+	// 12×1 的中位数 34 比 6×1 的 31 快 9.7%：不到 10%，不用超线程，选用只用物理核心里最快的 6×1
+	if bp, _ := b.best(); bp.plan() != (ocrPlan{6, 1}) || b.smtFaster() {
 		t.Fatalf("%+v", b.Plans)
 	}
 	if s := b.Summary(); !strings.Contains(s, "用上超线程只快 10%，不到 10%") {
@@ -842,6 +842,22 @@ VALUES(?,?,?,'',?,?,'',100,1,1,'','',0,?,'',?,1)`, r.ID, r.VolumeID, name, name,
 		t.Fatal(s)
 	}
 	if s := OCRTestText(rep, true); !strings.Contains(s, "【PP-OCRv4】关于做奸安全生产检查工伤的通知") {
+		t.Fatal(s)
+	}
+}
+
+// 0.2.8 打包测试的结果：超线程的 2×2 只比 2×1 快 0.1%，选用 2×1，日志里不再写「最快：2×2」又说只用物理核心。
+func TestOCRBenchChooseNoSMT(t *testing.T) {
+	speed := map[ocrPlan]float64{{2, 1}: 21.8, {1, 2}: 17.4, {4, 1}: 19.7, {2, 2}: 21.9}
+	run := func(ctx context.Context, model string, p ocrPlan, pages int) (benchRun, error) {
+		return benchRun{perMin: speed[p]}, nil
+	}
+	b := runOCRBench(context.Background(), 2, ocrBenchCandidates(2, 4, 32), nil, run, nil)
+	b.Logical = 4
+	if bp, ok := b.best(); !ok || bp.plan() != (ocrPlan{2, 1}) {
+		t.Fatalf("应选用 2×1：%+v", b.Plans)
+	}
+	if s := b.Summary(); !strings.Contains(s, "选用：2 个进程 × 1 线程（用上超线程只快 0%") {
 		t.Fatal(s)
 	}
 }
