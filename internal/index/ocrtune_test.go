@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chenonestar/zhaozhao/internal/doc"
 	"github.com/chenonestar/zhaozhao/internal/extract"
 	"github.com/chenonestar/zhaozhao/internal/store"
 	"github.com/chenonestar/zhaozhao/internal/sysinfo"
@@ -772,5 +773,75 @@ func TestOCRMemCapHysteresis(t *testing.T) {
 	}
 	if got := m.memCapLocked(12, time.Hour+11*time.Minute); got != 12 {
 		t.Fatalf("过了 10 分钟可以增加：%d", got)
+	}
+}
+
+// OCR 引擎对比：抽样识别过的文件，各模型各认一遍，和基准模型比认出的字、每页用时。
+func TestOCRTest(t *testing.T) {
+	dir := t.TempDir()
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	e := newEnv(t, prov)
+	e.m.PauseAll()
+	r, err := e.m.AddRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+	for i, name := range []string{"a.pdf", "b.png", "c.png", "未识别.png"} {
+		ocr := 1
+		if i == 3 {
+			ocr = 0
+		}
+		if _, err := e.m.DB.W.Exec(`INSERT INTO files(root_id,volume_id,rel_path,inner,name,ext,kind,size,mtime,state,err,hash,text_len,ocr,meta,prio,indexed_at)
+VALUES(?,?,?,'',?,?,'',100,1,1,'','',0,?,'',?,1)`, r.ID, r.VolumeID, name, name, extract.Ext(name), ocr, prioOCR); err != nil {
+			t.Fatal(err)
+		}
+	}
+	texts := map[string]string{"v6": "关于做好安全生产检查工作的通知", "v6q": "关于做好安全生产检查工作的通", "v4": "关于做奸安全生产检查工伤的通知"}
+	old := newOCRTestRunner
+	t.Cleanup(func() { newOCRTestRunner = old })
+	var calls []string
+	newOCRTestRunner = func(m *Manager) ocrTestRunner {
+		return func(ctx context.Context, model, path, ext string) (doc.Result, time.Duration) {
+			calls = append(calls, model+":"+filepath.Base(path))
+			if model == "v4" && strings.HasSuffix(path, "c.png") {
+				return doc.Result{Status: doc.StatusFailed, Err: "OCR 组件已退出"}, time.Second
+			}
+			pages := 0
+			if ext == "pdf" {
+				pages = 3
+			}
+			return doc.Result{Status: doc.StatusOK, Text: texts[model], OCRPages: pages}, 600 * time.Millisecond
+		}
+	}
+	samples, err := e.m.ocrSamples(10)
+	if err != nil || len(samples) != 3 {
+		t.Fatalf("应抽到 3 个识别出文字的文件：%v %v", samples, err)
+	}
+	rep := e.m.runOCRTest(context.Background(), samples, []string{"v6", "v6q", "v4"})
+	// 按模型逐个来，每个模型先认一遍样张
+	if len(calls) != 12 || calls[0] != "v6:sample.png" || calls[4] != "v6q:sample.png" {
+		t.Fatalf("%v", calls)
+	}
+	if rep.Base != "v6" || rep.Sampled != 3 || len(rep.Models) != 3 || len(rep.Files) != 3 {
+		t.Fatalf("%+v", rep)
+	}
+	v6, v6q, v4 := rep.Models[0], rep.Models[1], rep.Models[2]
+	if v6.Pages != 5 || v6.Files != 3 || v6.MsPage != 360 || v6.Agree != 100 {
+		t.Fatalf("普通版：3 个文件 5 页（PDF 3 页），每页 0.36 秒：%+v", v6)
+	}
+	if v6q.CharsVsBase > -6 || v6q.CharsVsBase < -7 || v6q.Agree < 90 || v6q.Agree >= 100 || v6q.LowFiles != 0 {
+		t.Fatalf("量化版少认一个字：%+v", v6q)
+	}
+	if v4.Failed != 1 || v4.Files != 2 || v4.LowFiles != 2 {
+		t.Fatalf("v4：%+v", v4)
+	}
+	s := OCRTestText(rep, false)
+	if !strings.Contains(s, "PP-OCRv6 small（量化版）：认成功 3 个文件 5 页") || !strings.Contains(s, "失败：OCR 组件已退出") || strings.Contains(s, "【") {
+		t.Fatal(s)
+	}
+	if s := OCRTestText(rep, true); !strings.Contains(s, "【PP-OCRv4】关于做奸安全生产检查工伤的通知") {
+		t.Fatal(s)
 	}
 }

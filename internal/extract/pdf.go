@@ -67,6 +67,7 @@ func extractPDFium(p string, opt Options) (res doc.Result, ok bool) {
 	}
 	var got pdfOCRResult
 	var ocrErr error
+	blank = limitPages(blank, opt)
 	if len(blank) > 0 && opt.OCR.Enabled() {
 		got, ocrErr = ocrPDFiumPages(d, p, blank, opt)
 	}
@@ -117,10 +118,19 @@ func extractPDFGo(p string, opt Options) (res doc.Result) {
 	}
 	var got pdfOCRResult
 	var ocrErr error
+	blank = limitPages(blank, opt)
 	if len(blank) > 0 && opt.OCR.Enabled() {
 		got, ocrErr = ocrPDFPages(p, blank, opt)
 	}
 	return pdfResult(n, texts, blank, got, ocrErr, opt)
+}
+
+// limitPages：设了 OCRPageLimit 时只留前几个扫描页。
+func limitPages(blank []int, opt Options) []int {
+	if opt.OCRPageLimit > 0 && opt.OCR.Enabled() && len(blank) > opt.OCRPageLimit {
+		return blank[:opt.OCRPageLimit]
+	}
+	return blank
 }
 
 // pdfResult 把各页文字（含 OCR 结果）按页码拼成提取结果。

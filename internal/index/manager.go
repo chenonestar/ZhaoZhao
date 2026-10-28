@@ -73,6 +73,7 @@ type Manager struct {
 	LegacyPool *worker.Pool
 
 	ltest   legacyTester // 老格式测试
+	otest   ocrTester    // OCR 引擎对比
 	maint   maintState   // 后台整理索引库
 	ocrCfg  extract.OCRConfig
 	DataDir string

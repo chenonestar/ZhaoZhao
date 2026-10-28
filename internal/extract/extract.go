@@ -21,8 +21,9 @@ type Options struct {
 	ArchiveMaxRatio int           // 单个内部文件压缩比上限
 	OCR             OCRConfig
 	Debug           bool   // 记录详细日志（解析子进程据此设置自己的日志级别）
-	LegacyMode      string `json:"legacyMode,omitempty"` // 老格式的处理方式：LegacyAuto、LegacyNative、LegacyLO
-	ReportMem       bool   `json:"reportMem,omitempty"`  // 结果里带上解析进程和 OCR 进程的内存峰值（OCR 测速用）
+	LegacyMode      string `json:"legacyMode,omitempty"`   // 老格式的处理方式：LegacyAuto、LegacyNative、LegacyLO
+	ReportMem       bool   `json:"reportMem,omitempty"`    // 结果里带上解析进程和 OCR 进程的内存峰值（OCR 测速用）
+	OCRPageLimit    int    `json:"ocrPageLimit,omitempty"` // 大于 0 时 PDF 只识别前这么多个扫描页（OCR 引擎对比用）
 
 	progress func(string) // 进度回调（不序列化：子进程里由 Serve 设置）
 }

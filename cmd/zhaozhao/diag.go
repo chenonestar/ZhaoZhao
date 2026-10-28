@@ -161,6 +161,18 @@ func exportDiagnostics(dataDir string, lg *logx.Logger, mgr *index.Manager, anon
 			return "", err
 		}
 	}
+	if ot := mgr.OCRTest(); ot.Report != nil {
+		if err := add("OCR引擎对比.txt", index.OCRTestText(ot.Report, false)); err != nil {
+			f.Close()
+			return "", err
+		}
+		// 各模型认出的开头一段文字是文件内容：单独存一个文件，不想给别人看可以删掉
+		if err := add("OCR引擎对比-认出的文字（含文件内容）.txt", "这个文件里是 OCR 引擎对比时各个认字模型从抽样文件里认出的开头一段文字（文件内容），"+
+			"用来比较各模型认得准不准。不想给别人看的话，发送前把这个文件从压缩包里删掉即可。\n\n"+index.OCRTestText(ot.Report, true)); err != nil {
+			f.Close()
+			return "", err
+		}
+	}
 
 	logs := lg.AllLogs()
 	for i, lp := range logs {

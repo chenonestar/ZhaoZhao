@@ -479,6 +479,14 @@ func (m *Manager) runOCRBench() bool {
 	return true
 }
 
+func benchPlans(b *OCRBench) []ocrPlan {
+	var out []ocrPlan
+	for _, p := range b.Plans {
+		out = append(out, p.plan())
+	}
+	return out
+}
+
 func planList(ps []ocrPlan) string {
 	var parts []string
 	for _, p := range ps {
@@ -502,8 +510,10 @@ type OCRBenchInfo struct {
 	Models  []string  `json:"models"`         // 组件里有的认字模型
 	// ReOCR 是用别的认字模型识别过的文件数（可以用现在的模型重新识别），其中 ReOCRUnknown 个是 0.2.8 以前
 	// 识别的（没记下用的哪个模型）
-	ReOCR        int64 `json:"reocr"`
-	ReOCRUnknown int64 `json:"reocrUnknown"`
+	ReOCR        int64  `json:"reocr"`
+	ReOCRUnknown int64  `json:"reocrUnknown"`
+	SMTNote      string `json:"smtNote,omitempty"`  // 为什么用或不用超线程
+	PlanNote     string `json:"planNote,omitempty"` // 现在的搭配没有直接测过时的说明
 }
 
 // OCRBenchInfo 返回本机的 OCR 测速情况。
@@ -520,6 +530,19 @@ func (m *Manager) OCRBenchInfo() OCRBenchInfo {
 		Plan: plan.String(), MemCap: m.ocr.memCap, Cores: cores, Model: model, Models: m.ocrCfg.Models(), ReOCR: reocr, ReOCRUnknown: unknown}
 	if info.Note == "" && m.ocr.benchFail != "" {
 		info.Note = "测速失败：" + m.ocr.benchFail
+	}
+	if b := info.Bench; b != nil && !info.Manual {
+		if b.Logical > b.Budget {
+			info.SMTNote = strings.Trim(smtNote(b), "（）")
+		}
+		measured := false
+		for _, p := range b.Plans {
+			measured = measured || (p.Err == "" && p.plan() == plan)
+		}
+		if !measured && len(b.Plans) > 0 {
+			info.PlanNote = fmt.Sprintf("%s 没有直接测过：是按实测的每个线程的速度推算的（测速时比较的是 %s；现在内存允许的进程数、"+
+				"可用的线程数和测速时不同，就从实测结果推算最快的搭配）", plan, planList(benchPlans(b)))
+		}
 	}
 	return info
 }

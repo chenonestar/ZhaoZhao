@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
-import type { Config, DiagState, FailedFilter, FailedFolders, FailedItem, FailedSummary, HotkeyState, LegacyTestState, OCRBenchInfo, ProblemCat, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
+import type { Config, DiagState, FailedFilter, FailedFolders, FailedItem, FailedSummary, HotkeyState, LegacyTestState, OCRBenchInfo, OCRTestState, ProblemCat, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
 import { copyText, fmtDuration, fmtSize, fmtTime, folderOf } from "./util";
 import { FolderPicker } from "./FolderPicker";
 import { Help } from "./Help";
@@ -18,7 +18,13 @@ interface Props {
 
 const KIND: Record<string, string> = { local: "本地盘", removable: "移动硬盘", network: "网络盘" };
 
-export function Manage({ status, tab, setTab, onClose, refresh, onQuit }: Props) {
+// settingsDirty：设置页有没保存的修改（切换标签、关闭窗口前提醒）。
+let settingsDirty = false;
+const leaveSettings = () => !settingsDirty || confirm("设置有修改还没保存（排除规则、文件等部分要点页面底部的「保存设置」）。不保存就离开？");
+
+export function Manage({ status, tab, setTab: setTab0, onClose: onClose0, refresh, onQuit }: Props) {
+  const setTab = (t: Tab) => { if (t === tab || tab !== "settings" || leaveSettings()) setTab0(t); };
+  const onClose = () => { if (tab !== "settings" || leaveSettings()) onClose0(); };
   return (
     <div className="modal-back" onClick={onClose}>
       <div className="modal manage" onClick={(e) => e.stopPropagation()}>
@@ -517,21 +523,67 @@ function FailedTab({ refresh }: { refresh: () => void }) {
 
 const lines = (s: string) => s.split("\n").map((x) => x.trim()).filter(Boolean);
 
+// 认字模型的选项和说明。
+const MODEL_OPTIONS: [string, string, string][] = [
+  ["", "自动（推荐）：PP-OCRv6 small 普通版", "用新模型 PP-OCRv6 small 的普通版；它在这台电脑上用不了时用组件自带的 PP-OCRv4。"],
+  ["v6", "PP-OCRv6 small 普通版", "新模型，认字最准。"],
+  ["v6q", "PP-OCRv6 small 量化版", "略快（多数电脑上快 0～20%），但在扫描件上会少认约 0.4% 的字：0.2.7 某位用户两万多页扫描件上，有 173 页少认了一成以上。"],
+  ["v4", "PP-OCRv4 旧模型", "0.2.6 及以前用的模型，认字准确率较低。"],
+  ["win", "Windows 自带 OCR（实验）", "用 Windows 自带的文字识别（截图识字用的就是它），不用 OCR 组件的模型。速度快，但认真实扫描件的效果还没验证过，可以先用下面的「OCR 引擎对比」比一比。系统要装有中文（简体）识别语言。"],
+];
+
 function SettingsTab() {
   const [c, setC] = useState<Config | null>(null);
+  const [saved, setSaved] = useState<Config | null>(null); // 最近保存的设置
   const [picking, setPicking] = useState(false);
   const [msg, setMsg] = useState("");
   const [hk, setHk] = useState<HotkeyState | null>(null);
-  useEffect(() => { api.config().then(setC); api.hotkey().then(setHk).catch(() => {}); }, []);
-  if (!c) return <div className="dim pad">加载中…</div>;
-  const num = (k: keyof Config, label: string, hint = "") => (
+  const [models, setModels] = useState<string[]>([]);
+  useEffect(() => {
+    api.config().then((x) => { setC(x); setSaved(x); });
+    api.hotkey().then(setHk).catch(() => {});
+    api.ocrBench().then((b) => setModels(b.models ?? [])).catch(() => {});
+  }, []);
+  const dirty = !!c && !!saved && JSON.stringify(c) !== JSON.stringify(saved);
+  useEffect(() => { settingsDirty = dirty; }, [dirty]);
+  useEffect(() => {
+    const warn = (e: BeforeUnloadEvent) => { if (settingsDirty) { e.preventDefault(); e.returnValue = ""; } };
+    window.addEventListener("beforeunload", warn);
+    return () => { settingsDirty = false; window.removeEventListener("beforeunload", warn); };
+  }, []);
+  if (!c || !saved) return <div className="dim pad">加载中…</div>;
+  const flash = (s: string) => { setMsg(s); setTimeout(() => setMsg(""), 2000); };
+  // 后台任务的设置改了就保存：只保存这几项，别处还没保存的修改不受影响（0.2.7 改了认字模型要点页面底部的
+  // 「保存设置」，有用户选好没点，用的还是原来的模型）
+  const saveNow = (patch: Partial<Config>) => {
+    setC({ ...c, ...patch });
+    const before = saved;
+    api.saveConfig({ ...saved, ...patch }).then((n) => {
+      // 以保存后的设置为准，再放回别处还没保存的修改
+      setC((cur) => {
+        if (!cur) return cur;
+        const out: any = { ...n };
+        for (const k of Object.keys(cur) as (keyof Config)[]) {
+          if (!(k in patch) && JSON.stringify(cur[k]) !== JSON.stringify(before[k])) out[k] = cur[k];
+        }
+        return out;
+      });
+      setSaved(n);
+      flash("已保存并生效");
+    }).catch((e) => setMsg(e.message));
+  };
+  const num = (k: keyof Config, label: string, hint = "", now = false) => (
     <label className="field inline"><span>{label}</span>
-      <input type="number" value={c[k] as number} onChange={(e) => setC({ ...c, [k]: Number(e.target.value) })} />
+      <input type="number" value={c[k] as number} onChange={(e) => setC({ ...c, [k]: Number(e.target.value) })}
+        onBlur={() => { if (now && c[k] !== saved[k]) saveNow({ [k]: c[k] }); }}
+        onKeyDown={(e) => { if (now && e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
       {hint && <em className="dim small">{hint}</em>}</label>
   );
-  const chk = (k: keyof Config, label: string) => (
-    <label className="check"><input type="checkbox" checked={c[k] as boolean} onChange={(e) => setC({ ...c, [k]: e.target.checked })} />{label}</label>
+  const chk = (k: keyof Config, label: string, now = false) => (
+    <label className="check"><input type="checkbox" checked={c[k] as boolean}
+      onChange={(e) => (now ? saveNow({ [k]: e.target.checked }) : setC({ ...c, [k]: e.target.checked }))} />{label}</label>
   );
+  const model = c.ocrModel ?? "";
   const listField = (k: "excludeDirNames" | "excludePrefixes" | "excludeGlobs" | "excludeExts", label: string) => (
     <label className="field"><span>{label}（每行一条）</span>
       <textarea rows={4} value={(c[k] ?? []).join("\n")} onChange={(e) => setC({ ...c, [k]: lines(e.target.value) })} /></label>
@@ -562,25 +614,29 @@ function SettingsTab() {
       <h4>搜索</h4>
       {chk("simplify", "繁简体归一（搜「预算」也能找到「預算」）")}
 
-      <h4>后台任务（修改后立即生效）</h4>
-      {num("workers", "提取并发数", "0 表示 CPU 核心数的一半")}
-      {num("timeoutSec", "单个文件提取超时（秒）")}
-      {num("legacyWorkers", "老格式转换并发数", "只用于内置解析读不了的老格式文件（LibreOffice 转换）")}
-      {chk("legacyLOOnly", "老格式只用 LibreOffice 转换，不用内置解析（较慢；仅在内置解析结果有问题时使用）")}
-      {chk("ocrEnabled", "识别图片和扫描 PDF 里的文字（OCR）")}
-      {num("ocrWorkers", "OCR 进程数", "0 = 自动（推荐）：在这台电脑上用样张实测，选出最快的进程数和每个进程的线程数（通常是每个 CPU 核心一个进程），进程数不超过内存允许的数量。手动设为 N 时，每个进程用「CPU 核心数 ÷ N」个线程")}
-      <label className="field inline"><span>认字模型</span>
-        <select value={c.ocrModel ?? ""} onChange={(e) => setC({ ...c, ocrModel: e.target.value })}>
-          <option value="">自动（推荐）：新模型 PP-OCRv6 small，按本机测速选普通版或量化版</option>
-          <option value="v6">新模型 PP-OCRv6 small</option>
-          <option value="v6q">新模型 PP-OCRv6 small 量化版（整数运算，多数电脑上更快）</option>
-          <option value="v4">旧模型 PP-OCRv4（0.2.6 及以前用的，认字准确率较低）</option>
-        </select>
-        <em className="dim small">只影响之后识别的文件；已识别的可以在下面「重新识别」</em></label>
-      <OCRSpeed />
-      {chk("ocrHalfWhenActive", "你在用电脑时放慢建索引：OCR 只用一半核心，普通文件每处理完一个停一下。一般不需要开：建索引的进程本来就是低优先级，你的程序优先；开了建索引会慢很多")}
-      {chk("pauseOnBattery", "使用电池时暂停 OCR 和格式转换")}
-      {chk("keepAwake", "建立索引期间不让电脑自动睡眠（只在接通电源时；屏幕保护、关闭显示器不受影响；索引完成后自动恢复）")}
+      <h4>后台任务（改了就保存，马上生效）</h4>
+      <div className="dim small">这一部分改了马上保存、马上生效（数字输完后点别处或按回车），不用点页面底部的「保存设置」。</div>
+      {num("workers", "提取并发数", "0 表示 CPU 核心数的一半", true)}
+      {num("timeoutSec", "单个文件提取超时（秒）", "", true)}
+      {num("legacyWorkers", "老格式转换并发数", "只用于内置解析读不了的老格式文件（LibreOffice 转换）", true)}
+      {chk("legacyLOOnly", "老格式只用 LibreOffice 转换，不用内置解析（较慢；仅在内置解析结果有问题时使用）", true)}
+      {chk("ocrEnabled", "识别图片和扫描 PDF 里的文字（OCR）", true)}
+      {num("ocrWorkers", "OCR 进程数", "0 = 自动（推荐）：在这台电脑上用样张实测，选出最快的进程数和每个进程的线程数（通常是每个 CPU 核心一个进程），进程数不超过内存允许的数量。手动设为 N 时，每个进程用「CPU 核心数 ÷ N」个线程", true)}
+      <div className="field">
+        <label className="field inline model-select"><span>认字模型</span>
+          <select value={model} onChange={(e) => saveNow({ ocrModel: e.target.value })}>
+            {MODEL_OPTIONS.map(([v, label]) => {
+              const missing = v !== "" && models.length > 0 && !models.includes(v);
+              return <option key={v} value={v} disabled={missing && v !== model}>{label}{missing ? (v === "win" ? "（这台电脑没有中文识别语言）" : "（这台电脑上没有）") : ""}</option>;
+            })}
+          </select></label>
+        <div className="dim small">{MODEL_OPTIONS.find(([v]) => v === model)?.[2]}只影响之后识别的文件；已识别的可以在下面「重新识别」。</div>
+      </div>
+      <OCRSpeed key={saved.ocrModel ?? ""} />
+      <OCRTest />
+      {chk("ocrHalfWhenActive", "你在用电脑时放慢建索引：OCR 只用一半核心，普通文件每处理完一个停一下。一般不需要开：建索引的进程本来就是低优先级，你的程序优先；开了建索引会慢很多", true)}
+      {chk("pauseOnBattery", "使用电池时暂停 OCR 和格式转换", true)}
+      {chk("keepAwake", "建立索引期间不让电脑自动睡眠（只在接通电源时；屏幕保护、关闭显示器不受影响；索引完成后自动恢复）", true)}
 
       <h4>移动硬盘与网络盘</h4>
       {num("networkScanMin", "网络盘定时扫描间隔（分钟）")}
@@ -601,10 +657,11 @@ function SettingsTab() {
       <Diagnostics />
       <LegacyTest />
 
-      <div className="modal-foot">
+      <div className="modal-foot settings-foot">
         {msg && <span className="flash">{msg}</span>}
-        <button className="primary" onClick={() => api.saveConfig(c).then((n) => {
-          setC(n); setMsg("已保存"); setTimeout(() => setMsg(""), 1500);
+        {dirty && <span className="error small">有修改还没保存</span>}
+        <button className="primary" disabled={!dirty} onClick={() => api.saveConfig(c).then((n) => {
+          setC(n); setSaved(n); flash("已保存");
           api.hotkey().then(setHk).catch(() => {});
         }).catch((e) => setMsg(e.message))}>保存设置</button>
       </div>
@@ -644,7 +701,9 @@ function HotkeyField({ value, onChange, state }: { value: string; onChange: (v: 
   );
 }
 
-const modelNames: Record<string, string> = { v6: "PP-OCRv6 small", v6q: "PP-OCRv6 small 量化版", v4: "PP-OCRv4（旧模型）" };
+const modelNames: Record<string, string> = {
+  v6: "PP-OCRv6 small 普通版", v6q: "PP-OCRv6 small 量化版", v4: "PP-OCRv4（旧模型）", win: "Windows 自带 OCR（实验）",
+};
 const modelName = (m: string) => modelNames[m] ?? m;
 
 // 本机 OCR 测速：每台电脑测一次（便携版换了电脑会重新测），按最快的搭配开进程。
@@ -655,10 +714,10 @@ function OCRSpeed() {
   const load = () => api.ocrBench().then(setSt).catch(() => {});
   useEffect(() => { load(); }, []);
   useEffect(() => {
-    if (!st?.running && !st?.asked) return;
+    if (!st?.running && !st?.asked && !st?.note) return;
     const t = setInterval(load, 1500);
     return () => clearInterval(t);
-  }, [st?.running, st?.asked]);
+  }, [st?.running, st?.asked, st?.note]);
   if (!st || !st.ocr) return null;
   const b = st.bench;
   const plans = b?.plans ?? [];
@@ -666,7 +725,8 @@ function OCRSpeed() {
   const memNote = st.memCap > 0 && st.memCap < st.cores ? `（内存只够开 ${st.memCap} 个 OCR 进程）` : "";
   const models = b?.models ?? [];
   const redo = () => {
-    if (!confirm(`用现在的认字模型（${modelName(st.model)}）重新识别已识别过的 ${st.done} 个文件？\n\n需要的时间和第一次识别差不多（可能要几个小时），期间旧的文字照样能搜到。`)) return;
+    const old = st.reocrUnknown > 0 ? `（其中 ${st.reocrUnknown} 个是 0.2.8 以前识别的，不知道当时用的哪个模型）` : "";
+    if (!confirm(`用现在的认字模型（${modelName(st.model)}）重新识别用别的模型识别过的 ${st.reocr} 个文件${old}？\n\n需要的时间和第一次识别差不多（可能要几个小时），期间旧的文字照样能搜到。`)) return;
     setErr("");
     api.redoOCR().then((r) => { setRedone(r.files); load(); }).catch((e) => setErr(e.message));
   };
@@ -677,17 +737,19 @@ function OCRSpeed() {
           ? `OCR 进程数是手动设置的（现在 ${st.plan}），不测速。`
           : best && b
             ? `本机实测（${new Date(b.at * 1000).toLocaleDateString()}，${b.cpu}，${b.cores} 个物理核心${(b.logical ?? 0) > b.cores ? `、${b.logical} 个逻辑处理器` : ""}）：${best.procs} 个进程 × ${best.threads} 线程最快，约每分钟 ${best.perMin.toFixed(1)} 页 A4 扫描页。现在用 ${st.plan}${memNote}。`
-            : "还没有测过本机的 OCR 速度：第一次有图片要识别时自动测（约 2 分钟，期间普通文件暂停）。"}
+            : "还没有测过本机的 OCR 速度：第一次有图片要识别、扫描完成后自动测（约 3～5 分钟，期间普通文件暂停）。"}
         {` 认字模型：${modelName(st.model)}。`}
       </div>
+      {st.smtNote && <div className="dim small">超线程：{st.smtNote}。</div>}
+      {st.planNote && <div className="dim small">{st.planNote}。</div>}
       {plans.length > 1 && b && (
         <table className="grid">
-          <thead><tr><th>搭配</th><th>每分钟页数</th><th>每个进程的内存</th>{plans.some((p) => p.cpu) && <th title="测速期间识别进程实际平均占用几个逻辑处理器">实际占用 CPU</th>}</tr></thead>
+          <thead><tr><th>搭配</th><th title="各种搭配交替测两轮以上，取中位数">每分钟页数</th><th>每个进程的内存</th>{plans.some((p) => p.cpu) && <th title="测速期间识别进程实际平均占用几个逻辑处理器">实际占用 CPU</th>}</tr></thead>
           <tbody>
             {plans.map((p, i) => (
               <tr key={i}>
                 <td>{p.procs} 个进程 × {p.threads} 线程{p.procs * p.threads > b.budget ? "（用上超线程）" : ""}{i === b.best ? "（最快）" : ""}</td>
-                <td className="num">{p.err ? `失败：${p.err}` : p.perMin.toFixed(1)}</td>
+                <td className="num">{p.err ? `失败：${p.err}` : p.perMin.toFixed(1)}{!p.err && (p.runs?.length ?? 0) > 1 && <span className="dim small">（各轮 {p.runs!.map((x) => x.toFixed(1)).join(" / ")}）</span>}</td>
                 <td className="num">{p.slotMem > 0 ? `${Math.round(p.slotMem / 1048576)} MB` : "—"}</td>
                 {plans.some((x) => x.cpu) && <td className="num">{p.cpu ? `${p.cpu.toFixed(1)} 个逻辑处理器` : "—"}</td>}
               </tr>
@@ -696,24 +758,28 @@ function OCRSpeed() {
         </table>
       )}
       {models.length > 1 && b && (
-        <table className="grid">
-          <thead><tr><th>认字模型</th><th>每分钟页数</th><th title="样张上认出的字和比较搭配时用的模型相同的比例">认出的字相同</th></tr></thead>
-          <tbody>
-            {models.map((x) => (
-              <tr key={x.name}>
-                <td>{modelName(x.name)}{x.name === b.model ? "（选用）" : ""}</td>
-                <td className="num">{x.err ? `失败：${x.err}` : x.perMin.toFixed(1)}</td>
-                <td className="num">{x.err || x.name === b.planModel ? "—" : `${(x.agree ?? 0).toFixed(1)}%`}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <>
+          <table className="grid">
+            <thead><tr><th>认字模型</th><th>每分钟页数</th><th title="样张上认出的字和比较搭配时用的模型相同的比例">样张上认出的字相同</th></tr></thead>
+            <tbody>
+              {models.map((x) => (
+                <tr key={x.name}>
+                  <td>{modelName(x.name)}{x.name === b.model ? "（自动时用）" : ""}</td>
+                  <td className="num">{x.err ? `失败：${x.err}` : x.perMin.toFixed(1)}</td>
+                  <td className="num">{x.err || x.name === b.planModel ? "—" : `${(x.agree ?? 0).toFixed(1)}%`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="dim small">样张是程序生成的、字迹清楚，各个模型都认得差不多（旧模型也可能 100% 相同），不代表认真实扫描件的效果。
+            要比较真实效果，用下面的「OCR 引擎对比」，拿你自己的文件比。</div>
+        </>
       )}
       {b?.cpuNote && <div className="dim small">测速期间：{b.cpuNote}</div>}
       {st.note && <div className="small">{st.note}</div>}
-      {st.done > 0 && (
+      {st.reocr > 0 && (
         <div className="btns">
-          <button onClick={redo}>用现在的认字模型重新识别（{st.done} 个已识别的文件）</button>
+          <button onClick={redo}>用现在的认字模型重新识别（{st.reocr} 个用别的模型识别的文件{st.reocrUnknown > 0 ? `，其中 ${st.reocrUnknown} 个是 0.2.8 以前识别的` : ""}）</button>
           {redone !== null && <span className="dim small">已排队 {redone} 个文件，旧的文字在重新识别完成前照样能搜到</span>}
         </div>
       )}
@@ -725,6 +791,81 @@ function OCRSpeed() {
         </div>
       )}
       {err && <div className="error small">{err}</div>}
+    </div>
+  );
+}
+
+// OCR 引擎对比：抽样 OCR 识别过的文件，用各个认字模型各认一遍，和普通版比。
+function OCRTest() {
+  const [st, setSt] = useState<OCRTestState | null>(null);
+  const [err, setErr] = useState("");
+  const [n, setN] = useState(20);
+  const load = () => api.ocrTest().then(setSt).catch(() => {});
+  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (!st?.running) return;
+    const t = setInterval(load, 1500);
+    return () => clearInterval(t);
+  }, [st?.running]);
+  const r = st?.report;
+  const sign = (x: number) => (x > 0 ? "+" : "") + x.toFixed(2) + "%";
+  return (
+    <div className="field">
+      <div className="dim small">OCR 引擎对比：从 OCR 识别过的文件里随机抽取若干个（PDF 每个最多认 5 页），用这台电脑上的各个认字模型各认一遍，
+        和 PP-OCRv6 普通版比较认出的字和每页用时（都用 1 个线程）。不改动索引；结果会包含在诊断信息里（认出的文字单独存一个文件，发送前可以删掉）。
+        还在建索引时用时会偏长。</div>
+      <div className="btns">
+        {st?.running ? (
+          <>
+            <span>正在比较 {st.done} / {st.total}…{st.note ? `（${st.note}）` : ""}</span>
+            <button onClick={() => api.cancelOCRTest().then(load)}>停止</button>
+          </>
+        ) : (
+          <>
+            <label className="field inline"><span>抽取文件数</span>
+              <input type="number" min={1} max={200} value={n} onChange={(e) => setN(Number(e.target.value))} /></label>
+            <button onClick={() => { setErr(""); api.startOCRTest(n).then(load).catch((e) => setErr(e.message)); }}>开始 OCR 引擎对比</button>
+          </>
+        )}
+      </div>
+      {err && <div className="error small">{err}</div>}
+      {r && (
+        <>
+          <div className="small">{r.canceled ? "上次对比（中途停止）" : "上次对比"}：{new Date(r.startedAt).toLocaleString()}，抽样 {r.sampled} 个文件</div>
+          <table className="grid">
+            <thead><tr><th>认字模型</th><th>认成功</th><th>每页用时</th><th>认出的字</th><th title="和基准模型认出的字相同的比例（按编辑距离）">和 {modelName(r.base)} 相同</th><th>相同不到 90% 的文件</th></tr></thead>
+            <tbody>
+              {(r.models ?? []).map((x) => (
+                <tr key={x.name}>
+                  <td>{modelName(x.name)}{x.name === r.base ? "（基准）" : ""}</td>
+                  <td className="num">{x.files} 个 {x.pages} 页{x.failed > 0 && <span className="error">（失败 {x.failed} 个）</span>}</td>
+                  <td className="num">{x.pages > 0 ? `${(x.msPage / 1000).toFixed(2)} 秒` : "—"}</td>
+                  <td className="num">{x.chars}{x.name !== r.base && x.files > 0 ? `（${sign(x.charsVsBase)}）` : ""}</td>
+                  <td className="num">{x.name === r.base || x.files === 0 ? "—" : `${x.agree.toFixed(2)}%`}</td>
+                  <td className="num">{x.name === r.base ? "—" : x.lowFiles}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {(r.files ?? []).length > 0 && (
+            <details>
+              <summary className="small">各文件和认出的开头一段文字（{r.files!.length} 个）</summary>
+              {r.files!.map((f) => (
+                <div key={f.id} className="small ocrtest-file">
+                  <div><b>{f.path}</b> <span className="dim">（{fmtSize(f.size)}，认了 {f.pages} 页）</span></div>
+                  {(f.items ?? []).map((it) => (
+                    <div key={it.model}>
+                      <span className="badge">{modelName(it.model)}</span>{" "}
+                      {it.err ? <span className="error">失败：{it.err}</span>
+                        : <>{it.chars} 字，{(it.ms / 1000).toFixed(1)} 秒{it.model !== r.base ? `，相同 ${it.agree.toFixed(1)}%` : ""}<div className="dim">{it.sample}</div></>}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </details>
+          )}
+        </>
+      )}
     </div>
   );
 }

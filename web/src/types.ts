@@ -257,7 +257,7 @@ export interface Config {
   hotkey: string;
   ocrEnabled: boolean;
   ocrWorkers: number;
-  ocrModel?: string; // 认字模型：空为自动，或 v6、v6q（量化版）、v4（旧模型）
+  ocrModel?: string; // 认字模型：空为自动，或 v6、v6q（量化版）、v4（旧模型）、win（Windows 自带的 OCR，实验）
   ocrHalfWhenActive: boolean; // 用电脑时放慢建索引（沿用 0.2.5 的名字）
   logLevel: string;
   configVersion: number;
@@ -305,7 +305,8 @@ export interface DiagState {
 export interface OCRBenchPlan {
   procs: number;
   threads: number;
-  perMin: number;
+  perMin: number; // 各轮的中位数
+  runs?: number[] | null; // 各轮的每分钟页数
   slotMem: number;
   cpu?: number; // 测速期间子进程实际平均占用几个逻辑处理器（只有 Windows 量得出来）
   err?: string;
@@ -326,7 +327,10 @@ export interface OCRBenchInfo {
   } | null;
   model: string; // 现在用的认字模型
   models: string[] | null; // 组件里有的认字模型
-  done: number; // OCR 识别过的文件数
+  reocr: number; // 用别的认字模型识别过的文件数（可以用现在的模型重新识别）
+  reocrUnknown: number; // 其中 0.2.8 以前识别的（没记下模型）
+  smtNote?: string; // 为什么用或不用超线程
+  planNote?: string; // 现在的搭配没有直接测过时的说明
   running: boolean;
   asked: boolean;
   note?: string;
@@ -335,6 +339,44 @@ export interface OCRBenchInfo {
   plan: string;
   memCap: number;
   cores: number;
+}
+
+export interface OCRTestModel {
+  name: string;
+  files: number;
+  failed: number;
+  pages: number;
+  chars: number;
+  msPage: number;
+  agree: number; // 和基准模型认出的字相同的比例（%）
+  charsVsBase: number; // 认出的字数比基准多（正）或少（负）百分之几
+  lowFiles: number;
+}
+
+export interface OCRTestFile {
+  id: number;
+  path: string;
+  ext: string;
+  size: number;
+  pages: number;
+  items: { model: string; chars: number; ms: number; agree: number; err?: string; sample?: string }[] | null;
+}
+
+// OCR 引擎对比的进度和最近一次结果。
+export interface OCRTestState {
+  running: boolean;
+  done: number;
+  total: number;
+  note?: string;
+  report?: {
+    startedAt: string;
+    finishedAt: string;
+    sampled: number;
+    canceled?: boolean;
+    base: string;
+    models: OCRTestModel[] | null;
+    files: OCRTestFile[] | null;
+  };
 }
 
 export interface LegacyTestState {

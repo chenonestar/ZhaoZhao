@@ -297,6 +297,18 @@ func (s *Server) routes(mux *http.ServeMux) {
 		s.M.CancelLegacyTest()
 		return ok(), nil
 	}))
+	h("/api/ocrtest", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.M.OCRTest()) })
+	h("/api/ocrtest/start", s.post(func(r *http.Request) (any, error) {
+		var b struct {
+			Files int `json:"files"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		return ok(), s.M.StartOCRTest(b.Files)
+	}))
+	h("/api/ocrtest/cancel", s.post(func(r *http.Request) (any, error) {
+		s.M.CancelOCRTest()
+		return ok(), nil
+	}))
 	// 导出诊断信息在后台进行（大索引库要几十秒）：界面轮询进度，完成后打开所在文件夹
 	h("/api/diagnostics", s.post(func(r *http.Request) (any, error) {
 		var b struct {
