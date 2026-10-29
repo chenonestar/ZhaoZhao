@@ -551,6 +551,9 @@ func truncate(s string, n int) string {
 // 算出实际平均占用几个逻辑处理器（RapidOCR 设了线程数，实际占用可能更多）。
 func poolBench(pool *worker.Pool, opts extract.Options, sample string) ocrBenchRunner {
 	return func(ctx context.Context, model string, pl ocrPlan, pages int) (benchRun, error) {
+		// 每种搭配都用新启动的进程：内存峰值是进程启动以来的，0.2.8 某次 OCR 引擎对比后马上测速，进程刚认过大 PDF，
+		// 6×1 记成每个 857 MB（实际约 455 MB）
+		pool.CloseIdle()
 		pool.SetSize(pl.procs)
 		o := opts
 		o.OCR = o.OCR.WithModel(model)

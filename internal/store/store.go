@@ -876,8 +876,9 @@ ocr_model=CASE WHEN ?2<>'' THEN ?2 ELSE ocr_model END WHERE id=?3`, pages, model
 	return err
 }
 
-// ocrDoneCond 选出 OCR 识别过的顶层文件：识别出文字的，和识别过但没认出字的（排除图片太小跳过的）。
-const ocrDoneCond = `inner='' AND (ocr=1 OR (prio=? AND state=4 AND indexed_at>0 AND err NOT LIKE '%太小%'))`
+// ocrDoneCond 选出 OCR 识别过的顶层文件：识别出文字的，和识别过但没认出字的（排除图片太小跳过的：说明是
+// 「图片尺寸过小，已跳过 OCR」，0.2.8 只排除了写「太小」的，某位用户 927 张太小的图片也被重新排队）。
+const ocrDoneCond = `inner='' AND (ocr=1 OR (prio=? AND state=4 AND indexed_at>0 AND err NOT LIKE '%过小%' AND err NOT LIKE '%太小%'))`
 
 // CountOCRDone 返回 OCR 识别过、用的不是认字模型 model 的文件数（prioOCR 是 OCR 队列的 prio），其中 unknown 个
 // 是 0.2.8 以前识别的（没记下模型）。

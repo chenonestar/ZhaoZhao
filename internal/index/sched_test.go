@@ -453,8 +453,11 @@ func TestReOCR(t *testing.T) {
 	}
 	// 0.2.8 以前识别的：没记下模型，算作要重新识别
 	e.m.DB.W.Exec(`UPDATE files SET ocr_model='' WHERE name='扫描.png'`)
+	// 太小跳过的图片（「图片尺寸过小，已跳过 OCR」）不算识别过
+	e.m.DB.W.Exec(`INSERT INTO files(root_id,volume_id,rel_path,inner,name,ext,kind,size,mtime,state,err,hash,text_len,ocr,meta,prio,indexed_at)
+SELECT root_id,volume_id,'小图.png','','小图.png','png','',100,1,4,?,'',0,0,'',?,1 FROM files WHERE name='扫描.png'`, extract.ErrTooSmall, prioOCR)
 	if n, unknown, _ := e.m.DB.CountOCRDone(prioOCR, model); n != 1 || unknown != 1 {
-		t.Fatalf("以前识别的文件应为 1 个：%d %d", n, unknown)
+		t.Fatalf("以前识别的文件应为 1 个（太小的图片不算）：%d %d", n, unknown)
 	}
 	n, err := e.m.ReOCR()
 	if err != nil || n != 1 {

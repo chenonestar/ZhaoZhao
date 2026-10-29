@@ -435,7 +435,16 @@ func (m *Manager) runOCRBench() bool {
 	m.ocrBenchLocked()
 	key, mc := m.ocr.key, m.ocr.machine
 	m.ocr.mu.Unlock()
+	// 普通文件、老格式的空闲进程也结束，放出它们占着的内存。可用内存按至少总内存的一半算：测速时手头的大文件
+	// 可能还在解析（最多等 1 分钟），0.2.8 某次测速时可用内存只够 2 个 OCR 进程，常用的 6×1、3×2 都没测到，
+	// 之后内存够 11 个进程时只能按推算的开
+	for _, p := range []*worker.Pool{m.Pool, m.LegacyPool, m.OCRPool} {
+		if p != nil {
+			p.CloseIdle()
+		}
+	}
 	total, avail := sysinfo.Memory()
+	avail = max(avail, total/2)
 	cands := ocrBenchCandidates(cores, mc.Logical, nextMemCap(0, ocrMemSlots(total, avail, ocrSlotMemDefault, m.ocrLive())))
 	fail := func(why string) bool {
 		m.ocr.mu.Lock()

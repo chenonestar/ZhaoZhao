@@ -211,6 +211,13 @@ func TestPoolReuseIdleAndResize(t *testing.T) {
 	if _, live, size := p.Stats(); live > 1 || size != 1 {
 		t.Fatalf("缩小上限后应结束多余的空闲子进程: live=%d size=%d", live, size)
 	}
+	p.CloseIdle()
+	if _, live, _ := p.Stats(); live != 0 {
+		t.Fatalf("CloseIdle 后不应有空闲子进程: %d", live)
+	}
+	if r := p.Extract(context.Background(), f, "txt", extract.DefaultOptions(), 10*time.Second); r.Status != doc.StatusOK {
+		t.Fatalf("CloseIdle 后应能再启动: %+v", r)
+	}
 	// 闲置回收
 	p.mu.Lock()
 	p.IdleTimeout = time.Millisecond

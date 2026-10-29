@@ -192,6 +192,21 @@ func (p *Pool) SetSize(n int) {
 	}
 }
 
+// CloseIdle 结束所有空闲的子进程（OCR 测速前：放出它们占着的内存，测速用新启动的进程，量出的内存峰值不受
+// 之前处理过的大文件影响）。
+func (p *Pool) CloseIdle() {
+	p.mu.Lock()
+	old := p.idle
+	p.idle = nil
+	p.mu.Unlock()
+	var wg sync.WaitGroup
+	for _, pr := range old {
+		wg.Add(1)
+		go func() { defer wg.Done(); p.retire(pr, 15*time.Second) }()
+	}
+	wg.Wait()
+}
+
 // Stats 返回正在使用的子进程数、已启动的子进程数和上限。
 func (p *Pool) Stats() (busy, live, size int) {
 	p.mu.Lock()
