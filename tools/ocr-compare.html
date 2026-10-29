@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OCR 对比分析</title>
+<!--
+  找找「OCR 引擎对比」的本地分析工具。用浏览器打开本文件，选择诊断信息里的
+  「OCR引擎对比-认出的文字（含文件内容）.txt」，在本机计算各认字模型认出的文字和基准模型（PP-OCRv6 普通版）的差别，
+  只显示统计数字，不显示、不上传文件内容。本页不加载任何外部资源，可以断网使用。
+-->
+<style>
+  :root { --bg: #f6f7f9; --panel: #fff; --text: #1d2129; --dim: #6b7280; --line: #e3e6eb; --accent: #2563eb; --bad: #c2410c; --ok: #15803d; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14161a; --panel: #1c1f25; --text: #e6e8ec; --dim: #8b93a1; --line: #2c313a; --accent: #60a5fa; --bad: #fb923c; --ok: #4ade80; }
+  }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.6 "Microsoft YaHei", system-ui, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 8px 0; }
+  h2 { font-size: 16px; margin: 20px 0 8px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin: 10px 0; }
+  .dim { color: var(--dim); }
+  .small { font-size: 12.5px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: right; white-space: nowrap; }
+  th:first-child, td:first-child, td.l, th.l { text-align: left; }
+  .scroll { overflow-x: auto; }
+  .bad { color: var(--bad); }
+  .ok { color: var(--ok); }
+  textarea { width: 100%; box-sizing: border-box; height: 220px; font: 12px Consolas, monospace; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 14px; }
+  input[type=file] { font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>OCR 对比分析</h1>
+  <div class="panel">
+    <div>选择诊断信息里的 <b>「OCR引擎对比-认出的文字（含文件内容）.txt」</b>：</div>
+    <p><input type="file" id="file" accept=".txt"></p>
+    <div class="dim small">只在这台电脑上计算，页面不联网、不上传任何内容；结果里只有数字和文件编号（#123），没有文件内容。
+      算完后点「复制结果」，把复制的文字发给开发者即可。</div>
+  </div>
+  <div id="out"></div>
+</main>
+<script>
+"use strict";
+// ---- 解析 ----
+// 文件格式（找找 OCRTestText）：「#编号 路径（大小，认了 N 页） ｜ 模型 N 字 … ｜ …」，下面每个模型一行「  【模型】开头一段文字」。
+function parse(text) {
+  text = text.replace(/^﻿/, "").replace(/\r/g, "");
+  const files = [];
+  let cur = null;
+  for (const line of text.split("\n")) {
+    const head = line.match(/^#(\d+) .*（[^）]*认了 (\d+) 页）/);
+    if (head) {
+      cur = { id: head[1], pages: +head[2], samples: {}, order: [], err: {} };
+      // 头一行里的各模型：基准模型没有「相同」
+      for (const part of line.split(" ｜ ").slice(1)) {
+        const m = part.match(/^(.*?) (失败：|\d+ 字)/);
+        if (!m) continue;
+        cur.order.push(m[1]);
+        if (m[2] === "失败：") cur.err[m[1]] = true;
+        if (!cur.base && m[2] !== "失败：" && !/相同 [\d.]+%/.test(part)) cur.base = m[1];
+      }
+      files.push(cur);
+      continue;
+    }
+    const s = line.match(/^  【(.+?)】(.*)$/);
+    if (s && cur) cur.samples[s[1]] = s[2];
+  }
+  return files;
+}
+
+// ---- 计算 ----
+const isWord = (c) => /[\p{L}\p{N}]/u.test(c);
+const isHan = (c) => /\p{Script=Han}/u.test(c);
+const FULL_PUNCT = "，。：；！？（）【】《》、“”‘’";
+const HALF_PUNCT = ",.:;!?()[]<>\"'";
+
+function clean(s) {
+  const truncated = s.endsWith("…");
+  if (truncated) s = s.slice(0, -1);
+  return { chars: [...s.replace(/\s+/g, "")], truncated };
+}
+
+// 编辑距离算出的相同比例（和找找里的「相同的字」算法一样，只是这里只有开头一段）
+function editAgree(a, b) {
+  const n = Math.max(a.length, b.length);
+  if (!n) return 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j), cur = new Array(b.length + 1);
+  for (let i = 1; i <= a.length; i++) {
+    cur[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1), prev[j] + 1, cur[j - 1] + 1);
+    }
+    [prev, cur] = [cur, prev];
+  }
+  return 1 - prev[b.length] / n;
+}
+
+// 相邻两字（只在连续的字、数字内部取，不跨标点）的多重集合
+function bigrams(chars) {
+  const m = new Map();
+  for (let i = 1; i < chars.length; i++) {
+    const a = chars[i - 1], b = chars[i];
+    if (isWord(a) && isWord(b)) {
+      const k = a.toLowerCase() + b.toLowerCase();
+      m.set(k, (m.get(k) || 0) + 1);
+    }
+  }
+  return m;
+}
+// ref 的相邻两字有多少比例在 got 里（按次数）
+function coverage(ref, got) {
+  let total = 0, hit = 0;
+  for (const [k, n] of ref) { total += n; hit += Math.min(n, got.get(k) || 0); }
+  return total ? hit / total : 1;
+}
+// 不看顺序的单字重合（不计标点）
+function charOverlap(a, b) {
+  const ca = new Map(), cb = new Map();
+  for (const c of a) if (isWord(c)) ca.set(c, (ca.get(c) || 0) + 1);
+  for (const c of b) if (isWord(c)) cb.set(c, (cb.get(c) || 0) + 1);
+  let common = 0, na = 0, nb = 0;
+  for (const [, n] of ca) na += n;
+  for (const [, n] of cb) nb += n;
+  for (const [k, n] of ca) common += Math.min(n, cb.get(k) || 0);
+  return Math.max(na, nb) ? common / Math.max(na, nb) : 1;
+}
+function kinds(chars) {
+  const k = { han: 0, digit: 0, latin: 0, full: 0, half: 0, fullwidthAlnum: 0 };
+  for (const c of chars) {
+    if (isHan(c)) k.han++;
+    else if (/[0-9]/.test(c)) k.digit++;
+    else if (/[A-Za-z]/.test(c)) k.latin++;
+    else if (/[０-９Ａ-Ｚａ-ｚ]/.test(c)) k.fullwidthAlnum++;
+    if (FULL_PUNCT.includes(c)) k.full++;
+    else if (HALF_PUNCT.includes(c)) k.half++;
+  }
+  return k;
+}
+// 去掉标点再算编辑距离：看标点（全角、半角）占了多少差别
+const noPunct = (chars) => chars.filter(isWord);
+
+function verdict(r) {
+  if (r.cover >= 0.85 && r.coverBack >= 0.85 && r.edit < 0.7) return "多半是顺序不同";
+  if (r.cover >= 0.85 && r.edit >= 0.7) return "基本一致";
+  if (r.cover < 0.6) return r.lenRatio > 1.3 ? "内容差别大（对方多出很多）" : "内容差别大（认错或漏认）";
+  return "部分不同";
+}
+
+function analyze(files) {
+  const rows = [];
+  for (const f of files) {
+    if (!f.base || f.samples[f.base] === undefined) continue;
+    const base = clean(f.samples[f.base]);
+    const bb = bigrams(base.chars), bk = kinds(base.chars);
+    for (const model of f.order) {
+      if (model === f.base || f.err[model] || f.samples[model] === undefined) continue;
+      const o = clean(f.samples[model]);
+      const ob = bigrams(o.chars), ok = kinds(o.chars);
+      const r = {
+        id: f.id, pages: f.pages, model, base: f.base,
+        truncated: base.truncated || o.truncated,
+        edit: editAgree(base.chars, o.chars),
+        editNoPunct: editAgree(noPunct(base.chars), noPunct(o.chars)),
+        cover: coverage(bb, ob), coverBack: coverage(ob, bb),
+        overlap: charOverlap(base.chars, o.chars),
+        lenRatio: base.chars.length ? o.chars.length / base.chars.length : 0,
+        bk, ok,
+      };
+      r.verdict = verdict(r);
+      rows.push(r);
+    }
+  }
+  return rows;
+}
+
+// ---- 输出 ----
+const pct = (x) => (x * 100).toFixed(1) + "%";
+function summarize(rows) {
+  const by = new Map();
+  for (const r of rows) {
+    if (!by.has(r.model)) by.set(r.model, []);
+    by.get(r.model).push(r);
+  }
+  const out = [];
+  for (const [model, rs] of by) {
+    const avg = (f) => rs.reduce((s, r) => s + f(r), 0) / rs.length;
+    const cnt = (v) => rs.filter((r) => r.verdict === v).length;
+    const sum = (f) => rs.reduce((s, r) => s + f(r), 0);
+    out.push({
+      model, base: rs[0].base, n: rs.length,
+      edit: avg((r) => r.edit), editNoPunct: avg((r) => r.editNoPunct), cover: avg((r) => r.cover), coverBack: avg((r) => r.coverBack),
+      overlap: avg((r) => r.overlap),
+      order: cnt("多半是顺序不同"), same: cnt("基本一致"), diff: rs.filter((r) => r.verdict.startsWith("内容差别大")).length, part: cnt("部分不同"),
+      fullB: sum((r) => r.bk.full), halfB: sum((r) => r.bk.half), fullO: sum((r) => r.ok.full), halfO: sum((r) => r.ok.half),
+      fwO: sum((r) => r.ok.fullwidthAlnum), fwB: sum((r) => r.bk.fullwidthAlnum),
+    });
+  }
+  return out;
+}
+
+function text(rows, sums) {
+  const L = [];
+  L.push("OCR 对比分析结果（只有统计数字；每个文件只比较各模型认出的开头约 300 字）");
+  for (const s of sums) {
+    L.push(`${s.model} 对比 ${s.base}：${s.n} 个文件；按顺序比相同 ${pct(s.edit)}（去掉标点 ${pct(s.editNoPunct)}）；不看顺序：基准的内容对方有 ${pct(s.cover)}，对方的内容基准有 ${pct(s.coverBack)}，单字重合 ${pct(s.overlap)}；` +
+      `判断：基本一致 ${s.same}、多半是顺序不同 ${s.order}、部分不同 ${s.part}、内容差别大 ${s.diff}；标点 全角/半角：基准 ${s.fullB}/${s.halfB}，对方 ${s.fullO}/${s.halfO}；全角数字字母：基准 ${s.fwB}，对方 ${s.fwO}`);
+  }
+  L.push("");
+  L.push("各文件：编号 模型 页数 | 按顺序相同 去标点后 | 基准→对方 对方→基准 单字重合 | 长度比 | 截断 | 判断");
+  for (const r of rows) {
+    L.push(`#${r.id} ${r.model} ${r.pages}页 | ${pct(r.edit)} ${pct(r.editNoPunct)} | ${pct(r.cover)} ${pct(r.coverBack)} ${pct(r.overlap)} | ${r.lenRatio.toFixed(2)} | ${r.truncated ? "是" : "否"} | ${r.verdict}`);
+  }
+  return L.join("\n");
+}
+
+function render(rows) {
+  const out = document.getElementById("out");
+  if (!rows.length) {
+    out.innerHTML = '<div class="panel bad">没有找到可以比较的内容。请确认选的是「OCR引擎对比-认出的文字（含文件内容）.txt」。</div>';
+    return;
+  }
+  const sums = summarize(rows);
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  let h = '<h2>各模型和基准比较</h2><div class="panel scroll"><table><tr><th class="l">模型</th><th>文件</th><th>按顺序相同</th><th>去掉标点</th>' +
+    '<th title="基准认出的相邻两字，对方也认出了多少">基准→对方</th><th title="对方认出的相邻两字，基准也认出了多少">对方→基准</th><th>单字重合</th>' +
+    '<th>基本一致</th><th>顺序不同</th><th>部分不同</th><th>内容差别大</th></tr>';
+  for (const s of sums) {
+    h += `<tr><td>${esc(s.model)}</td><td>${s.n}</td><td>${pct(s.edit)}</td><td>${pct(s.editNoPunct)}</td><td>${pct(s.cover)}</td><td>${pct(s.coverBack)}</td>` +
+      `<td>${pct(s.overlap)}</td><td>${s.same}</td><td>${s.order}</td><td>${s.part}</td><td>${s.diff}</td></tr>`;
+  }
+  h += `</table><div class="dim small">基准：${esc(sums[0].base)}。「按顺序相同」和找找里的「相同的字」算法一样；「基准→对方」「对方→基准」不看先后顺序，` +
+    `两个都高而「按顺序相同」低，说明认出的字差不多、只是先后顺序不同。每个文件只比较开头约 300 字：顺序不同时，两边开头的 300 字可能来自页面的不同部分，不看顺序的比例也会偏低。</div></div>`;
+  h += '<h2>结果文字（复制后发给开发者）</h2><div class="panel"><textarea id="res" readonly></textarea><p><button id="copy">复制结果</button> <span id="msg" class="ok small"></span></p></div>';
+  h += '<h2>各文件</h2><div class="panel scroll"><table><tr><th class="l">编号</th><th class="l">模型</th><th>页数</th><th>按顺序相同</th><th>去掉标点</th><th>基准→对方</th><th>对方→基准</th><th>单字重合</th><th>长度比</th><th class="l">判断</th></tr>';
+  for (const r of rows) {
+    const cls = r.verdict.startsWith("内容差别大") ? "bad" : r.verdict === "基本一致" ? "ok" : "";
+    h += `<tr><td>#${r.id}</td><td class="l">${esc(r.model)}</td><td>${r.pages}</td><td>${pct(r.edit)}</td><td>${pct(r.editNoPunct)}</td><td>${pct(r.cover)}</td><td>${pct(r.coverBack)}</td>` +
+      `<td>${pct(r.overlap)}</td><td>${r.lenRatio.toFixed(2)}</td><td class="l ${cls}">${r.verdict}</td></tr>`;
+  }
+  h += "</table></div>";
+  out.innerHTML = h;
+  document.getElementById("res").value = text(rows, sums);
+  document.getElementById("copy").onclick = () => {
+    const t = document.getElementById("res");
+    t.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) {}
+    if (navigator.clipboard) navigator.clipboard.writeText(t.value).then(() => {}, () => {});
+    document.getElementById("msg").textContent = ok || navigator.clipboard ? "已复制" : "请手动全选复制";
+  };
+}
+
+document.getElementById("file").addEventListener("change", (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => render(analyze(parse(new TextDecoder("utf-8").decode(rd.result))));
+  rd.readAsArrayBuffer(f);
+});
+</script>
+</body>
+</html>
