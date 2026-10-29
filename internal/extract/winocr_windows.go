@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"math"
 	"runtime"
 	"sync"
 	"syscall"
@@ -54,6 +55,7 @@ const (
 	vResultLines           = 6  // IOcrResult::get_Lines
 	vLineWords             = 6  // IOcrLine::get_Words
 	vWordText              = 7  // IOcrWord::get_Text
+	vWordBoundingRect      = 6  // IOcrWord::get_BoundingRect
 	vVectorGetAt           = 6  // IVectorView<T>::GetAt
 	vVectorSize            = 7  // IVectorView<T>::get_Size
 	pixelFormatBgra8       = 87 // BitmapPixelFormat::Bgra8
@@ -327,13 +329,14 @@ func (e *winOCREngine) recognize(o *winOCRObjects, img image.Image) (string, err
 	return resultText(res)
 }
 
-// resultText 按行取出识别结果。中文的每个字（或词）是一个「词」，词之间不加空格；两边都是字母、数字时加一个空格。
+// resultText 取出识别结果，按位置排好行（orderLines）。中文的每个字（或词）是一个「词」，词之间不加空格；两边都是
+// 字母、数字时加一个空格。
 func resultText(res *comObject) (string, error) {
 	lines, err := vectorItems(res, vResultLines)
 	if err != nil {
 		return "", err
 	}
-	var out []byte
+	var out []winLine
 	for _, line := range lines {
 		words, err := vectorItems(line, vLineWords)
 		comRelease(line)
@@ -341,18 +344,27 @@ func resultText(res *comObject) (string, error) {
 			return "", err
 		}
 		var ws []string
+		l := winLine{x0: math.MaxFloat64, y0: math.MaxFloat64, x1: -math.MaxFloat64, y1: -math.MaxFloat64}
 		for _, w := range words {
 			var hs uintptr
 			if !failed(comCall(w, vWordText, uintptr(unsafe.Pointer(&hs)))) {
 				ws = append(ws, hstringText(hs))
 				freeHstring(hs)
 			}
+			var r struct{ X, Y, W, H float32 } // Windows.Foundation.Rect
+			if !failed(comCall(w, vWordBoundingRect, uintptr(unsafe.Pointer(&r)))) {
+				l.x0, l.y0 = min(l.x0, float64(r.X)), min(l.y0, float64(r.Y))
+				l.x1, l.y1 = max(l.x1, float64(r.X+r.W)), max(l.y1, float64(r.Y+r.H))
+			}
 			comRelease(w)
 		}
-		out = append(out, joinWords(ws)...)
-		out = append(out, '\n')
+		if l.x1 < l.x0 { // 取不到位置：放在最后，保持原来的顺序
+			l.x0, l.y0, l.x1, l.y1 = 0, math.MaxFloat32, 0, math.MaxFloat32
+		}
+		l.text = joinWords(ws)
+		out = append(out, l)
 	}
-	return string(out), nil
+	return orderLines(out), nil
 }
 
 // vectorItems 调用 o 的第 getter 个方法取一个 IVectorView，返回其中的全部对象（调用方负责释放）。

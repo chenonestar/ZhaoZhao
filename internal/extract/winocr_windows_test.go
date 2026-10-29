@@ -54,6 +54,14 @@ func TestWinOCR(t *testing.T) {
 	if n := strings.Count(text, "\n"); n != 2 {
 		t.Errorf("应为 2 行，实际 %d 行", n)
 	}
+	// 转了方向的页：转回来再认；正着的横向页不转
+	rec := func(i image.Image) (string, error) { return e.Recognize(i, time.Minute) }
+	if text, deg, err := winOCRBest(rotateGray(img, 90), rec); err != nil || deg != 270 || !strings.Contains(text, "quick brown fox") {
+		t.Errorf("转了 90° 的图：转 %d° 认出 %q %v", deg, text, err)
+	}
+	if text, deg, err := winOCRBest(img, rec); err != nil || deg != 0 || !strings.Contains(text, "quick brown fox") {
+		t.Errorf("正着的横向图：转 %d° 认出 %q %v", deg, text, err)
+	}
 	// 超过最大边长的图片先缩小再认，不报错
 	big := image.NewGray(image.Rect(0, 0, e.maxDim+500, 300))
 	draw.Draw(big, big.Bounds(), image.White, image.Point{}, draw.Src)

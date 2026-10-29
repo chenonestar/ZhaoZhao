@@ -333,12 +333,7 @@ func ocrImageWin(c OCRConfig, imgPath string) (string, error) {
 	killOCR(ocrCur)
 	ocrCur = nil
 	ocrMu.Unlock()
-	f, err := os.Open(imgPath)
-	if err != nil {
-		return "", err
-	}
-	img, _, err := image.Decode(bufio.NewReaderSize(f, 1<<20))
-	f.Close()
+	img, err := decodeForWinOCR(imgPath)
 	if err != nil {
 		return "", fmt.Errorf("OCR 读图失败：%v", err)
 	}
@@ -346,11 +341,36 @@ func ocrImageWin(c OCRConfig, imgPath string) (string, error) {
 	if sec <= 0 {
 		sec = 120
 	}
-	text, err := winOCRImage(img, time.Duration(sec)*time.Second)
+	timeout := time.Duration(sec) * time.Second
+	text, deg, err := winOCRBest(img, func(i image.Image) (string, error) { return winOCRImage(i, timeout) })
 	if err != nil && !errors.Is(err, errOCRTimeout) {
 		err = fmt.Errorf("OCR 识别失败（%v）", err)
 	}
+	if deg != 0 {
+		logx.Debugf("Windows OCR：%s 转 %d° 后认出的字更多", logx.P(imgPath), deg)
+	}
 	return text, err
+}
+
+// decodeForWinOCR 读出图片文件。Go 的解码器解不开时（某些 JPEG，OCR 组件能读）改用 Windows 自带的解码组件。
+func decodeForWinOCR(p string) (image.Image, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	img, _, err := image.Decode(bufio.NewReaderSize(f, 1<<20))
+	f.Close()
+	if err == nil {
+		return img, nil
+	}
+	var got *image.Gray
+	errStop := errors.New("stop")
+	if werr := wicDecode(p, 0, func(i, n int, g *image.Gray) error { got = g; return errStop }); got != nil {
+		return got, nil
+	} else if werr != nil && !errors.Is(werr, errNoWIC) {
+		return nil, fmt.Errorf("%v；Windows 也解不开：%v", err, werr)
+	}
+	return nil, err
 }
 
 var (
