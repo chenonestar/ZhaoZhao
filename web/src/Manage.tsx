@@ -833,7 +833,9 @@ function OCRTest() {
         <>
           <div className="small">{r.canceled ? "上次对比（中途停止）" : "上次对比"}：{new Date(r.startedAt).toLocaleString()}，抽样 {r.sampled} 个文件</div>
           <table className="grid">
-            <thead><tr><th>认字模型</th><th>认成功</th><th>每页用时</th><th>认出的字</th><th title="和基准模型认出的字相同的比例（按编辑距离）">和 {modelName(r.base)} 相同</th><th>相同不到 90% 的文件</th></tr></thead>
+            <thead><tr><th>认字模型</th><th>认成功</th><th>每页用时</th><th>认出的字</th><th title="和基准模型认出的字相同的比例（按编辑距离，先后顺序不同也算不同）">按顺序相同</th>
+              <th title="不看先后顺序：基准认出的内容（相邻两字）它认到了多少。全文索引按相邻两字建，差不多就是基准能搜到的它也能搜到的比例">基准的内容它有</th>
+              <th title="不看先后顺序：它认出的内容基准也有多少（低说明多认出了基准没有的东西，可能是乱码）">它的内容基准有</th><th>相同不到 90% 的文件</th><th>疑似乱码</th></tr></thead>
             <tbody>
               {(r.models ?? []).map((x) => (
                 <tr key={x.name}>
@@ -842,7 +844,10 @@ function OCRTest() {
                   <td className="num">{x.pages > 0 ? `${(x.msPage / 1000).toFixed(2)} 秒` : "—"}</td>
                   <td className="num">{x.chars}{x.name !== r.base && x.files > 0 ? `（${sign(x.charsVsBase)}）` : ""}</td>
                   <td className="num">{x.name === r.base || x.files === 0 ? "—" : `${x.agree.toFixed(2)}%`}</td>
+                  <td className="num">{x.name === r.base || x.files === 0 || x.cover === undefined ? "—" : `${x.cover.toFixed(1)}%`}</td>
+                  <td className="num">{x.name === r.base || x.files === 0 || x.coverBack === undefined ? "—" : `${x.coverBack.toFixed(1)}%`}</td>
                   <td className="num">{x.name === r.base ? "—" : x.lowFiles}</td>
+                  <td className="num">{x.name === r.base ? "—" : x.garbled ?? 0}</td>
                 </tr>
               ))}
             </tbody>
@@ -857,7 +862,9 @@ function OCRTest() {
                     <div key={it.model}>
                       <span className="badge">{modelName(it.model)}</span>{" "}
                       {it.err ? <span className="error">失败：{it.err}</span>
-                        : <>{it.chars} 字，{(it.ms / 1000).toFixed(1)} 秒{it.model !== r.base ? `，相同 ${it.agree.toFixed(1)}%` : ""}<div className="dim">{it.sample}</div></>}
+                        : <>{it.chars} 字，{(it.ms / 1000).toFixed(1)} 秒{it.model !== r.base ? `，按顺序相同 ${it.agree.toFixed(1)}%` : ""}
+                          {it.model !== r.base && it.cover !== undefined ? `，不看顺序 ${it.cover.toFixed(1)}% / ${(it.coverBack ?? 0).toFixed(1)}%` : ""}
+                          {it.garbled ? <span className="error">，疑似乱码</span> : null}<div className="dim">{it.sample}</div></>}
                     </div>
                   ))}
                 </div>

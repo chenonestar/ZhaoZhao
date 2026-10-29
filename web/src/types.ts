@@ -351,6 +351,9 @@ export interface OCRTestModel {
   agree: number; // 和基准模型认出的字相同的比例（%）
   charsVsBase: number; // 认出的字数比基准多（正）或少（负）百分之几
   lowFiles: number;
+  cover: number; // 不看顺序：基准认出的内容它认到了多少（%）
+  coverBack: number; // 不看顺序：它认出的内容基准也有多少（%）
+  garbled: number; // 疑似认出乱码的文件数
 }
 
 export interface OCRTestFile {
@@ -359,7 +362,7 @@ export interface OCRTestFile {
   ext: string;
   size: number;
   pages: number;
-  items: { model: string; chars: number; ms: number; agree: number; err?: string; sample?: string }[] | null;
+  items: { model: string; chars: number; ms: number; agree: number; cover?: number; coverBack?: number; garbled?: boolean; err?: string; sample?: string }[] | null;
 }
 
 // OCR 引擎对比的进度和最近一次结果。

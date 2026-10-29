@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/chenonestar/zhaozhao/internal/doc"
 	"github.com/chenonestar/zhaozhao/internal/extract"
@@ -38,6 +39,12 @@ type OCRTestModel struct {
 	Agree       float64 `json:"agree"`
 	CharsVsBase float64 `json:"charsVsBase"`
 	LowFiles    int     `json:"lowFiles"` // 和基准相同的不到 90% 的文件数
+	// 不看先后顺序的比较（%，按相邻两字算，整份文字，按字数加权平均）：Cover 是基准认出的内容它认到了多少，
+	// CoverBack 是它认出的内容基准也有多少。全文索引就是按相邻两字建的，Cover 差不多就是「基准能搜到的它也能搜到」
+	// 的比例。0.2.8 的「相同的字」按先后顺序比，Windows OCR 读表格的顺序不同，比出来只有一半，分不清是顺序不同还是认错。
+	Cover     float64 `json:"cover"`
+	CoverBack float64 `json:"coverBack"`
+	Garbled   int     `json:"garbled"` // 疑似认出乱码的文件数
 }
 
 // OCRTestFile 是一个抽样文件在各个模型上的结果。
@@ -52,12 +59,15 @@ type OCRTestFile struct {
 
 // OCRTestFileItem 是一个文件用一个模型认的结果。Sample 是开头的一段文字（只在界面和诊断信息里另存的文件中显示）。
 type OCRTestFileItem struct {
-	Model  string  `json:"model"`
-	Chars  int     `json:"chars"`
-	Ms     int64   `json:"ms"`
-	Agree  float64 `json:"agree"`
-	Err    string  `json:"err,omitempty"`
-	Sample string  `json:"sample,omitempty"`
+	Model     string  `json:"model"`
+	Chars     int     `json:"chars"`
+	Ms        int64   `json:"ms"`
+	Agree     float64 `json:"agree"`
+	Cover     float64 `json:"cover"`
+	CoverBack float64 `json:"coverBack"`
+	Garbled   bool    `json:"garbled,omitempty"`
+	Err       string  `json:"err,omitempty"`
+	Sample    string  `json:"sample,omitempty"`
 }
 
 // OCRTestReport 是一次 OCR 引擎对比的结果。
@@ -281,9 +291,9 @@ func (m *Manager) runOCRTest(ctx context.Context, samples []ocrPick, models []st
 	}
 	r.Canceled = ctx.Err() != nil
 	type acc struct {
-		ms                     int64
-		agreeW, weight         float64
-		chars, baseChars, both int
+		ms                            int64
+		agreeW, coverW, backW, weight float64
+		chars, baseChars, both        int
 	}
 	accs := map[string]*acc{}
 	rows := map[string]*OCRTestModel{}
@@ -318,8 +328,14 @@ func (m *Manager) runOCRTest(ctx context.Context, samples []ocrPick, models []st
 			if hasBase && base.err == "" {
 				bc := countChars(base.text)
 				it.Agree = agreementCapped(g.text, base.text)
+				it.Cover, it.CoverBack = 100*bigramCoverage(base.text, g.text), 100*bigramCoverage(g.text, base.text)
+				if it.Garbled = garbled(g.text, base.text, it.Cover, it.CoverBack); it.Garbled {
+					row.Garbled++
+				}
 				w := float64(max(bc, chars, 1))
 				a.agreeW += it.Agree * w
+				a.coverW += it.Cover * w
+				a.backW += it.CoverBack * w
 				a.weight += w
 				a.chars += chars
 				a.baseChars += bc
@@ -338,7 +354,7 @@ func (m *Manager) runOCRTest(ctx context.Context, samples []ocrPick, models []st
 			row.MsPage = float64(a.ms) / float64(row.Pages)
 		}
 		if a.weight > 0 {
-			row.Agree = a.agreeW / a.weight
+			row.Agree, row.Cover, row.CoverBack = a.agreeW/a.weight, a.coverW/a.weight, a.backW/a.weight
 		}
 		if a.baseChars > 0 {
 			row.CharsVsBase = 100 * float64(a.chars-a.baseChars) / float64(a.baseChars)
@@ -347,6 +363,33 @@ func (m *Manager) runOCRTest(ctx context.Context, samples []ocrPick, models []st
 	}
 	r.FinishedAt = time.Now()
 	return r
+}
+
+// garbled 判断 text 是不是认出了乱码：基准认出的大多是汉字，它的汉字却不到一半；或者认出了不少字，和基准
+// 却几乎没有共同的内容（0.2.8 某位用户的一个文件，Windows OCR 认出的字比 PP-OCRv6 还多，相同的却不到 1%）。
+func garbled(text, base string, cover, back float64) bool {
+	if countChars(text) < 50 {
+		return false
+	}
+	return (hanRatio(text) < 0.5 && hanRatio(base) >= 0.7) || (cover < 10 && back < 10)
+}
+
+// hanRatio 返回不计空白时汉字所占的比例。
+func hanRatio(s string) float64 {
+	n, han := 0, 0
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		n++
+		if unicode.Is(unicode.Han, r) {
+			han++
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return float64(han) / float64(n)
 }
 
 // countChars 返回不计空白的字数。
@@ -399,7 +442,11 @@ func OCRTestText(r *OCRTestReport, samples bool) string {
 			fmt.Fprintf(&b, "%s：认成功 %d 个文件 %d 页，失败 %d 个；每页 %.2f 秒；认出 %d 字", extract.OCRModelName(x.Name), x.Files, x.Pages, x.Failed,
 				x.MsPage/1000, x.Chars)
 			if x.Name != r.Base {
-				fmt.Fprintf(&b, "，比 %s %+.2f%%，相同的字 %.2f%%，相同不到 90%% 的文件 %d 个", extract.OCRModelName(r.Base), x.CharsVsBase, x.Agree, x.LowFiles)
+				fmt.Fprintf(&b, "，比 %s %+.2f%%，相同的字 %.2f%%，相同不到 90%% 的文件 %d 个；不看顺序：%s认出的它认到 %.2f%%，它认出的%s也有 %.2f%%",
+					extract.OCRModelName(r.Base), x.CharsVsBase, x.Agree, x.LowFiles, extract.OCRModelName(r.Base), x.Cover, extract.OCRModelName(r.Base), x.CoverBack)
+				if x.Garbled > 0 {
+					fmt.Fprintf(&b, "；疑似认出乱码 %d 个文件", x.Garbled)
+				}
 			}
 			b.WriteString("\n")
 		}
@@ -415,7 +462,11 @@ func OCRTestText(r *OCRTestReport, samples bool) string {
 				case it.Model == r.Base:
 					fmt.Fprintf(&b, " ｜ %s %d 字 %.1f 秒", extract.OCRModelName(it.Model), it.Chars, float64(it.Ms)/1000)
 				default:
-					fmt.Fprintf(&b, " ｜ %s %d 字 %.1f 秒 相同 %.1f%%", extract.OCRModelName(it.Model), it.Chars, float64(it.Ms)/1000, it.Agree)
+					fmt.Fprintf(&b, " ｜ %s %d 字 %.1f 秒 相同 %.1f%% 不看顺序 %.1f%%/%.1f%%", extract.OCRModelName(it.Model), it.Chars, float64(it.Ms)/1000,
+						it.Agree, it.Cover, it.CoverBack)
+					if it.Garbled {
+						b.WriteString(" 疑似乱码")
+					}
 				}
 			}
 			b.WriteString("\n")

@@ -844,6 +844,20 @@ VALUES(?,?,?,'',?,?,'',100,1,1,'','',0,?,'',?,1)`, r.ID, r.VolumeID, name, name,
 	if s := OCRTestText(rep, true); !strings.Contains(s, "【PP-OCRv4】关于做奸安全生产检查工伤的通知") {
 		t.Fatal(s)
 	}
+	// 不看顺序的比较：顺序不同、字一样的（读表格一列一列读）按顺序比相同的少，不看顺序几乎全有；认出乱码的标出来
+	texts["win"] = "检查工作的通知关于做好安全生产"
+	texts["x"] = strings.Repeat("Il1 :; ,. ", 8)
+	rep = e.m.runOCRTest(context.Background(), samples, []string{"v6", "win", "x"})
+	win, x := rep.Models[1], rep.Models[2]
+	if win.Agree > 60 || win.Cover < 85 || win.CoverBack < 85 || win.Garbled != 0 {
+		t.Fatalf("顺序不同：%+v", win)
+	}
+	if x.Garbled != 3 || x.Cover > 5 {
+		t.Fatalf("乱码：%+v", x)
+	}
+	if s := OCRTestText(rep, false); !strings.Contains(s, "不看顺序：PP-OCRv6 small认出的它认到") || !strings.Contains(s, "疑似认出乱码 3 个文件") {
+		t.Fatal(s)
+	}
 }
 
 // 0.2.8 打包测试的结果：超线程的 2×2 只比 2×1 快 0.1%，选用 2×1，日志里不再写「最快：2×2」又说只用物理核心。
