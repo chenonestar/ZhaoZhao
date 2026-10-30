@@ -40,7 +40,9 @@ func (o otherInstance) ver() string {
 }
 
 // logLabel 是写进日志的名字（路径可以在导出诊断信息时换成代号）。
-func (o otherInstance) logLabel() string { return o.ver() + "（" + logx.P(filepath.Dir(o.Exe)) + "）" }
+func (o otherInstance) logLabel() string {
+	return o.ver() + "（" + logx.P(filepath.Dir(o.Exe)) + "）"
+}
 
 // label 是对话框里显示的名字，如「v0.2.9（E:\找找0.2.9）」。
 func (o otherInstance) label() string { return fmt.Sprintf("%s（%s）", o.ver(), filepath.Dir(o.Exe)) }
