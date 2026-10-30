@@ -182,15 +182,31 @@ func absPath(p string) string {
 
 // adoptDataDir 把旧数据目录 from 搬成 to（同一个盘上改名）。to 是刚建的空目录时先删掉。旧的找找刚退出时
 // 解析子进程可能还拿着文件，最多重试 10 秒。
+//
+// 安装版的数据目录（%LOCALAPPDATA%\ZhaoZhao）里放着用过的数据目录列表（known-data.json），搬之前先拿出来，
+// 搬完放回去。
 func adoptDataDir(from, to string) error {
+	var known []byte
 	if ents, err := os.ReadDir(to); err == nil {
-		if len(ents) > 0 {
-			return fmt.Errorf("%s 不是空的", to)
+		for _, e := range ents {
+			if e.Name() != filepath.Base(knownPath()) {
+				return fmt.Errorf("%s 不是空的", to)
+			}
+		}
+		kp := filepath.Join(to, filepath.Base(knownPath()))
+		if b, err := os.ReadFile(kp); err == nil {
+			known = b
+			_ = os.Remove(kp)
 		}
 		if err := os.Remove(to); err != nil {
 			return err
 		}
 	}
+	defer func() {
+		if known != nil {
+			_ = os.WriteFile(filepath.Join(to, filepath.Base(knownPath())), known, 0o600)
+		}
+	}()
 	var err error
 	for i := 0; i < 50; i++ {
 		if err = os.Rename(from, to); err == nil {

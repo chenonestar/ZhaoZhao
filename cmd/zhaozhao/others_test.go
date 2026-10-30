@@ -44,6 +44,15 @@ func TestAdoptDataDir(t *testing.T) {
 	if _, ok := adoptCandidate(cur, nil); ok {
 		t.Fatal("已经没有别的有索引的目录")
 	}
+	// 安装版的数据目录里只有用过的目录列表时照样能搬，列表留着
+	inst := filepath.Join(base, "appdata", "ZhaoZhao")
+	if err := adoptDataDir(cur, inst); err != nil || !hasIndex(inst) {
+		t.Fatalf("搬到安装版的数据目录：%v", err)
+	}
+	if k := loadKnown(); len(k) != 3 {
+		t.Fatalf("用过的目录列表应留着：%+v", k)
+	}
+	cur = inst
 	// 新目录不是空的时候不搬
 	other := filepath.Join(base, "x", "data")
 	os.MkdirAll(other, 0o700)
