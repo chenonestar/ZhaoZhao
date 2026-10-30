@@ -30,7 +30,7 @@ import (
 	"github.com/chenonestar/zhaozhao/internal/worker"
 )
 
-var version = "0.2.10"
+var version = "0.2.11"
 
 // built 是打包日期（打包时用 -ldflags "-X main.built=2026-10-30" 写入）。
 var built = ""

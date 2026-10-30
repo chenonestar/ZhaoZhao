@@ -43,7 +43,7 @@ Windows 单机全文检索工具：对本机硬盘、移动硬盘和网络映射
 
 | 路径 | 内容 |
 |---|---|
-| `cmd/zhaozhao` | 程序入口、Windows 托盘/快捷键/窗口、单实例 |
+| `cmd/zhaozhao` | 程序入口、Windows 托盘/快捷键/窗口、单实例、本机上别的找找（关掉/切换/都运行）和搬来旧索引 |
 | `internal/norm` | 归一化（大小写、全半角、中文标点、繁→简）与分词（汉字单字成词） |
 | `internal/query` | 查询语法解析 |
 | `internal/store` | SQLite 存储：卷、索引根、文件、文本、FTS5 |
@@ -55,7 +55,7 @@ Windows 单机全文检索工具：对本机硬盘、移动硬盘和网络映射
 | `internal/server` | 界面用的 HTTP 接口 |
 | `web` | React + TypeScript 界面（构建产物嵌入到 `internal/web/dist`） |
 | `tools` | 样本生成、OCR 桥接脚本、繁简对照表生成 |
-| `packaging` | Windows 便携版打包、Inno Setup 安装脚本 |
+| `packaging` | Windows 便携版打包、Inno Setup 安装脚本、程序图标（`icon/`，`tools/winres` 生成含图标、版本信息、清单的资源文件） |
 
 ### 中文检索的做法（M0 全文索引选型结论）
 
@@ -96,7 +96,7 @@ iscc packaging\zhaozhao.iss
 | `.github/workflows/bundle.yml` | 手动、改动打包文件、被 release 调用 | **完整版**：choco 安装 LibreOffice，下载 RapidOCR-json（简体中文 V4 模型）和 PDFium，另放入 PP-OCRv6 small 认字模型及其 INT8 量化版（`packaging/tools/make_ocr_models.py`，用 Windows 上的组件检查各模型的速度和准确率，新模型不能用时打包失败；装上 Windows 的中文识别语言，用找找里的 Windows 自带 OCR 实现认同样的页面，准确率太低时打包失败），随包放入 VC++ 运行库，在真实 Windows 上冒烟测试（含组件自检、OCR 测速、退出后无残留进程）通过后，产出完整版 zip（约 340 MB）和离线安装包 |
 | `.github/workflows/release.yml` | 推送 `v*` 标签；或提交信息里带 `[release vX.Y.Z]` | 调用完整版构建，并发布完整版 zip、安装包、精简版 zip 到 GitHub Release |
 
-发布版本：`git tag v0.2.10 && git push origin v0.2.10`，或在推送的提交信息里写 `[release v0.2.10]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice、OCR 和 PDFium 组件**；精简版（主程序 + PDFium）需要按 `components\README.txt` 自行放入 LibreOffice 和 OCR。
+发布版本：`git tag v0.2.11 && git push origin v0.2.11`，或在推送的提交信息里写 `[release v0.2.11]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice、OCR 和 PDFium 组件**；精简版（主程序 + PDFium）需要按 `components\README.txt` 自行放入 LibreOffice 和 OCR。
 
 ### 组件
 
@@ -111,7 +111,7 @@ iscc packaging\zhaozhao.iss
 - **OCR**：把 [RapidOCR-json](https://github.com/hiroi-sora/RapidOCR-json) 放到 `components\ocr\`；
   或用 `ZHAOZHAO_OCR="命令 参数…"` 指定任何兼容**管道协议**的程序（见 `tools/ocr_bridge.py`，它用 `rapidocr-onnxruntime` 实现了同一协议，开发测试用）。
   没有 OCR 组件时，图片只索引文件名，扫描 PDF 只索引文字层并标记「需要 OCR」。
-- 数据目录：`%LOCALAPPDATA%\ZhaoZhao`（便携版为程序旁的 `data`），含 `index.db`、`config.json`、`roots.json`（索引根备份）、`zhaozhao.log`（异步写入，按 10 MB 滚动，旧日志压缩为 `.gz`，保留 5 个）、`crash.log`（程序崩溃报告）。
+- 数据目录：`%LOCALAPPDATA%\ZhaoZhao`（便携版为程序旁的 `data`；用过的数据目录记在 `%LOCALAPPDATA%\ZhaoZhao\known-data.json`，新文件夹里第一次运行时可以搬来旧索引），含 `index.db`、`config.json`、`roots.json`（索引根备份）、`zhaozhao.log`（异步写入，按 10 MB 滚动，旧日志压缩为 `.gz`，保留 5 个）、`crash.log`（程序崩溃报告）。
   「设置 → 日志与诊断」可切换日志详细程度、导出诊断信息（可隐藏文件名和路径）。建索引期间日志里每 10 分钟汇总一次
   各阶段用时（读文件和查重、提取、等写入、写入速度、OCR 页数），诊断信息注明各个盘是固态还是机械硬盘。
 
@@ -246,7 +246,7 @@ ZHAOZHAO_SCALE=100000 go test ./internal/search -run TestScale -v -timeout 40m
 | F-BG-01、02 实时监听、启动对账 | ✅ | 同一个索引根同一时刻只扫一遍（0.2.7 起；扫描中途设置改了、变化事件溢出时扫完再补扫一次）；提取过但没有文字的文件重新扫描时不再处理 |
 | F-BG-03 内容哈希复用 | ✅ | 改名/复制后复用提取与 OCR 结果；移动、改名（含移到别的索引根）时删除的文件的文本保留 3 天，新位置内容相同就直接复用 |
 | F-BG-04 低优先级、用户活动降速 | ⚠ | 解析、转换子进程「低于正常」优先级，OCR 子进程最低（「空闲」）优先级：普通文件先用 CPU，OCR 用剩下的，所以普通文件还在处理时 OCR 也开满核心；用户活动检测（`GetLastInputInfo`）仅 Windows：设置里可以打开「用电脑时放慢建索引」（OCR 只用一半核心、每处理完一个文件停一下；默认关：子进程本来就是低优先级，开着时建索引慢很多） |
-| F-BG-05、06、07 | ✅ | 默认一半核心；OCR 进程数 × 线程数在每台电脑上用样张实测选择（结果按电脑保存，按每线程效率估算各种预算下最快的搭配，进程数受内存限制，队列收尾时空出的线程分给大文件；认字模型默认 PP-OCRv6 small 普通版，可在设置里换成它的 INT8 量化版、组件自带的 PP-OCRv4 或 Windows 自带的 OCR（实验，WinRT 直接调用；转了方向的页转过来再认，认出的行按位置排），「OCR 引擎对比」抽样已识别的文件比较各模型（按顺序和不看顺序两种比法，标出疑似乱码；`tools/ocr-compare.html` 可在本机分析认出的文字，只输出统计数字）；测速时各种搭配交替测两轮以上取中位数，等扫描完成再测；每个文件记下需要 OCR 的页数（剩余时间按它估算）和识别时用的模型；内容相同的文件不同时识别，后到的等先到的写入后复用结果）；电池检测仅 Windows ⚠；全局/单根暂停恢复；建立索引期间（接通电源时）不让电脑自动睡眠（`PowerSetRequest`） |
+| F-BG-05、06、07 | ✅ | 默认一半核心；OCR 进程数 × 线程数在每台电脑上用样张实测选择（结果按电脑保存，按每线程效率估算各种预算下最快的搭配，进程数受内存限制，队列收尾时空出的线程分给大文件；认字模型默认 PP-OCRv6 small 普通版，可在设置里换成它的 INT8 量化版、组件自带的 PP-OCRv4 或 Windows 自带的 OCR（实验，WinRT 直接调用；转了方向的页转过来再认，认出的行按位置排），「OCR 引擎对比」抽样已识别的文件比较各模型（按顺序和不看顺序两种比法，标出疑似乱码；另用找文字时图片长边 2048 像素的 PP-OCRv6 再认一遍，各模型多认出的内容按「另一个引擎也认到」「在本机文件文字里常见」自动判断是真字还是乱码；`tools/ocr-compare.html` 可在本机分析认出的文字，只输出统计数字）；测速时各种搭配交替测两轮以上取中位数，等扫描完成再测；每个文件记下需要 OCR 的页数（剩余时间按它估算）和识别时用的模型；内容相同的文件不同时识别，后到的等先到的写入后复用结果）；电池检测仅 Windows ⚠；全局/单根暂停恢复；建立索引期间（接通电源时）不让电脑自动睡眠（`PowerSetRequest`） |
 | F-BG-08 断点续跑 | ✅ | 待处理状态在库里，重启后继续 |
 | F-BG-09、10 状态面板、OCR 队列预计时间 | ✅ | 普通文件、老格式按最近一小时实际完成的文件数估算剩余时间；OCR 按页数估算（正在识别的文件剩下的页 + 队列里的页，PDF 按已识别的平均每页大小由文件大小估算）÷ 最近每分钟页数；「正在处理」和「排队」分开显示 |
 | F-BG-11 失败列表 | ✅ | 按原因类别、扩展名统计（后台统计），按路径筛选，按索引根筛选、按文件夹逐级查看；「失败和已加密」与「仅文件名（不是失败）」分开；每次加载 200 个、滚动自动加载；整类重试、导出 CSV、加入排除规则；每行打开、打开所在文件夹、复制路径 |
