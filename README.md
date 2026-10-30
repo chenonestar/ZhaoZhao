@@ -96,7 +96,7 @@ iscc packaging\zhaozhao.iss
 | `.github/workflows/bundle.yml` | 手动、改动打包文件、被 release 调用 | **完整版**：choco 安装 LibreOffice，下载 RapidOCR-json（简体中文 V4 模型）和 PDFium，另放入 PP-OCRv6 small 认字模型及其 INT8 量化版（`packaging/tools/make_ocr_models.py`，用 Windows 上的组件检查各模型的速度和准确率，新模型不能用时打包失败；装上 Windows 的中文识别语言，用找找里的 Windows 自带 OCR 实现认同样的页面，准确率太低时打包失败），随包放入 VC++ 运行库，在真实 Windows 上冒烟测试（含组件自检、OCR 测速、退出后无残留进程）通过后，产出完整版 zip（约 340 MB）和离线安装包 |
 | `.github/workflows/release.yml` | 推送 `v*` 标签；或提交信息里带 `[release vX.Y.Z]` | 调用完整版构建，并发布完整版 zip、安装包、精简版 zip 到 GitHub Release |
 
-发布版本：`git tag v0.2.9 && git push origin v0.2.9`，或在推送的提交信息里写 `[release v0.2.9]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice、OCR 和 PDFium 组件**；精简版（主程序 + PDFium）需要按 `components\README.txt` 自行放入 LibreOffice 和 OCR。
+发布版本：`git tag v0.2.10 && git push origin v0.2.10`，或在推送的提交信息里写 `[release v0.2.10]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice、OCR 和 PDFium 组件**；精简版（主程序 + PDFium）需要按 `components\README.txt` 自行放入 LibreOffice 和 OCR。
 
 ### 组件
 
