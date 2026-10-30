@@ -40,7 +40,9 @@ jobs:
         run: |
           Push-Location web; npm ci --no-audit --no-fund; npm run build; Pop-Location
           New-Item -ItemType Directory -Force ZhaoZhao/components/libreoffice, ZhaoZhao/components/ocr | Out-Null
-          go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$env:VERSION" -o ZhaoZhao/zhaozhao.exe ./cmd/zhaozhao
+          go run ./packaging/tools/winres -version $env:VERSION   # 图标、版本信息、清单
+          $built = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
+          go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$env:VERSION -X main.built=$built" -o ZhaoZhao/zhaozhao.exe ./cmd/zhaozhao
           Copy-Item packaging/components-README.txt ZhaoZhao/components/README.txt
           Copy-Item packaging/portable-README.txt ZhaoZhao/README.txt
           New-Item ZhaoZhao/portable.flag -ItemType File | Out-Null

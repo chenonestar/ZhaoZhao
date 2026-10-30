@@ -7,7 +7,9 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/chenonestar/zhaozhao/internal/index"
@@ -30,6 +32,8 @@ var (
 	procRegisterHotKey   = user32.NewProc("RegisterHotKey")
 	procUnregisterHotKey = user32.NewProc("UnregisterHotKey")
 	procLoadIcon         = user32.NewProc("LoadIconW")
+	procLoadImage        = user32.NewProc("LoadImageW")
+	procGetSystemMetrics = user32.NewProc("GetSystemMetrics")
 	procCreatePopupMenu  = user32.NewProc("CreatePopupMenu")
 	procAppendMenu       = user32.NewProc("AppendMenuW")
 	procTrackPopupMenu   = user32.NewProc("TrackPopupMenu")
@@ -51,8 +55,10 @@ const (
 	wmLDblClk      = 0x0203
 	wmQuitShell    = wmUser + 2
 	wmSetHotkey    = wmUser + 3
+	wmReady        = wmUser + 4
 
 	nimAdd     = 0
+	nimModify  = 1
 	nimDelete  = 2
 	nifMessage = 1
 	nifIcon    = 2
@@ -67,6 +73,7 @@ const (
 	idPause  = 2
 	idManage = 3
 	idQuit   = 4
+	idAbout  = 5
 
 	hotkeyID = 1
 )
@@ -121,12 +128,47 @@ type shellCtx struct {
 	Hotkey    string
 	Quit      func()
 	OpenPanel func(panel string) // 呼出界面并打开指定面板（如「索引与设置」）
+	Tip       string             // 鼠标停在托盘图标上时显示的文字
 }
 
 var (
 	shellHwnd uintptr
-	curShell  *shellCtx
+	curShell  atomic.Pointer[shellCtx] // 启动完成前只有 Tip，点托盘图标不做事
+	trayIcon  notifyIconData           // 只在托盘线程上用
 )
+
+// appIconID 是程序图标在资源里的编号（packaging/tools/winres 生成）。
+const appIconID = 1
+
+var appIcons sync.Map // 尺寸 → 图标句柄
+
+// appIcon 取 size×size 的程序图标；程序里没有图标资源（没生成资源文件的开发版）时返回 0。
+func appIcon(size int) uintptr {
+	if h, ok := appIcons.Load(size); ok {
+		return h.(uintptr)
+	}
+	inst, _, _ := procGetModuleHandle.Call(0)
+	h, _, _ := procLoadImage.Call(inst, appIconID, 1, uintptr(size), uintptr(size), 0) // IMAGE_ICON
+	appIcons.Store(size, h)
+	return h
+}
+
+func setTip(nid *notifyIconData, s string) {
+	tip, _ := windows.UTF16FromString(s)
+	if len(tip) > len(nid.tip) {
+		tip = append(tip[:len(nid.tip)-1], 0)
+	}
+	nid.tip = [128]uint16{}
+	copy(nid.tip[:], tip)
+}
+
+// shellReady 在启动完成后调用：托盘菜单、快捷键开始可用，提示文字换成 c.Tip。
+func shellReady(c *shellCtx) {
+	curShell.Store(c)
+	if shellHwnd != 0 {
+		procPostMessage.Call(shellHwnd, wmReady, 0, 0)
+	}
+}
 
 // shutdownShell 从其他线程请求结束消息循环。
 func shutdownShell() {
@@ -179,8 +221,19 @@ func parseHotkey(s string) (mods uint32, key uint32, ok bool) {
 }
 
 func wndProc(hwnd, m, wparam, lparam uintptr) uintptr {
-	c := curShell
+	c := curShell.Load()
+	if c != nil && c.URL == "" {
+		c = nil // 还在启动
+	}
 	switch uint32(m) {
+	case wmReady:
+		if c != nil {
+			setTip(&trayIcon, c.Tip)
+			trayIcon.flags = nifTip
+			procShellNotifyIcon.Call(nimModify, uintptr(unsafe.Pointer(&trayIcon)))
+			registerHotkey(hwnd, c.Hotkey)
+		}
+		return 0
 	case wmHotkey:
 		if c != nil {
 			_ = showOrLaunchUI(c.URL)
@@ -193,7 +246,9 @@ func wndProc(hwnd, m, wparam, lparam uintptr) uintptr {
 				_ = showOrLaunchUI(c.URL)
 			}
 		case wmRButtonUp:
-			showMenu(hwnd, c)
+			if c != nil {
+				showMenu(hwnd, c)
+			}
 		}
 		return 0
 	case wmCommand:
@@ -233,6 +288,7 @@ func showMenu(hwnd uintptr, c *shellCtx) {
 		pause = "恢复索引"
 	}
 	add(idPause, pause)
+	add(idAbout, "关于找找")
 	procAppendMenu.Call(menu, mfSeparator, 0, 0)
 	add(idQuit, "退出找找")
 	var pt point
@@ -251,14 +307,15 @@ func trayCommand(c *shellCtx, id uintptr) {
 	if c == nil {
 		return
 	}
-	names := map[uintptr]string{idOpen: "打开找找", idManage: "索引与设置", idPause: "暂停/恢复索引", idQuit: "退出找找"}
+	names := map[uintptr]string{idOpen: "打开找找", idManage: "索引与设置", idPause: "暂停/恢复索引", idQuit: "退出找找", idAbout: "关于找找"}
 	log.Printf("托盘菜单：%s", names[id])
 	switch id {
 	case idOpen:
 		_ = showOrLaunchUI(c.URL)
-	case idManage:
+	case idManage, idAbout:
+		panel := map[uintptr]string{idManage: "index", idAbout: "about"}[id]
 		if c.OpenPanel != nil {
-			c.OpenPanel("index")
+			c.OpenPanel(panel)
 		} else {
 			_ = showOrLaunchUI(c.URL)
 		}
@@ -331,15 +388,20 @@ func currentHotkey() server.HotkeyState {
 	return hotkeyState
 }
 
-// runShell 创建隐藏窗口，提供托盘图标、全局快捷键和磁盘变化通知，并运行消息循环直到退出。
-func runShell(c *shellCtx) {
+// runShell 创建隐藏窗口，提供托盘图标、全局快捷键和磁盘变化通知，并运行消息循环直到退出。启动一开始就在
+// 单独的协程里调用，托盘图标先出来（提示「正在启动」）；启动完成后 shellReady 换上菜单、快捷键。
+func runShell(c *shellCtx, started time.Time) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	curShell = c
+	curShell.CompareAndSwap(nil, c)
 
 	inst, _, _ := procGetModuleHandle.Call(0)
 	cls, _ := windows.UTF16PtrFromString("ZhaoZhaoShell")
-	icon, _, _ := procLoadIcon.Call(0, 32512) // IDI_APPLICATION
+	small, _, _ := procGetSystemMetrics.Call(49) // SM_CXSMICON：托盘图标的尺寸
+	icon := appIcon(int(small))
+	if icon == 0 {
+		icon, _, _ = procLoadIcon.Call(0, 32512) // IDI_APPLICATION
+	}
 	wc := wndClassEx{
 		size: uint32(unsafe.Sizeof(wndClassEx{})), wndProc: syscall.NewCallback(wndProc),
 		instance: windows.Handle(inst), icon: windows.Handle(icon), className: cls, iconSm: windows.Handle(icon),
@@ -358,14 +420,15 @@ func runShell(c *shellCtx) {
 	}
 	shellHwnd = hwnd
 
-	nid := notifyIconData{size: uint32(unsafe.Sizeof(notifyIconData{})), hwnd: windows.Handle(hwnd), id: 1,
+	trayIcon = notifyIconData{size: uint32(unsafe.Sizeof(notifyIconData{})), hwnd: windows.Handle(hwnd), id: 1,
 		flags: nifMessage | nifIcon | nifTip, callbackMessage: wmTray, icon: windows.Handle(icon)}
-	tip, _ := windows.UTF16FromString("找找")
-	copy(nid.tip[:], tip)
-	procShellNotifyIcon.Call(nimAdd, uintptr(unsafe.Pointer(&nid)))
-	defer procShellNotifyIcon.Call(nimDelete, uintptr(unsafe.Pointer(&nid)))
-
-	registerHotkey(hwnd, c.Hotkey)
+	setTip(&trayIcon, c.Tip)
+	procShellNotifyIcon.Call(nimAdd, uintptr(unsafe.Pointer(&trayIcon)))
+	defer procShellNotifyIcon.Call(nimDelete, uintptr(unsafe.Pointer(&trayIcon)))
+	log.Printf("启动：托盘图标已出现（从启动进程算起 %.1f 秒）", time.Since(started).Seconds())
+	if r := curShell.Load(); r != nil && r.URL != "" { // 启动已经完成（shellReady 先于窗口创建）
+		procPostMessage.Call(hwnd, wmReady, 0, 0)
+	}
 	defer procUnregisterHotKey.Call(hwnd, hotkeyID)
 
 	var m msg

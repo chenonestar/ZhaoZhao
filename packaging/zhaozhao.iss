@@ -26,6 +26,7 @@ PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 WizardStyle=modern
 UninstallDisplayIcon={app}\zhaozhao.exe
+SetupIconFile=icon\zhaozhao.ico
 
 [Languages]
 ; 简体中文是 Inno Setup 的非官方翻译，不随安装器发行；构建流程会把它下载到本目录，没有时用英文向导

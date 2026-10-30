@@ -169,3 +169,4 @@ table.grid .actions button { margin-left: 4px; padding: 2px 8px; }
 .field.model-select { margin: 0; }
 .field.model-select select { max-width: 420px; }
 .ocrtest-file { border-top: 1px solid var(--line); padding: 6px 0; }
+.about td:first-child { white-space: nowrap; color: var(--dim); } .about td { word-break: break-all; } .about h3 { margin: 4px 0 6px; }

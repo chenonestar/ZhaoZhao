@@ -24,6 +24,38 @@ func (s *Server) routes(mux *http.ServeMux) {
 	h("/api/ping", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "version": s.Actions.Version})
 	})
+	h("/api/about", func(w http.ResponseWriter, r *http.Request) {
+		a := map[string]any{"version": s.Actions.Version}
+		if s.Actions.About != nil {
+			a = s.Actions.About()
+		}
+		sp := s.M.DB.Space()
+		a["indexBytes"] = sp.DBBytes + sp.WALBytes
+		writeJSON(w, a)
+	})
+	// 打开程序文件夹或数据文件夹（只能是这两个，路径由程序自己给出）
+	h("/api/about/open", s.post(func(r *http.Request) (any, error) {
+		var b struct {
+			What string `json:"what"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		if s.Actions.About == nil || s.Actions.OpenFile == nil {
+			return nil, fmt.Errorf("不支持")
+		}
+		a := s.Actions.About()
+		var p string
+		switch b.What {
+		case "exe":
+			exe, _ := a["exe"].(string)
+			p = filepath.Dir(exe)
+		case "data":
+			p, _ = a["dataDir"].(string)
+		}
+		if p == "" || p == "." {
+			return nil, fmt.Errorf("没有这个文件夹")
+		}
+		return ok(), s.Actions.OpenFile(p)
+	}))
 	h("/api/search", s.handleSearch)
 	h("/api/preview", s.handlePreview)
 	h("/api/open", s.handleOpen)

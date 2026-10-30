@@ -21,8 +21,9 @@ echo "==> 交叉编译 zhaozhao.exe ($VER)"
 PKG="$OUT/ZhaoZhao-portable"
 rm -rf "$PKG"
 mkdir -p "$PKG/components/libreoffice" "$PKG/components/ocr"
+go run ./packaging/tools/winres -version "$VER"   # 图标、版本信息、清单（cmd/zhaozhao/rsrc_windows_amd64.syso）
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
-  -ldflags "-s -w -H=windowsgui -X main.version=$VER" \
+  -ldflags "-s -w -H=windowsgui -X main.version=$VER -X main.built=$(date -u +%Y-%m-%d)" \
   -o "$PKG/zhaozhao.exe" ./cmd/zhaozhao
 
 echo "==> 放入 PDFium"

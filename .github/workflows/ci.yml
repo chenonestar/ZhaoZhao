@@ -49,7 +49,7 @@ jobs:
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...
       - name: 交叉编译检查（Windows 专有代码）
-        run: GOOS=windows GOARCH=amd64 go vet ./... && GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/zhaozhao
+        run: go run ./packaging/tools/winres && GOOS=windows GOARCH=amd64 go vet ./... && GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/zhaozhao
       - run: go test -race ./...
 
   # Linux：真实样本集成测试（LibreOffice 转换老格式、OCR、7z）
@@ -148,6 +148,7 @@ jobs:
         with:
           name: web-dist
           path: internal/web/dist
+      - run: go run ./packaging/tools/winres   # 图标等资源（测试托盘图标能取到）
       - run: go vet ./...
       - name: 下载 PDFium（测试 Windows 上的动态加载）
         shell: bash

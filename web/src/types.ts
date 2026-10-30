@@ -437,3 +437,15 @@ export interface SearchOpts {
   fuzzy: boolean;
   cs: boolean;
 }
+
+// 「关于」里显示的程序信息。
+export interface About {
+  version: string; // 如 v0.2.11
+  built?: string; // 打包日期
+  exe?: string;
+  dataDir?: string;
+  portable?: boolean;
+  started?: string;
+  pid?: number;
+  indexBytes?: number;
+}

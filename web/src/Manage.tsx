@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
-import type { Config, DiagState, FailedFilter, FailedFolders, FailedItem, FailedSummary, HotkeyState, LegacyTestState, OCRBenchInfo, OCRTestState, ProblemCat, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
+import type { About, Config, DiagState, FailedFilter, FailedFolders, FailedItem, FailedSummary, HotkeyState, LegacyTestState, OCRBenchInfo, OCRTestState, ProblemCat, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
 import { copyText, fmtDuration, fmtSize, fmtTime, folderOf } from "./util";
 import { FolderPicker } from "./FolderPicker";
 import { Help } from "./Help";
 
-type Tab = "index" | "failed" | "settings" | "help";
+type Tab = "index" | "failed" | "settings" | "help" | "about";
 
 interface Props {
   status: Status | null;
@@ -29,7 +29,7 @@ export function Manage({ status, tab, setTab: setTab0, onClose: onClose0, refres
     <div className="modal-back" onClick={onClose}>
       <div className="modal manage" onClick={(e) => e.stopPropagation()}>
         <div className="tabs">
-          {([["index", "索引"], ["failed", "失败列表"], ["settings", "设置"], ["help", "语法帮助"]] as [Tab, string][]).map(([k, l]) => (
+          {([["index", "索引"], ["failed", "失败列表"], ["settings", "设置"], ["help", "语法帮助"], ["about", "关于"]] as [Tab, string][]).map(([k, l]) => (
             <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>
               {l}
               {k === "failed" && status && status.totals.Failed + status.totals.Encrypted > 0 ? ` (${status.totals.Failed + status.totals.Encrypted})` : ""}
@@ -45,6 +45,7 @@ export function Manage({ status, tab, setTab: setTab0, onClose: onClose0, refres
           {tab === "failed" && <FailedTab refresh={refresh} />}
           {tab === "settings" && <SettingsTab />}
           {tab === "help" && <Help />}
+          {tab === "about" && <AboutTab status={status} />}
         </div>
       </div>
     </div>
@@ -792,6 +793,40 @@ function OCRSpeed() {
         </div>
       )}
       {err && <div className="error small">{err}</div>}
+    </div>
+  );
+}
+
+// 关于：版本号、程序和数据的位置、各组件。同时用着几个版本时，看这里分清楚是哪个。
+function AboutTab({ status }: { status: Status | null }) {
+  const [a, setA] = useState<About | null>(null);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => { api.about().then(setA).catch(() => {}); }, []);
+  if (!a) return <div className="dim">正在读取…</div>;
+  const rows: [string, string][] = [
+    ["版本", a.version + (a.built ? `（${a.built} 打包）` : "")],
+    ["类型", a.portable ? "便携版（索引放在程序文件夹里的 data 文件夹）" : "安装版"],
+    ["程序位置", a.exe ?? ""],
+    ["数据位置", a.dataDir ?? ""],
+    ["索引库大小", a.indexBytes ? fmtSize(a.indexBytes) : "—"],
+    ["本次启动", a.started ? new Date(a.started).toLocaleString() + (a.pid ? `（进程 ${a.pid}）` : "") : "—"],
+    ...(status?.components ?? []).map((c): [string, string] => [c.name, (c.ok ? "" : "不可用：") + c.message + (c.path ? `（${c.path}）` : "")]),
+  ];
+  const text = rows.map(([k, v]) => `${k}：${v}`).join("\n");
+  return (
+    <div className="about">
+      <h3><img src="/favicon.ico" alt="" width={32} height={32} style={{ verticalAlign: "middle", marginRight: 8 }} />找找 {a.version}</h3>
+      <div className="dim small">本机文件全文搜索：文件名、文件内容、扫描件里的字都能搜。</div>
+      <table className="grid">
+        <tbody>{rows.map(([k, v]) => <tr key={k}><td>{k}</td><td>{v}</td></tr>)}</tbody>
+      </table>
+      <div className="btns">
+        {a.exe && <button onClick={() => api.openAboutDir("exe")}>打开程序文件夹</button>}
+        {a.dataDir && <button onClick={() => api.openAboutDir("data")}>打开数据文件夹</button>}
+        <button onClick={() => navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); })}>
+          {copied ? "已复制" : "复制这些信息"}</button>
+        <button onClick={() => window.open("https://github.com/chenonestar/zhaozhao/releases", "_blank")}>查看更新记录和新版本</button>
+      </div>
     </div>
   );
 }

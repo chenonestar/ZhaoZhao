@@ -95,13 +95,13 @@ func windowString(proc *windows.LazyProc, h uintptr) string {
 	return windows.UTF16ToString(buf[:n])
 }
 
-// isUIWindow 判断是不是界面所在的浏览器应用窗口：Chromium 顶层窗口、标题为「找找」、可见或已最小化。
+// isUIWindow 判断是不是界面所在的浏览器应用窗口：Chromium 顶层窗口、标题为「找找」或「找找 v0.2.11」、可见或已最小化。
 // 只按标题找会误中资源管理器里同名的文件夹窗口，或浏览器内部不可见的辅助窗口。
 func isUIWindow(h uintptr) bool {
 	if !strings.HasPrefix(windowString(procGetClassName, h), "Chrome_WidgetWin_") {
 		return false
 	}
-	if windowString(procGetWindowText, h) != uiTitle {
+	if t := windowString(procGetWindowText, h); t != uiTitle && !strings.HasPrefix(t, uiTitle+" v") { // 0.2.11 起标题带版本号
 		return false
 	}
 	vis, _, _ := procIsWindowVisible.Call(h)

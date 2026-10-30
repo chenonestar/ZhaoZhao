@@ -1,5 +1,5 @@
 import type {
-  Config, FailedFilter, FailedPage, FailedSummary, FsListing, DiagState, FailedFolders, HotkeyState, LegacyTestState, Notice, OCRBenchInfo, OCRTestState, SpaceDetail, Preview, Saved, SearchOpts, SearchResponse, Status,
+  About, Config, FailedFilter, FailedPage, FailedSummary, FsListing, DiagState, FailedFolders, HotkeyState, LegacyTestState, Notice, OCRBenchInfo, OCRTestState, SpaceDetail, Preview, Saved, SearchOpts, SearchResponse, Status,
 } from "./types";
 
 export class ApiError extends Error {
@@ -47,6 +47,8 @@ export const api = {
   checkComponents: () => post("/api/components/check"),
   hotkey: () => call<HotkeyState>("/api/hotkey"),
   uiPending: () => call<{ panel: string }>("/api/ui/pending"),
+  about: () => call<About>("/api/about"),
+  openAboutDir: (what: "exe" | "data") => post("/api/about/open", { what }),
   spaceStats: () => call<SpaceDetail>("/api/space/stats"),
   compact: () => post("/api/space/compact"),
   excludeFolders: (ids: number[]) => post<{ folders: string[] }>("/api/exclude/folders", { ids }),

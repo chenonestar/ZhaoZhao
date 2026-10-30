@@ -6,3 +6,4 @@
 *.db-wal
 *.db-shm
 /packaging/ChineseSimplified.isl
+/cmd/zhaozhao/*.syso

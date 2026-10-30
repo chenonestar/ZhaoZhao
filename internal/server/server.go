@@ -38,6 +38,8 @@ type Server struct {
 
 	pendingPanel atomic.Value // 托盘菜单要求界面打开的面板（如 "index"），界面取走后清空
 
+	firstPage, firstAPI sync.Once // 界面第一次打开页面、第一次取数据（记启动用时）
+
 	diagMu sync.Mutex
 	diag   DiagState
 }
@@ -114,6 +116,10 @@ type Actions struct {
 	Hotkey      func() HotkeyState
 	// Diagnostics 导出诊断信息，返回生成的文件路径；progress 报告进行到哪一步。
 	Diagnostics func(anonymize bool, progress func(string)) (string, error)
+	// About 返回「关于」里显示的程序信息（版本、打包日期、程序和数据位置等）。
+	About func() map[string]any
+	// OnFirstRequest 在界面第一次打开页面（api 为 false）、第一次取数据（api 为 true）时调用（记下启动用时）。
+	OnFirstRequest func(api bool)
 }
 
 func newToken() string {
@@ -167,6 +173,9 @@ func (s *Server) page(next http.Handler) http.Handler {
 			}
 		}
 		w.Header().Set("Cache-Control", "no-cache")
+		if r.URL.Path == "/" && s.Actions.OnFirstRequest != nil {
+			s.firstPage.Do(func() { s.Actions.OnFirstRequest(false) })
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -180,6 +189,9 @@ func (s *Server) guard(next http.Handler) http.Handler {
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
+			if r.URL.Path != "/api/ping" && s.Actions.OnFirstRequest != nil {
+				s.firstAPI.Do(func() { s.Actions.OnFirstRequest(true) })
+			}
 			c, err := r.Cookie(cookieName)
 			if err != nil || subtle.ConstantTimeCompare([]byte(c.Value), []byte(s.Token)) != 1 {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)

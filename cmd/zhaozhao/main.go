@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -30,6 +31,12 @@ import (
 )
 
 var version = "0.2.10"
+
+// built 是打包日期（打包时用 -ldflags "-X main.built=2026-10-30" 写入）。
+var built = ""
+
+// verText 是显示用的版本号，如「v0.2.11」。
+func verText() string { return "v" + strings.TrimPrefix(version, "v") }
 
 type instanceInfo struct {
 	Port  int    `json:"port"`
@@ -64,21 +71,17 @@ func main() {
 		return
 	}
 
+	procStarted := processStart()
 	dataDir := resolveDataDir(*dataFlag)
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		fatalf("无法创建数据目录 %s: %v", dataDir, err)
 	}
 	// 单实例：第一步就用系统锁判断。已有实例（正在运行或正在启动）时，等它就绪后呼出它的窗口
-	if !acquireInstanceLock(dataDir) {
-		if !*noUI {
-			for i := 0; i < 300; i++ { // 最多等 60 秒（已有实例可能正在启动）
-				if url, ok := existingInstance(dataDir); ok {
-					_ = showOrLaunchUI(url)
-					break
-				}
-				time.Sleep(200 * time.Millisecond)
-			}
-		}
+	if !acquireInstanceLock(dataDir) && !waitExisting(dataDir, *noUI) {
+		return
+	}
+	// 本机上用别的数据目录的找找、新文件夹里没有索引时的旧索引（会弹窗问，所以开机自启时不做）
+	if !*noUI && !checkOthers(dataDir) {
 		return
 	}
 	lg, err := logx.Setup(dataDir)
@@ -87,7 +90,16 @@ func main() {
 	}
 	suppressErrorDialogs()
 	start := time.Now()
-	log.Printf("找找启动：%s", environment(dataDir))
+	log.Printf("找找启动：%s；从启动进程到这里 %.1f 秒", environment(dataDir), start.Sub(procStarted).Seconds())
+	for _, n := range startNotes {
+		log.Printf("启动：%s", n)
+	}
+	// 托盘图标先出来，表示已经在启动了；启动完成后才有菜单
+	shellDone := make(chan struct{})
+	go func() {
+		runShell(&shellCtx{Tip: "找找 " + verText() + " 正在启动…"}, procStarted)
+		close(shellDone)
+	}()
 
 	cleanStaleTemp()
 	db, err := openDB(dataDir)
@@ -102,6 +114,7 @@ func main() {
 	if err != nil {
 		fatalf("%v", err)
 	}
+	rememberDataDir(dataDir, exe)
 	// 进程池的实际大小由索引服务按设置调整（Start 时和设置修改后）
 	pool := worker.NewPool(exe, runtime.NumCPU())
 	mgr := index.New(db, volume.System(), pool, dataDir)
@@ -137,6 +150,20 @@ func main() {
 		OpenInner:   func(container, inner string) (string, error) { return tmp.Open(container, inner, mgr.Config()) },
 		ApplyHotkey: applyHotkey,
 		Hotkey:      currentHotkey,
+		About: func() map[string]any {
+			_, portable := os.Stat(filepath.Join(filepath.Dir(exe), "portable.flag"))
+			return map[string]any{"version": verText(), "built": built, "exe": exe, "dataDir": dataDir, "portable": portable == nil,
+				"started": start, "pid": os.Getpid()}
+		},
+		OnFirstRequest: func(api bool) {
+			if t := uiLaunched.Load(); t != nil {
+				what := "打开了界面页面"
+				if api {
+					what = "界面开始取数据"
+				}
+				log.Printf("启动：%s（打开界面窗口后 %.1f 秒，从启动进程算起 %.1f 秒）", what, time.Since(*t).Seconds(), time.Since(procStarted).Seconds())
+			}
+		},
 		Diagnostics: func(anonymize bool, progress func(string)) (string, error) {
 			p, err := exportDiagnostics(dataDir, lg, mgr, anonymize, progress)
 			if err == nil {
@@ -162,9 +189,11 @@ func main() {
 			log.Printf("添加索引根 %s 失败: %v", p, err)
 		}
 	}
-	log.Printf("启动完成，用时 %.1fs，可以搜索", time.Since(start).Seconds())
+	log.Printf("启动完成，用时 %.1fs（从启动进程算起 %.1fs），可以搜索", time.Since(start).Seconds(), time.Since(procStarted).Seconds())
 	fmt.Println("找找已启动：", srv.URL())
 	if !*noUI {
+		now := time.Now()
+		uiLaunched.Store(&now)
 		_ = launchUI(srv.URL())
 	}
 
@@ -177,10 +206,15 @@ func main() {
 		}
 		shutdownShell()
 	}()
-	runShell(&shellCtx{URL: srv.URL(), Mgr: mgr, Hotkey: cfg.Hotkey, Quit: act.Quit, OpenPanel: func(panel string) {
+	tip := "找找 " + verText()
+	if _, err := os.Stat(filepath.Join(filepath.Dir(exe), "portable.flag")); err == nil {
+		tip += "（便携版）\n" + filepath.Dir(exe)
+	}
+	shellReady(&shellCtx{URL: srv.URL(), Mgr: mgr, Hotkey: cfg.Hotkey, Quit: act.Quit, Tip: tip, OpenPanel: func(panel string) {
 		srv.RequestPanel(panel)
 		_ = showOrLaunchUI(srv.URL())
 	}})
+	<-shellDone
 
 	// 退出：先让新实例可以启动、关掉界面窗口，再停止后台任务。
 	// 任何一步卡住（例如网络盘上的目录读取）都不能让程序退不出去：最多等 8 秒。
@@ -210,6 +244,28 @@ func main() {
 	}
 	lg.Close()
 	os.Exit(0)
+}
+
+// uiLaunched 是打开界面窗口的时间（记下界面多久后打开页面、开始取数据）。
+var uiLaunched atomic.Pointer[time.Time]
+
+// waitExisting 在同一个数据目录已有找找时调用：等它就绪后呼出它的窗口，返回 false（这个不用启动了）。
+// 它正在退出（刚点了退出又马上点图标）时，等它退出后拿到锁，返回 true 照常启动；以前这种情况白等 60 秒后
+// 什么也不做。
+func waitExisting(dataDir string, noUI bool) bool {
+	for i := 0; i < 300; i++ { // 最多等 60 秒（已有实例可能正在启动）
+		if url, ok := existingInstance(dataDir); ok {
+			if !noUI {
+				_ = showOrLaunchUI(url)
+			}
+			return false
+		}
+		time.Sleep(200 * time.Millisecond)
+		if acquireInstanceLock(dataDir) {
+			return true
+		}
+	}
+	return false
 }
 
 // pickPort 返回要监听的端口：指定了就用指定的，否则优先固定端口，被占用时由系统分配。

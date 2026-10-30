@@ -19,7 +19,7 @@ function loadOpts(): SearchOpts {
   }
 }
 
-type Tab = "index" | "failed" | "settings" | "help";
+type Tab = "index" | "failed" | "settings" | "help" | "about";
 
 export function App() {
   const [query, setQuery] = useState("");
@@ -109,13 +109,15 @@ export function App() {
   const [noticeErr, setNoticeErr] = useState("");
   // 托盘菜单「索引与设置」：窗口被呼出时检查要打开哪个面板
   useEffect(() => {
-    const check = () => api.uiPending().then((r) => { if (r.panel === "index") setPanel("index"); }).catch(() => {});
+    const check = () => api.uiPending().then((r) => { if (r.panel === "index" || r.panel === "about") setPanel(r.panel); }).catch(() => {});
     check();
     const onVis = () => { if (document.visibilityState === "visible") check(); };
     window.addEventListener("focus", check);
     document.addEventListener("visibilitychange", onVis);
     return () => { window.removeEventListener("focus", check); document.removeEventListener("visibilitychange", onVis); };
   }, []);
+  // 窗口标题带版本号（同时开着几个版本时分得清）
+  useEffect(() => { api.about().then((a) => { document.title = `找找 ${a.version}`; }).catch(() => {}); }, []);
   const fails = useRef(0);
   const refreshStatus = useCallback(() => api.status()
     .then((s) => { fails.current = 0; setLost(false); setStatus(s); })
