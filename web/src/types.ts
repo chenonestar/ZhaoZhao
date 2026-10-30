@@ -354,6 +354,17 @@ export interface OCRTestModel {
   cover: number; // 不看顺序：基准认出的内容它认到了多少（%）
   coverBack: number; // 不看顺序：它认出的内容基准也有多少（%）
   garbled: number; // 疑似认出乱码的文件数
+  // 比基准多认出的内容：相邻两字个数；另一个引擎也认到的比例（%，-1 没法比）；像真字的程度（0～100，-1 没法算）；
+  // 在字典里出现过的比例（多认出的、两个都认出的、打乱重配的，%）；判断为真内容、像乱码、说不准的文件数
+  extra?: number;
+  extraOther?: number;
+  extraReal?: number;
+  dictExtra?: number;
+  dictReal?: number;
+  dictFake?: number;
+  realFiles?: number;
+  fakeFiles?: number;
+  unsureFiles?: number;
 }
 
 export interface OCRTestFile {
@@ -362,7 +373,8 @@ export interface OCRTestFile {
   ext: string;
   size: number;
   pages: number;
-  items: { model: string; chars: number; ms: number; agree: number; cover?: number; coverBack?: number; garbled?: boolean; err?: string; sample?: string }[] | null;
+  items: { model: string; chars: number; ms: number; agree: number; cover?: number; coverBack?: number; garbled?: boolean;
+    extra?: number; extraOther?: number; extraReal?: number; verdict?: string; err?: string; sample?: string }[] | null;
 }
 
 // OCR 引擎对比的进度和最近一次结果。
@@ -377,6 +389,7 @@ export interface OCRTestState {
     sampled: number;
     canceled?: boolean;
     base: string;
+    dictDocs?: number; // 判断多认的内容时，字典读了几份文字
     models: OCRTestModel[] | null;
     files: OCRTestFile[] | null;
   };

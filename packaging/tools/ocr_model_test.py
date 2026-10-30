@@ -27,11 +27,11 @@ WINOCR = sys.argv[3] if len(sys.argv) > 3 else ''
 PAGES, THREADS = 6, 2
 
 
-def font():
+def font(size=36):
     for name in ('simsun.ttc', 'msyh.ttc', 'simhei.ttf'):
         p = os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts', name)
         if os.path.exists(p):
-            return ImageFont.truetype(p, 36)
+            return ImageFont.truetype(p, size)
     raise SystemExit('没有中文字体')
 
 
@@ -46,18 +46,20 @@ def gb2312_level1():
     return out
 
 
-def make_pages(d):
-    r = random.Random(1)
+def make_pages(d, n=PAGES, size=36, prefix='page'):
+    """size 是字的像素高：36 约 13 磅（200 DPI 的正文），18 约 6.5 磅（表格、图纸、脚注里的小字）。"""
+    r = random.Random(1 if prefix == 'page' else 7)
     chars = gb2312_level1()
     weights = [5 if i < 500 else 1 for i in range(len(chars))]  # 常用字更常出现
-    f = font()
+    f = font(size)
+    step = size * 62 // 36
     pages = []
-    for p in range(PAGES):
+    for p in range(n):
         img = Image.new('L', (1654, 2339), 255)
         dr = ImageDraw.Draw(img)
         lines, y = [], 160
         while y < 2339 - 200:
-            s = ''.join(r.choices(chars, weights, k=r.randint(20, 34)))
+            s = ''.join(r.choices(chars, weights, k=r.randint(20, 34) * 36 // size))
             if r.random() < 0.5:
                 k = r.randint(0, len(s))
                 s = s[:k] + str(r.randint(1, 99999)) + s[k:]
@@ -66,14 +68,14 @@ def make_pages(d):
                 s = s[:k] + r.choice('，。、；：') + s[k:]
             dr.text((150, y), s, font=f, fill=0)
             lines.append(s)
-            y += 62
+            y += step
         img = img.rotate(0.4, resample=Image.BILINEAR, fillcolor=255).filter(ImageFilter.GaussianBlur(0.7))
         a = np.asarray(img).astype(np.int16) + np.random.default_rng(p).normal(0, 12, (2339, 1654)).astype(np.int16)
         img = Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), 'L')
-        path = os.path.join(d, f'page{p}.bmp')
+        path = os.path.join(d, f'{prefix}{p}.bmp')
         img.save(path)
         if p == 0:
-            img.save(os.path.join(d, 'page0.png'))
+            img.save(path[:-4] + '.png')
         pages.append((path, ''.join(lines)))
     return pages
 
@@ -217,6 +219,18 @@ def main():
         print(f'PP-OCRv6 small 比 PP-OCRv4 每页快 {100 * (1 - v6[0] / v4[0]):.0f}%', flush=True)
     if v6 and v6q:
         print(f'量化版比普通版每页快 {100 * (1 - v6q[0] / v6[0]):.0f}%', flush=True)
+    # 大图找字（OCR 引擎对比里的「PP-OCRv6 small 大图找字」）：组件找文字前把图片长边缩到 1024 像素，A4 页上的小字
+    # 可能找不到；改成 2048 看正文页慢多少、小字页多认出多少
+    big = swap('PP-OCRv6_rec_small.onnx', 'PP-OCRv6_keys.txt') + ['--maxSideLen=2048']
+    v6big = run('PP-OCRv6 small 大图找字', exe, big, pages)
+    if v6 and v6big:
+        print(f'大图找字比平常每页慢 {100 * (v6big[0] / v6[0] - 1):.0f}%', flush=True)
+    small = os.path.join(WORK, 'small')
+    os.makedirs(small, exist_ok=True)
+    spages = make_pages(small, 2, 18, 'small')
+    print(f'小字页（约 6.5 磅）{len(spages)} 页，平均每页 {sum(len(g) for _, g in spages) // len(spages)} 字', flush=True)
+    run('PP-OCRv6 small 认小字页', exe, swap('PP-OCRv6_rec_small.onnx', 'PP-OCRv6_keys.txt'), spages)
+    run('PP-OCRv6 small 大图找字认小字页', exe, big, spages)
     win = windows_ocr(pages)
     if not v6 or v6[1] < 97:
         raise SystemExit('新认字模型（找找默认用的）在组件里不能用或准确率太低')

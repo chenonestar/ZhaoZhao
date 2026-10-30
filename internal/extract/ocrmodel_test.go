@@ -35,4 +35,12 @@ func TestOCRModels(t *testing.T) {
 	if got := c.WithModel(OCRModelV6Q).Args; !slices.Equal(got, c.Args) {
 		t.Fatalf("没有量化版文件时应原样返回：%v", got)
 	}
+	// 大图找字（只在 OCR 引擎对比里用）：v6 的参数再加 --maxSideLen，不在设置的模型列表里
+	big := c.WithModel(OCRModelV6Big)
+	if got := big.args(); !slices.Equal(got, append(want, "--maxSideLen=2048")) || big.Model() != OCRModelV6Big || big.key() == c.WithModel(OCRModelV6).key() {
+		t.Fatalf("大图找字：%v %s", got, big.Model())
+	}
+	if slices.Contains(c.Models(), OCRModelV6Big) || !c.HasModel(OCRModelV6Big) {
+		t.Fatal("大图找字不应出现在设置的模型列表里，但有 v6 时可以用")
+	}
 }

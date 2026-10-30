@@ -703,6 +703,7 @@ function HotkeyField({ value, onChange, state }: { value: string; onChange: (v: 
 
 const modelNames: Record<string, string> = {
   v6: "PP-OCRv6 small 普通版", v6q: "PP-OCRv6 small 量化版", v4: "PP-OCRv4（旧模型）", win: "Windows 自带 OCR（实验）",
+  v6big: "PP-OCRv6 small 大图找字",
 };
 const modelName = (m: string) => modelNames[m] ?? m;
 
@@ -812,7 +813,8 @@ function OCRTest() {
   return (
     <div className="field">
       <div className="dim small">OCR 引擎对比：从 OCR 识别过的文件里随机抽取若干个（PDF 每个最多认 5 页），用这台电脑上的各个认字模型各认一遍，
-        和 PP-OCRv6 普通版比较认出的字和每页用时（都用 1 个线程）。不改动索引；结果会包含在诊断信息里（认出的文字单独存一个文件，发送前可以删掉）。
+        和 PP-OCRv6 普通版比较认出的字和每页用时（都用 1 个线程）。另外用「大图找字」（找文字时用 2048 像素的图，平常是 1024）再认一遍，
+        看小字能多认出多少、慢多少；各模型多认出的内容自动判断是真字还是乱码。不改动索引；结果会包含在诊断信息里（认出的文字单独存一个文件，发送前可以删掉）。
         还在建索引时用时会偏长。</div>
       <div className="btns">
         {st?.running ? (
@@ -852,6 +854,7 @@ function OCRTest() {
               ))}
             </tbody>
           </table>
+          <OCRExtras r={r} />
           {(r.files ?? []).length > 0 && (
             <details>
               <summary className="small">各文件和认出的开头一段文字（{r.files!.length} 个）</summary>
@@ -864,7 +867,10 @@ function OCRTest() {
                       {it.err ? <span className="error">失败：{it.err}</span>
                         : <>{it.chars} 字，{(it.ms / 1000).toFixed(1)} 秒{it.model !== r.base ? `，按顺序相同 ${it.agree.toFixed(1)}%` : ""}
                           {it.model !== r.base && it.cover !== undefined ? `，不看顺序 ${it.cover.toFixed(1)}% / ${(it.coverBack ?? 0).toFixed(1)}%` : ""}
-                          {it.garbled ? <span className="error">，疑似乱码</span> : null}<div className="dim">{it.sample}</div></>}
+                          {it.garbled ? <span className="error">，疑似乱码</span> : null}
+                          {it.verdict ? <span className={it.verdict === "像乱码" ? "error" : ""}>，多认出 {it.extra} 对相邻两字：{it.verdict}
+                            （另一个引擎也认到 {dash(it.extraOther, "%")}，像真字 {dash(it.extraReal, " 分")}）</span> : null}
+                          <div className="dim">{it.sample}</div></>}
                     </div>
                   ))}
                 </div>
@@ -874,6 +880,41 @@ function OCRTest() {
         </>
       )}
     </div>
+  );
+}
+
+const dash = (v: number | undefined, unit: string) => (v === undefined || v < 0 ? "—" : `${v.toFixed(0)}${unit}`);
+
+// otherOf 是给某个模型多认的内容当「另一个引擎」的模型（和 index/ocrjudge.go 的 arbiterOf 一致）。
+const otherOf = (m: string) => (m === "v6big" ? "win" : "v6big");
+
+// OCR 引擎对比里各模型比基准多认出的内容：是文件里真有的字，还是认错的乱码（只有统计数字）。
+function OCRExtras({ r }: { r: NonNullable<OCRTestState["report"]> }) {
+  const rows = (r.models ?? []).filter((x) => x.name !== r.base && (x.extra ?? 0) > 0 && (x.realFiles ?? 0) + (x.fakeFiles ?? 0) + (x.unsureFiles ?? 0) > 0);
+  if (rows.length === 0) return null;
+  return (
+    <>
+      <div className="small" style={{ marginTop: 8 }}>比基准多认出的内容是真字还是乱码（自动判断，不用看文字）：</div>
+      <table className="grid">
+        <thead><tr><th>认字模型</th><th>多认出的相邻两字</th>
+          <th title="两个完全不同的引擎碰巧认出同样的乱码几乎不可能：另一个也认到的，就是文件里真有的字">另一个引擎也认到</th>
+          <th title="用这台电脑上文件里本来就有的文字（不是 OCR 认出的）当字典：两个模型都认出的字算 100 分，把多认出的字打乱重新配对算 0 分">像真字</th>
+          <th>判断（文件数）</th></tr></thead>
+        <tbody>
+          {rows.map((x) => (
+            <tr key={x.name}>
+              <td>{modelName(x.name)}</td>
+              <td className="num">{x.extra}</td>
+              <td className="num">{(x.extraOther ?? -1) < 0 ? "—" : `${x.extraOther!.toFixed(1)}%（${modelName(otherOf(x.name))}）`}</td>
+              <td className="num" title={(x.extraReal ?? -1) < 0 ? "" : `字典里出现过：多认出的 ${x.dictExtra?.toFixed(1)}%，两个都认出的 ${x.dictReal?.toFixed(1)}%，打乱重配的 ${x.dictFake?.toFixed(1)}%`}>
+                {dash(x.extraReal, " 分")}</td>
+              <td>真内容 {x.realFiles ?? 0}，像乱码 <span className={(x.fakeFiles ?? 0) > 0 ? "error" : ""}>{x.fakeFiles ?? 0}</span>，说不准 {x.unsureFiles ?? 0}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {(r.dictDocs ?? 0) > 0 && <div className="dim small">字典：这台电脑上随机 {r.dictDocs} 份文件里本来就有的文字。多认出的不到 30 对的文件不判断。</div>}
+    </>
   );
 }
 

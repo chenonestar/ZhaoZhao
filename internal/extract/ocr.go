@@ -50,14 +50,23 @@ type OCRConfig struct {
 	Threads int `json:"threads,omitempty"`
 	// Engine 为 "win" 时改用 Windows 自带的 OCR（在解析进程里直接调用，不启动 OCR 组件，见 winocr_windows.go）。
 	Engine string `json:"engine,omitempty"`
+	// MaxSide 是找文字时把图片长边缩到多少像素（RapidOCR 的 --maxSideLen，它默认 1024）。0 表示不指定。
+	MaxSide int `json:"maxSide,omitempty"`
 }
 
 // args 返回启动 OCR 进程的参数。
 func (c OCRConfig) args() []string {
-	if c.Threads <= 0 {
+	if c.Threads <= 0 && c.MaxSide <= 0 {
 		return c.Args
 	}
-	return append(append([]string{}, c.Args...), fmt.Sprintf("--numThread=%d", c.Threads))
+	a := append([]string{}, c.Args...)
+	if c.Threads > 0 {
+		a = append(a, fmt.Sprintf("--numThread=%d", c.Threads))
+	}
+	if c.MaxSide > 0 {
+		a = append(a, fmt.Sprintf("--maxSideLen=%d", c.MaxSide))
+	}
+	return a
 }
 
 // Enabled 说明是否配置了 OCR 组件。

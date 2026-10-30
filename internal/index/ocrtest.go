@@ -45,6 +45,19 @@ type OCRTestModel struct {
 	Cover     float64 `json:"cover"`
 	CoverBack float64 `json:"coverBack"`
 	Garbled   int     `json:"garbled"` // 疑似认出乱码的文件数
+	// 比基准多认出的内容（见 ocrjudge.go）：Extra 是多认出的相邻两字个数（各文件合计）；ExtraOther 是其中另一个
+	// 引擎也认到的比例（%，-1 为没法比）；ExtraReal 是像真字的程度（0～100，-1 为没法算），DictExtra、DictReal、
+	// DictFake 是多认出的、两个都认出的（真字）、打乱重配的（乱码）在字典里出现过的比例（%）；RealFiles 等是
+	// 判断为真内容、像乱码、说不准的文件数。
+	Extra       int     `json:"extra"`
+	ExtraOther  float64 `json:"extraOther"`
+	ExtraReal   float64 `json:"extraReal"`
+	DictExtra   float64 `json:"dictExtra"`
+	DictReal    float64 `json:"dictReal"`
+	DictFake    float64 `json:"dictFake"`
+	RealFiles   int     `json:"realFiles"`
+	FakeFiles   int     `json:"fakeFiles"`
+	UnsureFiles int     `json:"unsureFiles"`
 }
 
 // OCRTestFile 是一个抽样文件在各个模型上的结果。
@@ -66,8 +79,13 @@ type OCRTestFileItem struct {
 	Cover     float64 `json:"cover"`
 	CoverBack float64 `json:"coverBack"`
 	Garbled   bool    `json:"garbled,omitempty"`
-	Err       string  `json:"err,omitempty"`
-	Sample    string  `json:"sample,omitempty"`
+	// 比基准多认出的内容（含义同 OCRTestModel）；Verdict 是判断：真内容、像乱码、说不准（多认得少时为空）
+	Extra      int     `json:"extra"`
+	ExtraOther float64 `json:"extraOther"`
+	ExtraReal  float64 `json:"extraReal"`
+	Verdict    string  `json:"verdict,omitempty"`
+	Err        string  `json:"err,omitempty"`
+	Sample     string  `json:"sample,omitempty"`
 }
 
 // OCRTestReport 是一次 OCR 引擎对比的结果。
@@ -76,7 +94,8 @@ type OCRTestReport struct {
 	FinishedAt time.Time      `json:"finishedAt"`
 	Sampled    int            `json:"sampled"`
 	Canceled   bool           `json:"canceled,omitempty"`
-	Base       string         `json:"base"` // 基准模型（PP-OCRv6 普通版，没有时用第一个能用的）
+	Base       string         `json:"base"`     // 基准模型（PP-OCRv6 普通版，没有时用第一个能用的）
+	DictDocs   int            `json:"dictDocs"` // 判断多认的内容像不像真字时，字典读了几份文字
 	Models     []OCRTestModel `json:"models"`
 	Files      []OCRTestFile  `json:"files"`
 }
@@ -126,6 +145,19 @@ func (m *Manager) CancelOCRTest() {
 	}
 }
 
+// ocrTestModels 是要比的模型：设置里能选的那些，PP-OCRv6 普通版后面加上大图找字（判断别的模型多认的内容、
+// 看找字用大图能多认出多少，见 ocrjudge.go）。
+func ocrTestModels(c extract.OCRConfig) []string {
+	var out []string
+	for _, x := range c.Models() {
+		out = append(out, x)
+		if x == extract.OCRModelV6 && c.HasModel(extract.OCRModelV6Big) {
+			out = append(out, extract.OCRModelV6Big)
+		}
+	}
+	return out
+}
+
 type ocrPick struct {
 	id       int64
 	vol, rel string
@@ -141,7 +173,7 @@ func (m *Manager) StartOCRTest(n int) error {
 	if !m.ocrAvailable() || !m.Config().OCREnabled {
 		return fmt.Errorf("OCR 组件没有安装或 OCR 已关闭")
 	}
-	models := m.ocrCfg.Models()
+	models := ocrTestModels(m.ocrCfg)
 	if len(models) < 2 {
 		return fmt.Errorf("这台电脑上只有一个认字模型（%s），没有可比的", extract.OCRModelName(models[0]))
 	}
@@ -297,6 +329,7 @@ func (m *Manager) runOCRTest(ctx context.Context, samples []ocrPick, models []st
 	}
 	accs := map[string]*acc{}
 	rows := map[string]*OCRTestModel{}
+	var texts []map[string]string // 和 r.Files 一一对应：各模型认出的文字
 	for _, model := range models {
 		accs[model], rows[model] = &acc{}, &OCRTestModel{Name: model}
 	}
@@ -347,6 +380,13 @@ func (m *Manager) runOCRTest(ctx context.Context, samples []ocrPick, models []st
 			f.Items = append(f.Items, it)
 		}
 		r.Files = append(r.Files, f)
+		t := map[string]string{}
+		for model, g := range results[i] {
+			if g.err == "" {
+				t[model] = g.text
+			}
+		}
+		texts = append(texts, t)
 	}
 	for _, model := range models {
 		row, a := rows[model], accs[model]
@@ -361,6 +401,7 @@ func (m *Manager) runOCRTest(ctx context.Context, samples []ocrPick, models []st
 		}
 		r.Models = append(r.Models, *row)
 	}
+	m.judgeExtras(m.ctx, r, texts, models) // 中途停止对比时，已认完的照样判断；程序退出时才停
 	r.FinishedAt = time.Now()
 	return r
 }
@@ -390,6 +431,14 @@ func hanRatio(s string) float64 {
 		return 0
 	}
 	return float64(han) / float64(n)
+}
+
+// pctOrDash 按 format 写 v，v 为负（没法算）时写「—」。
+func pctOrDash(v float64, format string) string {
+	if v < 0 {
+		return "—"
+	}
+	return fmt.Sprintf(format, v)
 }
 
 // countChars 返回不计空白的字数。
@@ -431,6 +480,10 @@ func OCRTestText(r *OCRTestReport, samples bool) string {
 		return "还没有做过 OCR 引擎对比"
 	}
 	var b strings.Builder
+	var names []string
+	for _, x := range r.Models {
+		names = append(names, x.Name)
+	}
 	if !samples {
 		fmt.Fprintf(&b, "OCR 引擎对比 %s，抽样 %d 个文件（PDF 每个最多认 %d 页，各模型都用 1 个线程），用时 %.0f 秒", r.StartedAt.Format("2006-01-02 15:04"),
 			r.Sampled, ocrTestPages, r.FinishedAt.Sub(r.StartedAt).Seconds())
@@ -447,8 +500,23 @@ func OCRTestText(r *OCRTestReport, samples bool) string {
 				if x.Garbled > 0 {
 					fmt.Fprintf(&b, "；疑似认出乱码 %d 个文件", x.Garbled)
 				}
+				if x.Extra > 0 {
+					fmt.Fprintf(&b, "；多认出的相邻两字 %d 对", x.Extra)
+					if x.ExtraOther >= 0 {
+						fmt.Fprintf(&b, "，%s也认到 %.1f%%", extract.OCRModelName(arbiterOf(x.Name, names)), x.ExtraOther)
+					}
+					if x.ExtraReal >= 0 {
+						fmt.Fprintf(&b, "，像真字 %.0f 分（字典里出现过：多认出的 %.1f%%，两个都认出的 %.1f%%，打乱重配的 %.1f%%）", x.ExtraReal, x.DictExtra, x.DictReal, x.DictFake)
+					}
+					if n := x.RealFiles + x.FakeFiles + x.UnsureFiles; n > 0 {
+						fmt.Fprintf(&b, "；多认得多的 %d 个文件里，真内容 %d 个、像乱码 %d 个、说不准 %d 个", n, x.RealFiles, x.FakeFiles, x.UnsureFiles)
+					}
+				}
 			}
 			b.WriteString("\n")
+		}
+		if r.DictDocs > 0 {
+			fmt.Fprintf(&b, "判断多认出的内容：字典是这台电脑上随机 %d 份文件里本来就有的文字（不是 OCR 认出的）\n", r.DictDocs)
 		}
 	}
 	if len(r.Files) > 0 {
@@ -466,6 +534,9 @@ func OCRTestText(r *OCRTestReport, samples bool) string {
 						it.Agree, it.Cover, it.CoverBack)
 					if it.Garbled {
 						b.WriteString(" 疑似乱码")
+					}
+					if it.Verdict != "" {
+						fmt.Fprintf(&b, " 多认 %d 对（另一引擎也有 %s，像真字 %s）%s", it.Extra, pctOrDash(it.ExtraOther, "%.0f%%"), pctOrDash(it.ExtraReal, "%.0f 分"), it.Verdict)
 					}
 				}
 			}

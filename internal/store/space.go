@@ -231,3 +231,31 @@ func (d *DB) randomTextIDs(n int) ([]int64, error) {
 	}
 	return out, nil
 }
+
+// RandomTexts 随机读最多 n 份文件里本来就有的文字（不是 OCR 认出的；内容相同的文件只读一份），每份最多
+// maxBytes 字节，交给 fn。按文件编号范围随机探测，不扫全表。OCR 引擎对比拿它当「这台电脑上真实用到的词」。
+func (d *DB) RandomTexts(ctx context.Context, n, maxBytes int, fn func(string)) error {
+	var maxID sql.NullInt64
+	if err := d.R.QueryRowContext(ctx, `SELECT max(id) FROM files`).Scan(&maxID); err != nil || !maxID.Valid {
+		return err
+	}
+	seen := map[int64]bool{}
+	for tries := 0; tries < n*3 && len(seen) < n && ctx.Err() == nil; tries++ {
+		var tid int64
+		if err := d.R.QueryRowContext(ctx, `SELECT text_id FROM files WHERE id>=? AND ocr=0 AND state=1 AND text_id>0 AND text_len>=200 ORDER BY id LIMIT 1`,
+			1+rand.Int64N(maxID.Int64)).Scan(&tid); err != nil || seen[tid] {
+			continue
+		}
+		seen[tid] = true
+		t, err := d.GetTextByID(tid)
+		if err != nil || t == nil {
+			continue
+		}
+		s := t.Text
+		if len(s) > maxBytes {
+			s = s[:maxBytes]
+		}
+		fn(s)
+	}
+	return ctx.Err()
+}

@@ -18,6 +18,11 @@ const (
 	// OCRModelWin 是 Windows 自带的 OCR（实验）：不用 OCR 组件的检测和认字模型，整页交给系统识别。
 	// 系统要装有中文（简体）识别语言。只在用户手动选择时使用。
 	OCRModelWin = "win"
+	// OCRModelV6Big 只在 OCR 引擎对比里用：PP-OCRv6 small，但找文字时把图片长边缩到 2048 像素（组件默认 1024）。
+	// A4 扫描页（200 dpi 约 1654×2339）缩到 1024 时字只剩四成多大，大幅面的页更小，小字可能找不到。
+	OCRModelV6Big = "v6big"
+	// ocrBigSide 是 OCRModelV6Big 找文字用的图片长边。
+	ocrBigSide = 2048
 )
 
 // ocrModelFiles 是各模型在组件 models 目录里的文件：认字模型、字表。v4 用 args.txt 里写的，不在这里。
@@ -37,6 +42,8 @@ func OCRModelName(model string) string {
 		return "PP-OCRv4"
 	case OCRModelWin:
 		return "Windows 自带 OCR（实验）"
+	case OCRModelV6Big:
+		return "PP-OCRv6 small（大图找字）"
 	}
 	return model
 }
@@ -50,6 +57,9 @@ func (c OCRConfig) Model() string {
 		if v, ok := strings.CutPrefix(a, "--rec="); ok {
 			for m, files := range ocrModelFiles {
 				if filepath.Base(v) == files[0] {
+					if m == OCRModelV6 && c.MaxSide >= ocrBigSide {
+						return OCRModelV6Big
+					}
 					return m
 				}
 			}
@@ -78,6 +88,8 @@ func (c OCRConfig) HasModel(model string) bool {
 		return c.Enabled()
 	case OCRModelWin:
 		return c.Enabled() && WinOCRAvailable() == nil
+	case OCRModelV6Big:
+		return c.HasModel(OCRModelV6)
 	}
 	files, ok := ocrModelFiles[model]
 	dir := c.modelsDir()
@@ -109,6 +121,13 @@ func (c OCRConfig) WithModel(model string) OCRConfig {
 	if model == OCRModelWin {
 		if c.HasModel(model) {
 			c.Engine = OCRModelWin
+		}
+		return c
+	}
+	if model == OCRModelV6Big {
+		if c.HasModel(OCRModelV6) {
+			c = c.WithModel(OCRModelV6)
+			c.MaxSide = ocrBigSide
 		}
 		return c
 	}
