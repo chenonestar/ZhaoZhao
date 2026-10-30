@@ -159,6 +159,10 @@ func rtFactory(class string, iid *windows.GUID) (*comObject, error) {
 	return f, nil
 }
 
+// comCall 调 COM 方法。参数里 uintptr(unsafe.Pointer(&x)) 形式的写回位置要放到堆上：
+// 留在栈上的话，栈扩容一挪，Windows 就写到旧地址，x 还是空的（v0.2.9 的「解析进程崩溃」）。
+//
+//go:uintptrescapes
 func comCall(o *comObject, i int, args ...uintptr) uintptr {
 	hr, _, _ := syscall.SyscallN(o.method(i), append([]uintptr{o.ptr()}, args...)...)
 	return hr

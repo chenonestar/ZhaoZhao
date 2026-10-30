@@ -3,6 +3,7 @@ package extract
 import (
 	"image"
 	"image/draw"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -74,6 +75,22 @@ func TestWinOCR(t *testing.T) {
 	draw.Draw(rgba, rgba.Bounds(), img, image.Point{}, draw.Src)
 	if text, err := e.Recognize(rgba, time.Minute); err != nil || !strings.Contains(text, "quick brown fox") {
 		t.Errorf("彩色图片：%q %v", text, err)
+	}
+}
+
+// 连续认多次，每次之间做一次垃圾回收（会缩小空闲的栈，下次识别时栈再长大、挪位置）：
+// 0.2.9 交给 Windows 的写回位置在栈上，栈一挪就拿到空值，解析进程崩溃。
+func TestWinOCRRepeat(t *testing.T) {
+	e, err := newWinOCR("en-US")
+	if err != nil {
+		t.Skipf("这台电脑用不了 Windows 自带的 OCR：%v", err)
+	}
+	img := textImage(t, "The quick brown fox jumps over the lazy dog.")
+	for i := 0; i < 30; i++ {
+		runtime.GC()
+		if text, err := e.Recognize(img, time.Minute); err != nil || !strings.Contains(text, "quick brown fox") {
+			t.Fatalf("第 %d 次：%q %v", i+1, text, err)
+		}
 	}
 }
 
