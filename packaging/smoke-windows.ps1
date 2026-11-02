@@ -49,7 +49,7 @@ try {
     if (-not (Test-Path $inst)) { throw "找找没有启动（没有生成 instance.json）" }
     $tok = (Get-Content $inst -Raw | ConvertFrom-Json).token
     $sess = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-    $sess.Cookies.Add((New-Object Net.Cookie("zz", $tok, "/", "127.0.0.1")))
+    $sess.Cookies.Add((New-Object Net.Cookie("zz$Port", $tok, "/", "127.0.0.1")))   # 0.2.12 起凭证名带端口号
     $api = "http://127.0.0.1:$Port"
 
     Write-Host "== 等待索引完成"
