@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,6 +11,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/chenonestar/zhaozhao/internal/logx"
 	"golang.org/x/sys/windows"
 )
 
@@ -42,16 +44,21 @@ func runningOthers(dataDir string) []otherInstance {
 		}
 		exe := processExe(p.pid)
 		if exe == "" {
+			startNotes = append(startNotes, fmt.Sprintf("找别的找找：进程 %d 取不到程序位置", p.pid))
 			continue
 		}
 		dd := dataDirOfExe(exe)
 		if dd == "" || samePath(dd, dataDir) {
 			continue
 		}
-		if o, ok := probeInstance(dd); ok && o.PID == int(p.pid) {
+		o, ok := probeInstance(dd)
+		if ok && o.PID == int(p.pid) {
 			o.Exe = exe
 			out = append(out, o)
+			continue
 		}
+		startNotes = append(startNotes, fmt.Sprintf("找别的找找：进程 %d（%s）没确认是在运行的找找（数据目录 %s，instance.json 里的进程 %d，连得上 %v）",
+			p.pid, logx.P(exe), logx.P(dd), o.PID, ok))
 	}
 	return out
 }

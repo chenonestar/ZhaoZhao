@@ -224,7 +224,11 @@ func adoptDataDir(from, to string) error {
 // 只在打开界面的启动方式下问（开机自启 --no-ui 时不弹窗，照常启动）。
 func checkOthers(dataDir string) bool {
 	var closed *knownDir // 刚关掉的找找的数据目录
-	for _, o := range runningOthers(dataDir) {
+	others := runningOthers(dataDir)
+	for _, o := range others {
+		startNotes = append(startNotes, fmt.Sprintf("找别的找找：%s 在运行（进程 %d）", o.logLabel(), o.PID))
+	}
+	for _, o := range others {
 		me := "v" + strings.TrimPrefix(version, "v")
 		switch askChoice("找找", fmt.Sprintf("已有一个找找在运行：%s", o.label()),
 			"两个找找同时运行会同时建索引、抢 CPU 和硬盘，托盘里有两个一样的图标，全局快捷键只有先启动的那个能用。",
