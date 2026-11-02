@@ -43,4 +43,12 @@ func TestOCRModels(t *testing.T) {
 	if slices.Contains(c.Models(), OCRModelV6Big) || !c.HasModel(OCRModelV6Big) {
 		t.Fatal("大图找字不应出现在设置的模型列表里，但有 v6 时可以用")
 	}
+	// 字少时大图再认：参数和 v6 一样（同一个常驻进程），只多一个标记
+	auto := c.WithModel(OCRModelV6Auto)
+	if !auto.Adaptive || auto.MaxSide != 0 || auto.Model() != OCRModelV6Auto || auto.key() != c.WithModel(OCRModelV6).key() {
+		t.Fatalf("字少时大图再认：%+v", auto)
+	}
+	if v := auto.WithModel(OCRModelV6); v.Adaptive || v.Model() != OCRModelV6 {
+		t.Fatal("换回 v6 时去掉标记")
+	}
 }

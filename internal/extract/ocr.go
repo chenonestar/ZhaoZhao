@@ -52,6 +52,9 @@ type OCRConfig struct {
 	Engine string `json:"engine,omitempty"`
 	// MaxSide 是找文字时把图片长边缩到多少像素（RapidOCR 的 --maxSideLen，它默认 1024）。0 表示不指定。
 	MaxSide int `json:"maxSide,omitempty"`
+	// Adaptive 为真时，认出的字少、页面上的笔画却多的页（多半是小字在缩小后的图上找不到）用大图再认一遍，
+	// 取认出内容多的那次，见 ocrPage。
+	Adaptive bool `json:"adaptive,omitempty"`
 }
 
 // args 返回启动 OCR 进程的参数。
@@ -302,6 +305,109 @@ func killOCR(p *ocrProc) {
 type ocrResp struct {
 	Code int             `json:"code"`
 	Data json.RawMessage `json:"data"`
+}
+
+// 大图再认的条件（ocrPage）：认出的字（不计空白）少于 bigRetryChars，深色像素却不少于 bigRetryMinInk，且每个字
+// 摊到的深色像素超过 bigRetryInkPerChar（200 dpi 的正文每个字一两百个深色像素，小字更少；认出的字远少于笔画
+// 该有的，说明很多字没找到）。照片、图章多的页也会再认一遍，白花一点时间，不影响结果。
+const (
+	bigRetryChars      = 500
+	bigRetryMinInk     = 40_000
+	bigRetryInkPerChar = 400
+)
+
+// ocrPage 识别一页（PDF 渲染出的页或一张图片）。c.Adaptive 时，认出的字少、页面上的笔画（ink 给出深色像素数，
+// 只在需要时才算）却多，用大图（ocrBigSide）再认一遍，认出的明显更多就用它。用 PP-OCRv6 找文字时会把图片长边
+// 缩到 1024 像素，A4 扫描页上的小字、大幅面的页常常找不到（0.2.11 的 OCR 引擎对比：有的页大图认出 1070 字，平常
+// 只有 124 字）。大图那遍用一个临时的 OCR 进程，认完就结束，不多占内存。
+func ocrPage(c OCRConfig, path string, ink func() int) (string, error) {
+	text, err := ocrImage(c, path)
+	if err != nil || !c.Adaptive || c.Engine == OCRModelWin {
+		return text, err
+	}
+	n := countNonSpace(text)
+	if n >= bigRetryChars {
+		return text, nil
+	}
+	dark := ink()
+	if dark < bigRetryMinInk || dark < bigRetryInkPerChar*max(n, 1) {
+		return text, nil
+	}
+	big := c
+	big.Adaptive, big.MaxSide = false, ocrBigSide
+	t0 := time.Now()
+	t2, err := ocrImageOnce(big, path)
+	if err != nil {
+		logx.Debugf("OCR 大图再认失败：%v", err)
+		return text, nil
+	}
+	n2 := countNonSpace(t2)
+	logx.Debugf("OCR 认出 %d 字、深色像素 %d，大图再认 %.1fs 认出 %d 字", n, dark, time.Since(t0).Seconds(), n2)
+	if n2 > n+n/3+20 {
+		return t2, nil
+	}
+	return text, nil
+}
+
+func countNonSpace(s string) int {
+	n := 0
+	for _, r := range s {
+		if r > ' ' && r != '　' {
+			n++
+		}
+	}
+	return n
+}
+
+// darkPixels 数灰度图里的深色像素。
+func darkPixels(g *image.Gray) int {
+	n := 0
+	for _, v := range g.Pix {
+		if v < 128 {
+			n++
+		}
+	}
+	return n
+}
+
+// darkPixelsOf 解码图片文件，数深色像素（解不开时为 0，不再认）。
+func darkPixelsOf(path string) int {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	img, _, err := image.Decode(f)
+	if err != nil {
+		return 0
+	}
+	if g, ok := img.(*image.Gray); ok {
+		return darkPixels(g)
+	}
+	b := img.Bounds()
+	n := 0
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			r, g, bl, _ := img.At(x, y).RGBA()
+			if (r*299+g*587+bl*114)/1000 < 128<<8 {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// ocrImageOnce 用一个临时启动的 OCR 进程识别一张图片，认完结束它（大图再认用，不打扰常驻的进程）。
+func ocrImageOnce(c OCRConfig, imgPath string) (string, error) {
+	if n := ocrThreads.Load(); n > 0 {
+		c.Threads = int(n)
+	}
+	p, err := startOCR(c)
+	if err != nil {
+		return "", err
+	}
+	defer killOCR(p)
+	return recognizeWith(p, c, imgPath)
 }
 
 // ocrImage 识别一张图片，返回按阅读顺序拼接的文字。
@@ -605,7 +711,7 @@ func extractImage(p, ext string, opt Options) doc.Result {
 			return err
 		}
 		t1 := time.Now()
-		text, err := ocrImage(opt.OCR, path)
+		text, err := ocrPage(opt.OCR, path, func() int { return darkPixelsOf(path) })
 		if err != nil {
 			return err
 		}
@@ -807,7 +913,7 @@ func ocrPDFiumPages(d *pdfDoc, p string, pages []int, opt Options) (pdfOCRResult
 			continue // 空白页
 		}
 		t1 := time.Now()
-		text, err := ocrImage(opt.OCR, r.path)
+		text, err := ocrPage(opt.OCR, r.path, func() int { return r.dark })
 		os.Remove(r.path)
 		if errors.Is(err, errOCRTimeout) {
 			skip(pg, "识别超时")
@@ -830,6 +936,7 @@ func ocrPDFiumPages(d *pdfDoc, p string, pages []int, opt Options) (pdfOCRResult
 type renderedPage struct {
 	path string
 	size image.Point
+	dark int           // 深色像素数（大图再认时判断用）
 	dur  time.Duration // 渲染加写文件的用时
 	skip string        // 无法渲染的原因
 	err  error         // 写临时文件失败：整份文件失败
@@ -859,7 +966,7 @@ func renderAhead(d *pdfDoc, pages []int, tmp string) (<-chan renderedPage, func(
 				var data []byte
 				var ext string
 				if data, ext, r.err = ocrImageData(img); r.err == nil {
-					r.size = img.Rect.Size()
+					r.size, r.dark = img.Rect.Size(), darkPixels(img)
 					r.path, r.err = tempImage(tmp, "p"+strconv.Itoa(pg)+ext, data)
 				}
 			}
@@ -990,7 +1097,7 @@ func ocrPDFPages(p string, pages []int, opt Options) (pdfOCRResult, error) {
 			return res, err
 		}
 		t1 := time.Now()
-		text, err := ocrImage(opt.OCR, path)
+		text, err := ocrPage(opt.OCR, path, func() int { return darkPixelsOf(path) })
 		os.Remove(path)
 		if errors.Is(err, errOCRTimeout) {
 			skip(pg, "识别超时")

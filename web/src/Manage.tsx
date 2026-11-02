@@ -704,7 +704,7 @@ function HotkeyField({ value, onChange, state }: { value: string; onChange: (v: 
 
 const modelNames: Record<string, string> = {
   v6: "PP-OCRv6 small 普通版", v6q: "PP-OCRv6 small 量化版", v4: "PP-OCRv4（旧模型）", win: "Windows 自带 OCR（实验）",
-  v6big: "PP-OCRv6 small 大图找字",
+  v6big: "PP-OCRv6 small 大图找字", v6auto: "PP-OCRv6 small 字少时大图再认",
 };
 const modelName = (m: string) => modelNames[m] ?? m;
 
@@ -848,7 +848,7 @@ function OCRTest() {
   return (
     <div className="field">
       <div className="dim small">OCR 引擎对比：从 OCR 识别过的文件里随机抽取若干个（PDF 每个最多认 5 页），用这台电脑上的各个认字模型各认一遍，
-        和 PP-OCRv6 普通版比较认出的字和每页用时（都用 1 个线程）。另外用「大图找字」（找文字时用 2048 像素的图，平常是 1024）再认一遍，
+        和 PP-OCRv6 普通版比较认出的字和每页用时（都用 1 个线程）。另外用「大图找字」（找文字时用 2048 像素的图，平常是 1024）和「字少时大图再认」（只有认出的字少、笔画却多的页才用大图再认）各认一遍，
         看小字能多认出多少、慢多少；各模型多认出的内容自动判断是真字还是乱码。不改动索引；结果会包含在诊断信息里（认出的文字单独存一个文件，发送前可以删掉）。
         还在建索引时用时会偏长。</div>
       <div className="btns">

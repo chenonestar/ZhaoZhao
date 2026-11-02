@@ -146,14 +146,14 @@ func (m *Manager) CancelOCRTest() {
 	}
 }
 
-// ocrTestModels 是要比的模型：设置里能选的那些，PP-OCRv6 普通版后面加上大图找字（判断别的模型多认的内容、
-// 看找字用大图能多认出多少，见 ocrjudge.go）。
+// ocrTestModels 是要比的模型：设置里能选的那些，PP-OCRv6 普通版后面加上「字少时大图再认」（看能找回多少、
+// 慢多少，好的话改成默认）和大图找字（判断别的模型多认的内容、看找字用大图能多认出多少，见 ocrjudge.go）。
 func ocrTestModels(c extract.OCRConfig) []string {
 	var out []string
 	for _, x := range c.Models() {
 		out = append(out, x)
 		if x == extract.OCRModelV6 && c.HasModel(extract.OCRModelV6Big) {
-			out = append(out, extract.OCRModelV6Big)
+			out = append(out, extract.OCRModelV6Auto, extract.OCRModelV6Big)
 		}
 	}
 	return out
