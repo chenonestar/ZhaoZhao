@@ -160,14 +160,21 @@ func (s *Server) Shutdown() {
 	_ = s.srv.Shutdown(ctx)
 }
 
-const cookieName = "zz"
+// CookieName 是界面登录凭证（cookie）的名字，带端口号。浏览器按主机存 cookie、不分端口，0.2.11 及以前都叫
+// 「zz」：两个找找同时开着时，后打开的界面会把先开的那个的凭证覆盖掉，先开的界面就显示「连接已断开」。
+func CookieName(port string) string { return "zz" + port }
+
+// AuthCookies 是程序自己访问另一个找找的界面服务时带的凭证：新旧两种名字都带上（对方可能是 0.2.11 及以前的版本）。
+func AuthCookies(port int, token string) []*http.Cookie {
+	return []*http.Cookie{{Name: CookieName(fmt.Sprint(port)), Value: token}, {Name: "zz", Value: token}}
+}
 
 // page 处理首次打开：URL 中带正确令牌时写入 Cookie 并跳转到干净地址。
 func (s *Server) page(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if t := r.URL.Query().Get("t"); t != "" {
 			if subtle.ConstantTimeCompare([]byte(t), []byte(s.Token)) == 1 {
-				http.SetCookie(w, &http.Cookie{Name: cookieName, Value: s.Token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
+				http.SetCookie(w, &http.Cookie{Name: CookieName(portOf(s.Addr)), Value: s.Token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
 				http.Redirect(w, r, "/", http.StatusFound)
 				return
 			}
@@ -192,7 +199,7 @@ func (s *Server) guard(next http.Handler) http.Handler {
 			if r.URL.Path != "/api/ping" && s.Actions.OnFirstRequest != nil {
 				s.firstAPI.Do(func() { s.Actions.OnFirstRequest(true) })
 			}
-			c, err := r.Cookie(cookieName)
+			c, err := r.Cookie(CookieName(portOf(s.Addr)))
 			if err != nil || subtle.ConstantTimeCompare([]byte(c.Value), []byte(s.Token)) != 1 {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return

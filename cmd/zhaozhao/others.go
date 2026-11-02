@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/chenonestar/zhaozhao/internal/logx"
+	"github.com/chenonestar/zhaozhao/internal/server"
 )
 
 // otherInstance 是本机上正在运行的另一个找找。
@@ -59,7 +60,9 @@ func probeInstance(dataDir string) (otherInstance, bool) {
 	}
 	o := otherInstance{PID: in.PID, DataDir: dataDir, port: in.Port, token: in.Token}
 	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/api/ping", in.Port), nil)
-	req.AddCookie(&http.Cookie{Name: "zz", Value: in.Token})
+	for _, c := range server.AuthCookies(in.Port, in.Token) {
+		req.AddCookie(c)
+	}
 	resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
 	if err != nil {
 		return o, false
@@ -79,7 +82,9 @@ func probeInstance(dataDir string) (otherInstance, bool) {
 // quitInstance 请另一个找找退出，等它的进程结束（最多 20 秒）。
 func quitInstance(o otherInstance) bool {
 	req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/quit", o.port), strings.NewReader("{}"))
-	req.AddCookie(&http.Cookie{Name: "zz", Value: o.token})
+	for _, c := range server.AuthCookies(o.port, o.token) {
+		req.AddCookie(c)
+	}
 	req.Header.Set("X-ZhaoZhao", "1")
 	req.Header.Set("Content-Type", "application/json")
 	if resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req); err == nil {

@@ -417,7 +417,9 @@ func existingInstance(dataDir string) (string, bool) {
 	defer cancel()
 	url := fmt.Sprintf("http://127.0.0.1:%d", in.Port)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url+"/api/ping", nil)
-	req.AddCookie(&http.Cookie{Name: "zz", Value: in.Token})
+	for _, c := range server.AuthCookies(in.Port, in.Token) {
+		req.AddCookie(c)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", false

@@ -333,3 +333,21 @@ func TestDiagnosticsAsync(t *testing.T) {
 		t.Fatal("完成后应打开所在文件夹")
 	}
 }
+
+// 两个找找同时开着（不同端口）：同一个浏览器里先后打开两个界面，各自的凭证互不覆盖（cookie 不分端口）。
+func TestTwoInstancesKeepTheirCookies(t *testing.T) {
+	a, _ := newTestServer(t)
+	b, _ := newTestServer(t)
+	jar, _ := cookiejar.New(nil)
+	c := &http.Client{Jar: jar}
+	for _, s := range []*Server{a, b} {
+		if r, err := c.Get(s.URL()); err != nil || r.StatusCode != 200 {
+			t.Fatalf("%v %v", err, r)
+		}
+	}
+	for _, s := range []*Server{a, b} {
+		if r, _ := c.Get("http://" + s.Addr + "/api/ping"); r.StatusCode != 200 {
+			t.Fatalf("%s 的界面应仍能连上：%d", s.Addr, r.StatusCode)
+		}
+	}
+}
