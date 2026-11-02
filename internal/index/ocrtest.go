@@ -34,12 +34,13 @@ type OCRTestModel struct {
 	Pages  int     `json:"pages"`
 	Chars  int     `json:"chars"`  // 认出的字数（不计空白）
 	MsPage float64 `json:"msPage"` // 每页平均用时（毫秒，1 个线程）
-	// Agree 是和基准模型认出的字相同的比例（%，按编辑距离逐个文件算，按字数加权平均）；CharsVsBase 是认出的字数
-	// 比基准模型多（正）或少（负）百分之几（两个都认成功的文件）
+	// Agree 是和基准模型认出的字相同的比例（%，按编辑距离逐个文件算，按认的页数加权平均）；CharsVsBase 是认出的
+	// 字数比基准模型多（正）或少（负）百分之几（两个都认成功的文件，逐个文件算、按页数加权平均，每个文件最多算
+	// 少 100%、多 300%）
 	Agree       float64 `json:"agree"`
 	CharsVsBase float64 `json:"charsVsBase"`
 	LowFiles    int     `json:"lowFiles"` // 和基准相同的不到 90% 的文件数
-	// 不看先后顺序的比较（%，按相邻两字算，整份文字，按字数加权平均）：Cover 是基准认出的内容它认到了多少，
+	// 不看先后顺序的比较（%，按相邻两字算，整份文字，按认的页数加权平均）：Cover 是基准认出的内容它认到了多少，
 	// CoverBack 是它认出的内容基准也有多少。全文索引就是按相邻两字建的，Cover 差不多就是「基准能搜到的它也能搜到」
 	// 的比例。0.2.8 的「相同的字」按先后顺序比，Windows OCR 读表格的顺序不同，比出来只有一半，分不清是顺序不同还是认错。
 	Cover     float64 `json:"cover"`
@@ -325,7 +326,8 @@ func (m *Manager) runOCRTest(ctx context.Context, samples []ocrPick, models []st
 	type acc struct {
 		ms                            int64
 		agreeW, coverW, backW, weight float64
-		chars, baseChars, both        int
+		diffW                         float64
+		both                          int
 	}
 	accs := map[string]*acc{}
 	rows := map[string]*OCRTestModel{}
@@ -365,13 +367,13 @@ func (m *Manager) runOCRTest(ctx context.Context, samples []ocrPick, models []st
 				if it.Garbled = garbled(g.text, base.text, it.Cover, it.CoverBack); it.Garbled {
 					row.Garbled++
 				}
-				w := float64(max(bc, chars, 1))
+				// 按认的页数加权（0.2.11 按字数：一个本身带几百万字文字层的 PDF 占了总量的 99%，把平均数带偏了）
+				w := float64(max(pages[i], 1))
 				a.agreeW += it.Agree * w
 				a.coverW += it.Cover * w
 				a.backW += it.CoverBack * w
 				a.weight += w
-				a.chars += chars
-				a.baseChars += bc
+				a.diffW += w * min(3, max(-1, float64(chars-bc)/float64(max(bc, 1))))
 				a.both++
 				if it.Agree < 90 {
 					row.LowFiles++
@@ -396,8 +398,8 @@ func (m *Manager) runOCRTest(ctx context.Context, samples []ocrPick, models []st
 		if a.weight > 0 {
 			row.Agree, row.Cover, row.CoverBack = a.agreeW/a.weight, a.coverW/a.weight, a.backW/a.weight
 		}
-		if a.baseChars > 0 {
-			row.CharsVsBase = 100 * float64(a.chars-a.baseChars) / float64(a.baseChars)
+		if a.weight > 0 {
+			row.CharsVsBase = 100 * a.diffW / a.weight
 		}
 		r.Models = append(r.Models, *row)
 	}
