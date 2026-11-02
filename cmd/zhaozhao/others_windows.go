@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 	"unsafe"
@@ -15,50 +16,54 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// runningOthers 找出本机上正在运行、用别的数据目录的找找：进程名和本程序相同、父进程不是找找（解析子进程的
-// 父进程是找找主程序），再按它的程序位置推出数据目录，读那里的 instance.json 确认、取版本号。0.2.10 及以前的
-// 版本也能这样找到。
+// runningOthers 找出本机上正在运行、用别的数据目录的找找：进程名和本程序相同的进程，按程序位置推出数据目录，
+// 读那里的 instance.json，里面记的进程号是这个进程、连得上，就是在运行的找找主程序（解析子进程和主程序同名、
+// 同一个数据目录，但进程号对不上）。0.2.10 及以前的版本也能这样找到。不按父进程区分主程序和子进程：从别的
+// 找找（或名字相同的程序）里启动的主程序会被当成子进程漏掉。
 func runningOthers(dataDir string) []otherInstance {
 	self, _ := os.Executable()
 	names := map[string]bool{strings.ToLower(filepath.Base(self)): true, "zhaozhao.exe": true}
 	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
+		startNotes = append(startNotes, "找别的找找：列不出进程："+err.Error())
 		return nil
 	}
 	defer windows.CloseHandle(snap)
-	type proc struct{ pid, parent uint32 }
-	var zz []proc
-	isZZ := map[uint32]bool{}
+	pids := map[string][]uint32{} // 数据目录 → 这些进程
+	exes := map[string]string{}
 	var e windows.ProcessEntry32
 	e.Size = uint32(unsafe.Sizeof(e))
 	for err = windows.Process32First(snap, &e); err == nil; err = windows.Process32Next(snap, &e) {
-		if names[strings.ToLower(windows.UTF16ToString(e.ExeFile[:]))] {
-			zz = append(zz, proc{e.ProcessID, e.ParentProcessID})
-			isZZ[e.ProcessID] = true
-		}
-	}
-	var out []otherInstance
-	for _, p := range zz {
-		if int(p.pid) == os.Getpid() || isZZ[p.parent] {
+		if !names[strings.ToLower(windows.UTF16ToString(e.ExeFile[:]))] || int(e.ProcessID) == os.Getpid() {
 			continue
 		}
-		exe := processExe(p.pid)
+		exe := processExe(e.ProcessID)
 		if exe == "" {
-			startNotes = append(startNotes, fmt.Sprintf("找别的找找：进程 %d 取不到程序位置", p.pid))
+			startNotes = append(startNotes, fmt.Sprintf("找别的找找：进程 %d 取不到程序位置", e.ProcessID))
 			continue
 		}
 		dd := dataDirOfExe(exe)
 		if dd == "" || samePath(dd, dataDir) {
 			continue
 		}
+		key := strings.ToLower(filepath.Clean(absPath(dd)))
+		pids[key] = append(pids[key], e.ProcessID)
+		exes[key] = exe
+	}
+	var out []otherInstance
+	for key, ps := range pids {
+		dd := filepath.Dir(exes[key])
+		if d := dataDirOfExe(exes[key]); d != "" {
+			dd = d
+		}
 		o, ok := probeInstance(dd)
-		if ok && o.PID == int(p.pid) {
-			o.Exe = exe
+		if ok && slices.Contains(ps, uint32(o.PID)) {
+			o.Exe = processExe(uint32(o.PID))
 			out = append(out, o)
 			continue
 		}
-		startNotes = append(startNotes, fmt.Sprintf("找别的找找：进程 %d（%s）没确认是在运行的找找（数据目录 %s，instance.json 里的进程 %d，连得上 %v）",
-			p.pid, logx.P(exe), logx.P(dd), o.PID, ok))
+		startNotes = append(startNotes, fmt.Sprintf("找别的找找：%s 有 %d 个同名进程，但没确认是在运行的找找（instance.json 里的进程 %d，连得上 %v）",
+			logx.P(dd), len(ps), o.PID, ok))
 	}
 	return out
 }
