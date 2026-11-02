@@ -480,3 +480,65 @@ SELECT root_id,volume_id,'小图.png','','小图.png','png','',100,1,4,?,'',0,0,
 		t.Fatalf("换了模型后应算要重新识别：%d", n)
 	}
 }
+
+// 先快后准：没快速识别过的文件用 Windows 自带的 OCR；OCR 队列空了、没有正在识别的，把快速识别的排回队列用
+// 认字模型重新识别（别的模型识别的不动）；队列里还有文件时不排。
+func TestFastFirst(t *testing.T) {
+	old := hasWinOCR
+	t.Cleanup(func() { hasWinOCR = old })
+	hasWinOCR = func(extract.OCRConfig) bool { return true }
+	dir := t.TempDir()
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", dir, true, volume.KindLocal)
+	e := newEnvWith(t, prov, `{"workers":1,"ocrWorkers":1,"legacyWorkers":1,"configVersion":2}`,
+		func(m *Manager) { useFakeOCR(t, m, "10ms") })
+	e.m.PauseAll()
+	r, err := e.m.AddRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitIdle()
+	add := func(name string, state, ocr int, model string) {
+		if _, err := e.m.DB.W.Exec(`INSERT INTO files(root_id,volume_id,rel_path,inner,name,ext,kind,size,mtime,state,err,hash,text_len,ocr,meta,prio,indexed_at,ocr_model)
+VALUES(?,?,?,'',?,'png','',100,1,?,'','',0,?,'',?,1,?)`, r.ID, r.VolumeID, name, name, state, ocr, prioOCR, model); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("快速.png", 1, 1, extract.OCRModelWin)
+	add("准确.png", 1, 1, "v6")
+	add("排队.png", 0, 0, "")
+	cfg := e.m.Config()
+	if e.m.fastFirst(cfg) {
+		t.Fatal("没打开设置时不起作用")
+	}
+	cfg.OCRFastFirst = true
+	if err := e.m.SetConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg = e.m.Config()
+	files := map[string]store.File{}
+	rows, _ := e.m.DB.R.Query(`SELECT id FROM files WHERE ext='png'`)
+	for rows.Next() {
+		var id int64
+		rows.Scan(&id)
+		f, _ := e.m.DB.GetFile(id)
+		files[f.Name] = *f
+	}
+	rows.Close()
+	if !e.m.fastModel(cfg, files["排队.png"]) || !e.m.fastModel(cfg, files["准确.png"]) || e.m.fastModel(cfg, files["快速.png"]) {
+		t.Fatal("没快速识别过的先快速识别，快速识别过的用认字模型")
+	}
+	state := func(name string) (s int) {
+		e.m.DB.R.QueryRow(`SELECT state FROM files WHERE name=?`, name).Scan(&s)
+		return
+	}
+	e.m.fastFirstStep(cfg)
+	if state("快速.png") != 1 {
+		t.Fatal("OCR 队列里还有文件时不应排回")
+	}
+	e.m.DB.W.Exec(`UPDATE files SET state=1, ocr=1, ocr_model='win' WHERE name='排队.png'`)
+	e.m.fastFirstStep(cfg)
+	if state("快速.png") != 0 || state("排队.png") != 0 || state("准确.png") != 1 {
+		t.Fatalf("队列空了：快速识别的排回队列，别的模型识别的不动：%d %d %d", state("快速.png"), state("排队.png"), state("准确.png"))
+	}
+}

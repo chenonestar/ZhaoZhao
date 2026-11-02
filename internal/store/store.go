@@ -415,9 +415,10 @@ type File struct {
 	OCR      bool   `json:"ocr"`
 	Meta     string `json:"meta"`
 	Prio     int    `json:"prio"`
+	OCRModel string `json:"ocrModel,omitempty"` // 识别时用的认字模型（OCR 过的文件，0.2.8 起记下）
 }
 
-const fileCols = `id,root_id,volume_id,rel_path,inner,name,ext,kind,size,mtime,state,err,hash,text_len,ocr,meta,prio`
+const fileCols = `id,root_id,volume_id,rel_path,inner,name,ext,kind,size,mtime,state,err,hash,text_len,ocr,meta,prio,ocr_model`
 
 type scanner interface{ Scan(...any) error }
 
@@ -425,7 +426,7 @@ func scanFile(s scanner) (File, error) {
 	var f File
 	var ocr int
 	err := s.Scan(&f.ID, &f.RootID, &f.VolumeID, &f.RelPath, &f.Inner, &f.Name, &f.Ext, &f.Kind, &f.Size, &f.MTime,
-		&f.State, &f.Err, &f.Hash, &f.TextLen, &ocr, &f.Meta, &f.Prio)
+		&f.State, &f.Err, &f.Hash, &f.TextLen, &ocr, &f.Meta, &f.Prio, &f.OCRModel)
 	f.OCR = ocr != 0
 	return f, err
 }
@@ -888,6 +889,17 @@ func (d *DB) CountOCRDone(prioOCR int, model string) (other, unknown int64, err 
 	return
 }
 
+// ResetOCRFrom 把用认字模型 model 识别过的文件重新排到 OCR 队列（先快后准：Windows 自带 OCR 先识别的，
+// 全部做完后用准确的模型重新识别），返回个数。旧文字保留到重新识别完成时替换。
+func (d *DB) ResetOCRFrom(prioOCR int, model string) (int64, error) {
+	res, err := d.W.Exec(`UPDATE files SET state=0, err='', indexed_at=0, prio=? WHERE `+ocrDoneCond+` AND ocr_model=?`,
+		prioOCR, prioOCR, model)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // ResetOCR 把用别的认字模型（不是 model）识别过的文件重新排到 OCR 队列（换了认字模型后重新识别），返回个数。
 // 旧文字保留到重新识别完成时替换，期间照样能搜到；内容相同的文件不会复用旧模型的结果（刚删除的文件留着的
 // 旧结果也一并丢掉）。
@@ -986,7 +998,7 @@ func (d *DB) QueryRanked(match string) ([]Ranked, error) {
 		var ocr int
 		var rank float64
 		if err := rows.Scan(&f.ID, &f.RootID, &f.VolumeID, &f.RelPath, &f.Inner, &f.Name, &f.Ext, &f.Kind, &f.Size, &f.MTime,
-			&f.State, &f.Err, &f.Hash, &f.TextLen, &ocr, &f.Meta, &f.Prio, &rank); err != nil {
+			&f.State, &f.Err, &f.Hash, &f.TextLen, &ocr, &f.Meta, &f.Prio, &f.OCRModel, &rank); err != nil {
 			return nil, err
 		}
 		f.OCR = ocr != 0

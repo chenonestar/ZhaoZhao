@@ -735,8 +735,10 @@ func (m *Manager) runJob(j *job) {
 			hash = hashFile(abs, f.Size)
 		}
 	}
+	// 先快后准的第二遍（快速识别过的文件用准确的模型重新识别）：内容相同的文件也是快速识别的，不能复用它的结果
+	reOCR := j.class == prioOCR && f.OCRModel == extract.OCRModelWin && m.fastFirst(cfg)
 	if hash != "" {
-		if dup, _ := m.DB.FindDuplicate(hash, f.Size, f.ID); dup != 0 {
+		if dup, _ := m.DB.FindDuplicate(hash, f.Size, f.ID); dup != 0 && !(reOCR && m.fastDone(dup)) {
 			if p := m.prepareReuse(f, dup, hash); p != nil {
 				logx.Debugf("内容与已索引的文件相同，复用结果 %s", logx.P(abs))
 				m.statJob(j, time.Since(start), 0, 0, true)
@@ -745,7 +747,7 @@ func (m *Manager) runJob(j *job) {
 			}
 		}
 		// 刚删除的文件里有内容相同的（文件被移动、改名）：复用它的提取结果，不必重新提取、重新 OCR
-		if r, _ := m.DB.FindRecycled(hash, f.Size); r != nil {
+		if r, _ := m.DB.FindRecycled(hash, f.Size); r != nil && !reOCR {
 			if p := m.prepareRecycled(f, r, hash); p != nil {
 				logx.Debugf("内容与刚删除的文件相同（移动或改名），复用结果 %s", logx.P(abs))
 				m.statJob(j, time.Since(start), 0, 0, true)
@@ -757,6 +759,9 @@ func (m *Manager) runJob(j *job) {
 
 	useOCR := j.class == prioOCR
 	opts := m.extractOptions(cfg, useOCR)
+	if useOCR && m.fastModel(cfg, f) {
+		opts.OCR = m.ocrCfg.WithModel(extract.OCRModelWin) // 先快后准：先用 Windows 自带的 OCR，之后再重新识别
+	}
 	opts.LegacyMode = extract.LegacyNative // 内置解析不了的老格式文件返回 NeedConvert，排到老格式转换队列
 	pool := m.Pool
 	t := worker.Timeouts{Total: opts.Timeout + 15*time.Second}

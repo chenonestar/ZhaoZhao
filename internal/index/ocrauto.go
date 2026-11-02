@@ -13,6 +13,7 @@ import (
 	"github.com/chenonestar/zhaozhao/internal/awake"
 	"github.com/chenonestar/zhaozhao/internal/extract"
 	"github.com/chenonestar/zhaozhao/internal/logx"
+	"github.com/chenonestar/zhaozhao/internal/store"
 	"github.com/chenonestar/zhaozhao/internal/sysinfo"
 	"github.com/chenonestar/zhaozhao/internal/worker"
 )
@@ -234,6 +235,7 @@ func (m *Manager) ocrTuneStep() {
 		m.applyWorkers()
 	}
 	m.ocrTail(next, budget)
+	m.fastFirstStep(cfg)
 }
 
 // ocrTail：OCR 队列已经空了、正在识别的文件比进程少时（多半是排在最后的大文件），把空出来的线程平分给
@@ -708,4 +710,55 @@ func (m *Manager) ocrStatus() (threads int, perMin float64, note string) {
 		note = "正在用电脑，OCR 只用一半核心"
 	}
 	return p.threads, m.ocr.rate.perMin(), note
+}
+
+// ---- 先快后准（设置 OCRFastFirst）----
+
+// fastFirst 说明先快后准是否起作用：设置里打开了、这台电脑能用 Windows 自带的 OCR、认字模型不是它。
+func (m *Manager) fastFirst(cfg Config) bool {
+	return cfg.OCRFastFirst && m.ocrModel() != extract.OCRModelWin && hasWinOCR(m.ocrCfg)
+}
+
+// hasWinOCR 说明这台电脑能不能用 Windows 自带的 OCR（测试里换掉）。
+var hasWinOCR = func(c extract.OCRConfig) bool { return c.HasModel(extract.OCRModelWin) }
+
+// fastModel 说明这个 OCR 文件该不该先用 Windows 自带的 OCR 快速识别：先快后准起作用、它还没快速识别过
+// （快速识别过的是第二遍，用认字模型）。
+func (m *Manager) fastModel(cfg Config, f store.File) bool {
+	return f.OCRModel != extract.OCRModelWin && m.fastFirst(cfg)
+}
+
+// fastDone 说明文件 id 是不是用 Windows 自带的 OCR 快速识别的（第二遍不复用它的结果）。
+func (m *Manager) fastDone(id int64) bool {
+	f, err := m.DB.GetFile(id)
+	return err == nil && f != nil && f.OCRModel == extract.OCRModelWin
+}
+
+// fastFirstStep：先快后准，OCR 队列空了、也没有正在识别的文件时，把快速识别（Windows 自带 OCR）的文件排回
+// OCR 队列，用认字模型重新识别。第二遍进行中又来了新文件，新文件照样先快速识别，做完再来一遍。
+func (m *Manager) fastFirstStep(cfg Config) {
+	if !m.fastFirst(cfg) {
+		return
+	}
+	q, err := m.DB.OCRQueueSize(prioOCR)
+	if err != nil || q.Pages > 0 || q.PDFBytes > 0 || q.Others > 0 {
+		return
+	}
+	s := &m.sched
+	s.mu.Lock()
+	busy := false
+	for _, j := range s.inflight {
+		busy = busy || j.class == prioOCR
+	}
+	s.mu.Unlock()
+	if busy {
+		return
+	}
+	n, err := m.DB.ResetOCRFrom(prioOCR, extract.OCRModelWin)
+	if err != nil || n == 0 {
+		return
+	}
+	m.logf("先快后准：快速识别都做完了，用 %s 重新识别 Windows 自带 OCR 识别的 %d 个文件（旧文字在重新识别完成前照样能搜到）",
+		extract.OCRModelName(m.ocrModel()), n)
+	m.kick()
 }

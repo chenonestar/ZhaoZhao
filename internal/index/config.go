@@ -38,6 +38,10 @@ type Config struct {
 	// OCRModel 是认字模型：空为自动（新模型 PP-OCRv6 small 普通版；它在这台电脑上用不了时用组件自带的），
 	// 或 v6、v6q（量化版）、v4（组件自带的旧模型）、win（Windows 自带的 OCR，实验）。
 	OCRModel string `json:"ocrModel,omitempty"`
+	// OCRFastFirst：先快后准。没识别过的文件先用 Windows 自带的 OCR 识别（快约 5 倍，先能搜起来），OCR 队列全部
+	// 做完后，再把这些文件用认字模型（OCRModel）重新识别、替换掉。只在有 Windows 中文识别语言、认字模型不是
+	// Windows 自带 OCR 时起作用。
+	OCRFastFirst bool `json:"ocrFastFirst,omitempty"`
 	// SlowWhenActive：用户正在用电脑时放慢建索引：OCR 只用一半核心，普通文件每处理完一个停一下。
 	// 默认关：子进程本来就是低优先级，用户的程序优先。0.2.5 时只管 OCR，沿用当时的设置名。
 	SlowWhenActive    bool `json:"ocrHalfWhenActive"`
