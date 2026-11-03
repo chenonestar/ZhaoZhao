@@ -72,9 +72,10 @@ type Manager struct {
 	// LegacyPool 是老格式转换专用进程池（每个子进程常驻一个 LibreOffice）；为空时使用 Pool
 	LegacyPool *worker.Pool
 
-	ltest   legacyTester // 老格式测试
-	otest   ocrTester    // OCR 引擎对比
-	maint   maintState   // 后台整理索引库
+	ltest   legacyTester   // 老格式测试
+	otest   ocrTester      // OCR 引擎对比
+	bigChk  bigPageChecker // 检查 0.2.12 及以前识别的 PDF 的大幅面页
+	maint   maintState     // 后台整理索引库
 	ocrCfg  extract.OCRConfig
 	DataDir string
 

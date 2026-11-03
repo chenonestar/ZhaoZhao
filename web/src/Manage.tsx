@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
-import type { About, Config, DiagState, FailedFilter, FailedFolders, FailedItem, FailedSummary, HotkeyState, LegacyTestState, OCRBenchInfo, OCRTestState, ProblemCat, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
+import type { About, BigPageState, Config, DiagState, FailedFilter, FailedFolders, FailedItem, FailedSummary, HotkeyState, LegacyTestState, OCRBenchInfo, OCRTestState, ProblemCat, RootStatus, SlotStatus, SpaceDetail, Status } from "./types";
 import { copyText, fmtDuration, fmtSize, fmtTime, folderOf } from "./util";
 import { FolderPicker } from "./FolderPicker";
 import { Help } from "./Help";
@@ -640,6 +640,7 @@ function SettingsTab() {
         </div>
       )}
       <OCRSpeed key={saved.ocrModel ?? ""} />
+      <BigPages />
       <OCRTest />
       {chk("ocrHalfWhenActive", "你在用电脑时放慢建索引：OCR 只用一半核心，普通文件每处理完一个停一下。一般不需要开：建索引的进程本来就是低优先级，你的程序优先；开了建索引会慢很多", true)}
       {chk("pauseOnBattery", "使用电池时暂停 OCR 和格式转换", true)}
@@ -710,9 +711,43 @@ function HotkeyField({ value, onChange, state }: { value: string; onChange: (v: 
 
 const modelNames: Record<string, string> = {
   v6: "PP-OCRv6 small 普通版", v6q: "PP-OCRv6 small 量化版", v4: "PP-OCRv4（旧模型）", win: "Windows 自带 OCR（实验）",
-  v6big: "PP-OCRv6 small 大图找字", v6auto: "PP-OCRv6 small 字少时大图再认",
+  v6big: "PP-OCRv6 small 大图找字", v6shrink: "PP-OCRv6 small 大幅面页也缩小（0.2.12 及以前）",
 };
 const modelName = (m: string) => modelNames[m] ?? m;
+
+// 检查 0.2.12 及以前识别的扫描 PDF 有没有大幅面页（比 A4 大：图纸、A3 表格），有的重新识别（大幅面页改用大图
+// 找字，小字认得全得多）。
+function BigPages() {
+  const [st, setSt] = useState<BigPageState | null>(null);
+  const [err, setErr] = useState("");
+  const load = () => api.bigPages().then(setSt).catch(() => {});
+  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (!st?.running) return;
+    const t = setInterval(load, 1500);
+    return () => clearInterval(t);
+  }, [st?.running]);
+  if (!st || (!st.running && st.candidates === 0 && st.total === 0)) return null;
+  return (
+    <div className="field">
+      <div className="dim small">大幅面页：0.2.13 起，比 A4 大的扫描页（图纸、A3 表格等）用大图找字，小字认得全得多（某个 A3 页从 963 字到 1570 字）。
+        0.2.12 及以前识别的 PDF 可以检查一下：只看页面大小、不识别，有大幅面页的重新识别（旧文字在重新识别完成前照样能搜到）。</div>
+      <div className="btns">
+        {st.running ? (
+          <>
+            <span>正在检查 {st.done} / {st.total}，{st.found} 个有大幅面页…</span>
+            <button onClick={() => api.cancelBigPages().then(load)}>停止</button>
+          </>
+        ) : st.candidates > 0 ? (
+          <button onClick={() => { setErr(""); api.startBigPages().then(load).catch((e) => setErr(e.message)); }}>
+            检查大幅面页（0.2.12 及以前识别的 {st.candidates} 个扫描 PDF）</button>
+        ) : null}
+      </div>
+      {!st.running && st.total > 0 && <div className="small">上次检查：查了 {st.done} 个文件，{st.found} 个有大幅面页（共 {st.pages} 页），已重新排到 OCR 队列。</div>}
+      {(err || st.err) && <div className="error small">{err || st.err}</div>}
+    </div>
+  );
+}
 
 // 本机 OCR 测速：每台电脑测一次（便携版换了电脑会重新测），按最快的搭配开进程。
 function OCRSpeed() {
@@ -854,7 +889,7 @@ function OCRTest() {
   return (
     <div className="field">
       <div className="dim small">OCR 引擎对比：从 OCR 识别过的文件里随机抽取若干个（PDF 每个最多认 5 页），用这台电脑上的各个认字模型各认一遍，
-        和 PP-OCRv6 普通版比较认出的字和每页用时（都用 1 个线程）。另外用「大图找字」（找文字时用 2048 像素的图，平常是 1024）和「字少时大图再认」（只有认出的字少、笔画却多的页才用大图再认）各认一遍，
+        和 PP-OCRv6 普通版比较认出的字和每页用时（都用 1 个线程）。另外用「大图找字」（每页找文字都用 2048 像素的图，平常是 1024；大幅面页平常就用大图）和「大幅面页也缩小」（0.2.12 及以前的做法）各认一遍，
         看小字能多认出多少、慢多少；各模型多认出的内容自动判断是真字还是乱码。不改动索引；结果会包含在诊断信息里（认出的文字单独存一个文件，发送前可以删掉）。
         还在建索引时用时会偏长。</div>
       <div className="btns">

@@ -129,6 +129,7 @@ type prepared struct {
 	requeue  int             // 非 0 时保存结果后把文件重新排到这个队列（OCR、老格式转换）
 	ocrPages int             // 需要 OCR 的页数（0 表示不改）
 	ocrModel string          // OCR 识别时用的认字模型（空表示不是 OCR 通道处理的）
+	ocrBig   bool            // 大幅面页用了大图找字（0.2.13 起的做法）
 	children []*preparedChild
 	sent     time.Time // 交给写入协程的时间（统计等写入的时间）
 }
@@ -825,6 +826,7 @@ func (m *Manager) runJob(j *job) {
 	p.ocrPages = ocrPages
 	if useOCR && (res.Status == doc.StatusOK || res.Status == doc.StatusNoContent) {
 		p.ocrModel = opts.OCR.Model()
+		p.ocrBig = !opts.OCR.SmallBigPages
 	}
 	m.statJob(j, read, extracted, time.Since(t2), false)
 	m.sendJob(j, p)
@@ -1165,7 +1167,7 @@ func (m *Manager) writeOne(tx *sql.Tx, p *prepared) error {
 		return err
 	}
 	if p.ocrPages > 0 || p.ocrModel != "" {
-		if err := store.SetOCRInfo(tx, f.ID, p.ocrPages, p.ocrModel); err != nil {
+		if err := store.SetOCRInfo(tx, f.ID, p.ocrPages, p.ocrModel, p.ocrBig); err != nil {
 			return err
 		}
 	}

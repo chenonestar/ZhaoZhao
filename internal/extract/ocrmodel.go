@@ -21,9 +21,9 @@ const (
 	// OCRModelV6Big 只在 OCR 引擎对比里用：PP-OCRv6 small，但找文字时把图片长边缩到 2048 像素（组件默认 1024）。
 	// A4 扫描页（200 dpi 约 1654×2339）缩到 1024 时字只剩四成多大，大幅面的页更小，小字可能找不到。
 	OCRModelV6Big = "v6big"
-	// OCRModelV6Auto：PP-OCRv6 small，认出的字少、页面上笔画却多的页用大图（2048 像素）再认一遍（OCRConfig.Adaptive）。
-	// 先在 OCR 引擎对比里看效果，好的话改成默认。
-	OCRModelV6Auto = "v6auto"
+	// OCRModelV6Shrink：PP-OCRv6 small，大幅面的 PDF 页也和平常一样缩小了找文字（0.2.12 及以前的做法，
+	// OCRConfig.SmallBigPages），只在 OCR 引擎对比里用，看大幅面页用大图多认出了多少。
+	OCRModelV6Shrink = "v6shrink"
 	// ocrBigSide 是 OCRModelV6Big 找文字用的图片长边。
 	ocrBigSide = 2048
 )
@@ -47,8 +47,8 @@ func OCRModelName(model string) string {
 		return "Windows 自带 OCR（实验）"
 	case OCRModelV6Big:
 		return "PP-OCRv6 small（大图找字）"
-	case OCRModelV6Auto:
-		return "PP-OCRv6 small（字少时大图再认）"
+	case OCRModelV6Shrink:
+		return "PP-OCRv6 small（大幅面页也缩小，0.2.12 及以前）"
 	}
 	return model
 }
@@ -65,8 +65,8 @@ func (c OCRConfig) Model() string {
 					if m == OCRModelV6 && c.MaxSide >= ocrBigSide {
 						return OCRModelV6Big
 					}
-					if m == OCRModelV6 && c.Adaptive {
-						return OCRModelV6Auto
+					if m == OCRModelV6 && c.SmallBigPages {
+						return OCRModelV6Shrink
 					}
 					return m
 				}
@@ -96,7 +96,7 @@ func (c OCRConfig) HasModel(model string) bool {
 		return c.Enabled()
 	case OCRModelWin:
 		return c.Enabled() && WinOCRAvailable() == nil
-	case OCRModelV6Big, OCRModelV6Auto:
+	case OCRModelV6Big, OCRModelV6Shrink:
 		return c.HasModel(OCRModelV6)
 	}
 	files, ok := ocrModelFiles[model]
@@ -132,14 +132,13 @@ func (c OCRConfig) WithModel(model string) OCRConfig {
 		}
 		return c
 	}
-	if model == OCRModelV6Big || model == OCRModelV6Auto {
+	if model == OCRModelV6Big || model == OCRModelV6Shrink {
 		if c.HasModel(OCRModelV6) {
 			c = c.WithModel(OCRModelV6)
-			c.MaxSide, c.Adaptive = 0, false
 			if model == OCRModelV6Big {
 				c.MaxSide = ocrBigSide
 			} else {
-				c.Adaptive = true
+				c.SmallBigPages = true
 			}
 		}
 		return c
@@ -155,6 +154,6 @@ func (c OCRConfig) WithModel(model string) OCRConfig {
 		}
 	}
 	c.Args = append(args, "--rec="+files[0], "--keys="+files[1])
-	c.MaxSide, c.Adaptive = 0, false
+	c.MaxSide, c.SmallBigPages = 0, false
 	return c
 }

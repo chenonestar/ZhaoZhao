@@ -24,6 +24,9 @@ type Options struct {
 	LegacyMode      string `json:"legacyMode,omitempty"`   // 老格式的处理方式：LegacyAuto、LegacyNative、LegacyLO
 	ReportMem       bool   `json:"reportMem,omitempty"`    // 结果里带上解析进程和 OCR 进程的内存峰值（OCR 测速用）
 	OCRPageLimit    int    `json:"ocrPageLimit,omitempty"` // 大于 0 时 PDF 只识别前这么多个扫描页（OCR 引擎对比用）
+	// BigPageCheck 为真时 PDF 不识别，只数需要 OCR 的页里有几页是大幅面（结果的 BigPages）：0.2.12 及以前识别的
+	// 文件，大幅面页缩小了找文字，找出来重新识别。
+	BigPageCheck bool `json:"bigPageCheck,omitempty"`
 
 	progress func(string) // 进度回调（不序列化：子进程里由 Serve 设置）
 }
@@ -68,6 +71,12 @@ func Extract(p, ext string, opt Options) (res doc.Result) {
 			finish(&res, opt)
 		}
 	}()
+	if opt.BigPageCheck { // 只查 PDF 的大幅面页，不提取
+		if ext != "pdf" {
+			return doc.Result{Status: doc.StatusOK}
+		}
+		return extractPDF(p, opt)
+	}
 	f, known := formats[ext]
 	if !known || f.h == hNone {
 		if !known && opt.SniffUnknown {

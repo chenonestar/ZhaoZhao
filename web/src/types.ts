@@ -439,6 +439,17 @@ export interface SearchOpts {
   cs: boolean;
 }
 
+// 检查 0.2.12 及以前识别的 PDF 有没有大幅面页（比 A4 大），有的重新识别。
+export interface BigPageState {
+  running: boolean;
+  done: number;
+  total: number;
+  found: number; // 有大幅面页、已重新排队的文件数
+  pages: number;
+  candidates: number; // 还要查的文件数
+  err?: string;
+}
+
 // 「关于」里显示的程序信息。
 export interface About {
   version: string; // 如 v0.2.11

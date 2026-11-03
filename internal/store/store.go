@@ -871,9 +871,48 @@ func (d *DB) OCRPagesOf(ids []int64) (map[int64]int, error) {
 }
 
 // SetOCRInfo 记下文件需要 OCR 的页数（pages 为 0 时不改）和识别时用的认字模型（model 为空时不改）。
-func SetOCRInfo(tx *sql.Tx, id int64, pages int, model string) error {
+func SetOCRInfo(tx *sql.Tx, id int64, pages int, model string, big bool) error {
 	_, err := tx.Exec(`UPDATE files SET ocr_pages=CASE WHEN ?1>0 THEN ?1 ELSE ocr_pages END,
-ocr_model=CASE WHEN ?2<>'' THEN ?2 ELSE ocr_model END WHERE id=?3`, pages, model, id)
+ocr_model=CASE WHEN ?2<>'' THEN ?2 ELSE ocr_model END, ocr_big=CASE WHEN ?2<>'' THEN ?3 ELSE ocr_big END WHERE id=?4`, pages, model, b2i(big), id)
+	return err
+}
+
+// bigCandCond 选出可能有没用大图找字的大幅面页的文件：0.2.12 及以前用 OCR 组件识别过的 PDF（还没查过）。
+const bigCandCond = ocrDoneCond + ` AND ext='pdf' AND ocr_big=0 AND ocr_model<>'win' AND state<>0` // 已排队重新识别的不算
+
+// CountBigPageCandidates 返回 BigPageCandidates 的个数。
+func (d *DB) CountBigPageCandidates(prioOCR int) (n int64, err error) {
+	err = d.R.QueryRow(`SELECT count(*) FROM files WHERE `+bigCandCond, prioOCR).Scan(&n)
+	return
+}
+
+// BigPageCandidates 按编号顺序取编号大于 after 的最多 limit 个要查大幅面页的文件。
+func (d *DB) BigPageCandidates(prioOCR int, after int64, limit int) ([]File, error) {
+	rows, err := d.R.Query(`SELECT `+fileCols+` FROM files WHERE `+bigCandCond+` AND id>? ORDER BY id LIMIT ?`, prioOCR, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []File
+	for rows.Next() {
+		f, err := scanFile(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// SetBigChecked 记下文件查过了、没有大幅面页（不用重新识别）。
+func (d *DB) SetBigChecked(id int64) error {
+	_, err := d.W.Exec(`UPDATE files SET ocr_big=1 WHERE id=?`, id)
+	return err
+}
+
+// RequeueOCR 把文件重新排到 OCR 队列（旧文字保留到重新识别完成时替换）。
+func (d *DB) RequeueOCR(prioOCR int, id int64) error {
+	_, err := d.W.Exec(`UPDATE files SET state=0, err='', indexed_at=0, prio=? WHERE id=?`, prioOCR, id)
 	return err
 }
 
@@ -1109,6 +1148,8 @@ var newColumns = []struct{ table, name, def string }{
 	// （换了模型后「重新识别」只算用别的模型识别的文件；0.2.8 以前识别的为空，不知道用的哪个）
 	{"files", "ocr_pages", "INTEGER NOT NULL DEFAULT 0"},
 	{"files", "ocr_model", "TEXT NOT NULL DEFAULT ''"},
+	// 0.2.13：大幅面页（比 A4 大的 PDF 页）用大图找字了，或查过没有大幅面页（1）；0.2.12 及以前识别的为 0
+	{"files", "ocr_big", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 func addColumns(w *sql.DB) error {

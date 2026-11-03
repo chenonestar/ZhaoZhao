@@ -65,6 +65,15 @@ func extractPDFium(p string, opt Options) (res doc.Result, ok bool) {
 	if n == 0 {
 		return doc.Result{Status: doc.StatusFailed, Err: "PDF 没有页面"}, true
 	}
+	if opt.BigPageCheck {
+		big := 0
+		for _, pg := range blank {
+			if IsBigPage(d.pageSize(pg-1, 200, 3500)) {
+				big++
+			}
+		}
+		return doc.Result{Status: doc.StatusOK, OCRPages: len(blank), BigPages: big}, true
+	}
 	var got pdfOCRResult
 	var ocrErr error
 	blank = limitPages(blank, opt)
@@ -76,6 +85,9 @@ func extractPDFium(p string, opt Options) (res doc.Result, ok bool) {
 
 // extractPDFGo 用纯 Go 解析器提取（没有 PDFium，或 PDFium 打不开时）。
 func extractPDFGo(p string, opt Options) (res doc.Result) {
+	if opt.BigPageCheck {
+		return doc.Result{Status: doc.StatusOK} // 没有 PDFium 时量不了页面尺寸
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			res = doc.Result{Status: doc.StatusFailed, Err: fmt.Sprintf("PDF 解析异常: %v", r)}

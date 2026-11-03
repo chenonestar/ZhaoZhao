@@ -153,7 +153,7 @@ func ocrTestModels(c extract.OCRConfig) []string {
 	for _, x := range c.Models() {
 		out = append(out, x)
 		if x == extract.OCRModelV6 && c.HasModel(extract.OCRModelV6Big) {
-			out = append(out, extract.OCRModelV6Auto, extract.OCRModelV6Big)
+			out = append(out, extract.OCRModelV6Shrink, extract.OCRModelV6Big)
 		}
 	}
 	return out

@@ -1,5 +1,5 @@
 import type {
-  About, Config, FailedFilter, FailedPage, FailedSummary, FsListing, DiagState, FailedFolders, HotkeyState, LegacyTestState, Notice, OCRBenchInfo, OCRTestState, SpaceDetail, Preview, Saved, SearchOpts, SearchResponse, Status,
+  About, BigPageState, Config, FailedFilter, FailedPage, FailedSummary, FsListing, DiagState, FailedFolders, HotkeyState, LegacyTestState, Notice, OCRBenchInfo, OCRTestState, SpaceDetail, Preview, Saved, SearchOpts, SearchResponse, Status,
 } from "./types";
 
 export class ApiError extends Error {
@@ -55,6 +55,9 @@ export const api = {
   ocrBench: () => call<OCRBenchInfo>("/api/ocrbench"),
   rerunOCRBench: () => post("/api/ocrbench/rerun"),
   redoOCR: () => post<{ files: number }>("/api/ocr/redo"),
+  bigPages: () => call<BigPageState>("/api/ocr/bigpages"),
+  startBigPages: () => post("/api/ocr/bigpages/start"),
+  cancelBigPages: () => post("/api/ocr/bigpages/cancel"),
   ocrTest: () => call<OCRTestState>("/api/ocrtest"),
   startOCRTest: (files: number) => post("/api/ocrtest/start", { files }),
   cancelOCRTest: () => post("/api/ocrtest/cancel"),

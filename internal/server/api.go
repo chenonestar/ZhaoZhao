@@ -317,6 +317,12 @@ func (s *Server) routes(mux *http.ServeMux) {
 		n, err := s.M.ReOCR()
 		return map[string]int64{"files": n}, err
 	}))
+	h("/api/ocr/bigpages", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.M.BigPages()) })
+	h("/api/ocr/bigpages/start", s.post(func(r *http.Request) (any, error) { return ok(), s.M.StartBigPages() }))
+	h("/api/ocr/bigpages/cancel", s.post(func(r *http.Request) (any, error) {
+		s.M.CancelBigPages()
+		return ok(), nil
+	}))
 	h("/api/legacytest", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.M.LegacyTest()) })
 	h("/api/legacytest/start", s.post(func(r *http.Request) (any, error) {
 		var b struct {

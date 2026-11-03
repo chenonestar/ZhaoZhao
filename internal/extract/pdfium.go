@@ -303,6 +303,19 @@ func pageText(page uintptr, i int) (string, error) {
 	return s, nil
 }
 
+// pageSize 返回第 i 页按 dpi 渲染、长边不超过 maxSide 时的像素尺寸（和 render 一样算；没有尺寸时为 0）。
+func (d *pdfDoc) pageSize(i int, dpi float64, maxSide int) image.Point {
+	var size [2]float32
+	if fpdf.GetPageSizeByIndexF(d.h, int32(i), &size) == 0 || size[0] <= 0 || size[1] <= 0 {
+		return image.Point{}
+	}
+	w, h := float64(size[0])*dpi/72, float64(size[1])*dpi/72
+	if m := max(w, h); m > float64(maxSide) {
+		w, h = w*float64(maxSide)/m, h*float64(maxSide)/m
+	}
+	return image.Pt(max(int(w), 1), max(int(h), 1))
+}
+
 // render 把第 i 页渲染成灰度图：dpi 为分辨率，长边不超过 maxSide 像素。
 func (d *pdfDoc) render(i int, dpi float64, maxSide int) (*image.Gray, error) {
 	var size [2]float32

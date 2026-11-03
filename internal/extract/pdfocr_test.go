@@ -96,29 +96,35 @@ func TestScannedPDFPageByPage(t *testing.T) {
 	}
 }
 
-// 字少时大图再认：认出的字少、笔画多的页用大图再认，认出的多就用它；笔画少的页、没打开这个选项时不再认。
-func TestOCRPageBigRetry(t *testing.T) {
+// 大幅面页用大图找字：单独的 OCR 进程（找文字用 2048 像素的图），常驻的进程不受影响；设置了大幅面页也缩小、
+// Windows 自带 OCR 时不用。
+func TestBigPageOCR(t *testing.T) {
 	t.Setenv("ZZ_FAKE_OCR", "1")
 	defer ShutdownOCR()
 	path := filepath.Join(t.TempDir(), "page.png")
 	writePNG(t, path, grayPage(1))
 	c := OCRConfig{Command: os.Args[0], Args: []string{"-test.run=^$"}, MinSide: 50, PageSec: 30}
-	ink := func(n int) func() int { return func() int { return n } }
-	if text, _ := ocrPage(c, path, ink(200_000)); strings.Contains(text, "big-") {
-		t.Fatal("没打开选项时不应再认")
+	if !IsBigPage(image.Pt(2338, 3307)) || IsBigPage(image.Pt(1654, 2339)) || IsBigPage(image.Pt(1700, 2200)) {
+		t.Fatal("A3 页算大幅面，A4、Letter 不算")
 	}
-	c.Adaptive = true
-	if text, _ := ocrPage(c, path, ink(1000)); strings.Contains(text, "big-") {
-		t.Fatal("笔画少的页不应再认")
-	}
-	if text, err := ocrPage(c, path, ink(200_000)); err != nil || !strings.Contains(text, "big-") {
-		t.Fatalf("字少、笔画多的页应用大图再认：%q %v", text, err)
+	big := newBigOCR(c)
+	if text, err := big.recognize(path); err != nil || !strings.Contains(text, "big-") {
+		t.Fatalf("大幅面页应用大图找字：%q %v", text, err)
 	}
 	if text, _ := ocrImage(c, path); strings.Contains(text, "big-") {
-		t.Fatal("大图那遍用临时进程，常驻进程不受影响")
+		t.Fatal("常驻的进程不受影响")
 	}
-	if n := darkPixels(grayPage(1).(*image.Gray)); n < 10_000 || darkPixelsOf(path) != n {
-		t.Fatalf("深色像素：%d / %d", n, darkPixelsOf(path))
+	big.close()
+	if big.p != nil || big.pages != 1 {
+		t.Fatal("文件识别完结束大图进程")
+	}
+	c.SmallBigPages = true
+	if newBigOCR(c) != nil {
+		t.Fatal("大幅面页也缩小时不用大图")
+	}
+	c.SmallBigPages, c.Engine = false, OCRModelWin
+	if newBigOCR(c) != nil {
+		t.Fatal("Windows 自带 OCR 不用")
 	}
 }
 
