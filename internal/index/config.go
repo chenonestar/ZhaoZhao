@@ -42,6 +42,10 @@ type Config struct {
 	// 做完后，再把这些文件用认字模型（OCRModel）重新识别、替换掉。只在有 Windows 中文识别语言、认字模型不是
 	// Windows 自带 OCR 时起作用。
 	OCRFastFirst bool `json:"ocrFastFirst,omitempty"`
+	// OCRSmallText：小字多的扫描件，每页找文字都用大图（2048 像素，平常只有比 A4 大的页用）。0.2.13 某位用户 F 盘
+	// 的 OCR 引擎对比：A4 表格、表单上的小字缩小后找不到，每页都用大图多认出约四分之一的字（多出的判断为真内容），
+	// 每页慢约一半；普通文件（Z 盘）只多认出 1%，却慢六成，所以默认不开。
+	OCRSmallText bool `json:"ocrSmallText,omitempty"`
 	// SlowWhenActive：用户正在用电脑时放慢建索引：OCR 只用一半核心，普通文件每处理完一个停一下。
 	// 默认关：子进程本来就是低优先级，用户的程序优先。0.2.5 时只管 OCR，沿用当时的设置名。
 	SlowWhenActive    bool `json:"ocrHalfWhenActive"`

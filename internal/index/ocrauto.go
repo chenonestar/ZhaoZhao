@@ -76,6 +76,16 @@ func (m *Manager) ocrModel() string {
 	return extract.OCRModelV4
 }
 
+// ocrModelNow 返回识别时实际记下的模型：设置里开了「小字多的扫描件」、用 PP-OCRv6 普通版时是大图找字（重新识别、
+// 「用别的模型识别的文件」按它算）。
+func (m *Manager) ocrModelNow() string {
+	model := m.ocrModel()
+	if model == extract.OCRModelV6 && m.Config().OCRSmallText {
+		return extract.OCRModelV6Big
+	}
+	return model
+}
+
 // ocrMachine 返回本机的处理器、核心数、内存。
 func (m *Manager) ocrMachine() sysinfo.Machine {
 	m.ocr.mu.Lock()
@@ -532,7 +542,7 @@ func (m *Manager) OCRBenchInfo() OCRBenchInfo {
 	cfg := m.Config()
 	plan := m.ocrPlanNow()
 	cores := m.physCores()
-	model := m.ocrModel()
+	model := m.ocrModelNow()
 	reocr, unknown, _ := m.DB.CountOCRDone(prioOCR, model)
 	m.ocr.mu.Lock()
 	defer m.ocr.mu.Unlock()
@@ -580,7 +590,7 @@ func (m *Manager) ReOCR() (int64, error) {
 	if !m.ocrAvailable() || !m.Config().OCREnabled {
 		return 0, errors.New("OCR 组件没有安装或 OCR 已关闭")
 	}
-	model := m.ocrModel()
+	model := m.ocrModelNow()
 	n, err := m.DB.ResetOCR(prioOCR, model)
 	if err != nil {
 		return 0, err

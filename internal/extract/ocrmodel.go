@@ -24,6 +24,8 @@ const (
 	// OCRModelV6Shrink：PP-OCRv6 small，大幅面的 PDF 页也和平常一样缩小了找文字（0.2.12 及以前的做法，
 	// OCRConfig.SmallBigPages），只在 OCR 引擎对比里用，看大幅面页用大图多认出了多少。
 	OCRModelV6Shrink = "v6shrink"
+	// OCRBigSide 是大图找字用的图片长边（设置里「小字多的扫描件」打开时每页都用）。
+	OCRBigSide = ocrBigSide
 	// ocrBigSide 是 OCRModelV6Big 找文字用的图片长边。
 	ocrBigSide = 2048
 )

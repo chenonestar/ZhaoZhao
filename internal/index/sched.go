@@ -613,7 +613,10 @@ func copyLocal(ctx context.Context, src string, size int64, wantHash bool, repor
 func (m *Manager) extractOptions(cfg Config, withOCR bool) extract.Options {
 	o := extract.DefaultOptions()
 	if withOCR {
-		o.OCR = m.ocrCfg.WithModel(m.ocrModel())
+		o.OCR = m.ocrCfg.WithModel(m.ocrModelNow())
+		if cfg.OCRSmallText && o.OCR.Engine == "" {
+			o.OCR.MaxSide = extract.OCRBigSide // 小字多的扫描件：每页都用大图找字（量化版、旧模型也一样）
+		}
 		o.OCR.Threads = m.ocrPlanNow().threads // 每个 OCR 进程的线程数：总数不超过 CPU 核心数
 	}
 	o.MaxTextBytes = int64(cfg.MaxTextMB) << 20

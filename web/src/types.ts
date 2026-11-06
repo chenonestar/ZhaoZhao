@@ -258,7 +258,8 @@ export interface Config {
   ocrEnabled: boolean;
   ocrWorkers: number;
   ocrModel?: string;
-  ocrFastFirst?: boolean; // 先快后准：先用 Windows 自带的 OCR 快速识别，全部做完后用认字模型重新识别 // 认字模型：空为自动，或 v6、v6q（量化版）、v4（旧模型）、win（Windows 自带的 OCR，实验）
+  ocrFastFirst?: boolean;
+  ocrSmallText?: boolean; // 小字多的扫描件：每页找文字都用大图 // 先快后准：先用 Windows 自带的 OCR 快速识别，全部做完后用认字模型重新识别 // 认字模型：空为自动，或 v6、v6q（量化版）、v4（旧模型）、win（Windows 自带的 OCR，实验）
   ocrHalfWhenActive: boolean; // 用电脑时放慢建索引（沿用 0.2.5 的名字）
   logLevel: string;
   configVersion: number;

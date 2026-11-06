@@ -68,3 +68,22 @@ VALUES(?,?,?,'',?,?,'',100,1,1,'','',0,1,'',?,1,?,?)`, r.ID, r.VolumeID, name, n
 		t.Fatal("都查过了时应提示没有要查的")
 	}
 }
+
+// 小字多的扫描件：每页找文字都用大图（MaxSide），默认不开。
+func TestOCRSmallTextSetting(t *testing.T) {
+	prov := &fakeProv{}
+	prov.addKind("v1", "本地", t.TempDir(), true, volume.KindLocal)
+	e := newEnvWith(t, prov, `{"workers":1,"ocrWorkers":1,"legacyWorkers":1,"configVersion":2}`,
+		func(m *Manager) { useFakeOCR(t, m, "10ms") })
+	cfg := e.m.Config()
+	if o := e.m.extractOptions(cfg, true); o.OCR.MaxSide != 0 || cfg.OCRSmallText {
+		t.Fatalf("默认不开：%+v", o.OCR)
+	}
+	cfg.OCRSmallText = true
+	if err := e.m.SetConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if o := e.m.extractOptions(e.m.Config(), true); o.OCR.MaxSide != 2048 {
+		t.Fatalf("打开后每页都用大图：%+v", o.OCR)
+	}
+}

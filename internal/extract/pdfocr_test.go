@@ -139,3 +139,21 @@ func writePNG(t *testing.T, path string, img image.Image) {
 		t.Fatal(err)
 	}
 }
+
+// 文字框的字高：取四个角里短的那条边（横排、竖排都对），记下中位数和最小的一成。
+func TestBoxStats(t *testing.T) {
+	if h := boxHeight([][2]float64{{0, 0}, {300, 0}, {300, 30}, {0, 30}}); h != 30 {
+		t.Fatalf("横排：%v", h)
+	}
+	if h := boxHeight([][2]float64{{0, 0}, {20, 0}, {20, 400}, {0, 400}}); h != 20 {
+		t.Fatalf("竖排：%v", h)
+	}
+	setLastBoxes([]float64{40, 10, 30, 20, 50, 60, 70, 80, 90, 100})
+	if s := LastBoxes(); s.N != 10 || s.Median != 60 || s.P10 != 20 || !strings.Contains(s.String(), "字高中位数 60 像素") {
+		t.Fatalf("%+v %s", s, s)
+	}
+	setLastBoxes(nil)
+	if LastBoxes().String() != "没有文字框" {
+		t.Fatal(LastBoxes().String())
+	}
+}

@@ -13,9 +13,11 @@ import (
 	"image/png"
 	"io"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -472,17 +474,23 @@ func recognizeWith(p *ocrProc, c OCRConfig, imgPath string) (string, error) {
 			switch r.Code {
 			case 100:
 				var items []struct {
-					Text string `json:"text"`
+					Text string       `json:"text"`
+					Box  [][2]float64 `json:"box"`
 				}
 				if err := json.Unmarshal(r.Data, &items); err != nil {
 					ch <- reply{err: err}
 					return
 				}
 				var b strings.Builder
+				var hs []float64
 				for _, it := range items {
 					b.WriteString(it.Text)
 					b.WriteByte('\n')
+					if len(it.Box) == 4 {
+						hs = append(hs, boxHeight(it.Box))
+					}
 				}
+				setLastBoxes(hs)
 				ch <- reply{text: b.String()}
 			case 101:
 				ch <- reply{}
@@ -500,6 +508,50 @@ func recognizeWith(p *ocrProc, c OCRConfig, imgPath string) (string, error) {
 	case <-tm.C:
 		return "", fmt.Errorf("%w（单张图片超过 %d 秒）", errOCRTimeout, sec)
 	}
+}
+
+// ---- 文字框的大小（找规律：哪些页有缩小后找不到的小字）----
+
+// boxHeight 返回一个文字框（四个角，按顺时针）的字高：两条边里短的那条（横排、竖排都对）。
+func boxHeight(b [][2]float64) float64 {
+	d := func(p, q [2]float64) float64 { return math.Hypot(p[0]-q[0], p[1]-q[1]) }
+	return min(d(b[0], b[1]), d(b[0], b[3]))
+}
+
+// BoxStats 是一页认出的文字框的个数和字高（原图上的像素）：中位数、最小的一成。
+type BoxStats struct {
+	N           int
+	Median, P10 float64
+}
+
+func (s BoxStats) String() string {
+	if s.N == 0 {
+		return "没有文字框"
+	}
+	return fmt.Sprintf("文字框 %d 个，字高中位数 %.0f 像素、最小一成 %.0f 像素", s.N, s.Median, s.P10)
+}
+
+var (
+	lastBoxesMu sync.Mutex
+	lastBoxes   BoxStats
+)
+
+func setLastBoxes(hs []float64) {
+	slices.Sort(hs)
+	s := BoxStats{N: len(hs)}
+	if len(hs) > 0 {
+		s.Median, s.P10 = hs[len(hs)/2], hs[len(hs)/10]
+	}
+	lastBoxesMu.Lock()
+	lastBoxes = s
+	lastBoxesMu.Unlock()
+}
+
+// LastBoxes 返回最近一次识别的文字框统计（日志里记下，看哪些页有小字）。
+func LastBoxes() BoxStats {
+	lastBoxesMu.Lock()
+	defer lastBoxesMu.Unlock()
+	return lastBoxes
 }
 
 // ---- 图片 ----
@@ -666,7 +718,7 @@ func extractImage(p, ext string, opt Options) doc.Result {
 		if err != nil {
 			return err
 		}
-		logx.Debugf("OCR %s %s用时 %.1fs，识别出 %d 字", logx.P(p), label, time.Since(t1).Seconds(), len([]rune(text)))
+		logx.Debugf("OCR %s %s用时 %.1fs，识别出 %d 字，%s", logx.P(p), label, time.Since(t1).Seconds(), len([]rune(text)), LastBoxes())
 		if strings.TrimSpace(text) != "" {
 			if label != "" {
 				b.Mark(label)
@@ -880,8 +932,8 @@ func ocrPDFiumPages(d *pdfDoc, p string, pages []int, opt Options) (pdfOCRResult
 		if err != nil {
 			return res, err
 		}
-		logx.Debugf("OCR %s 第 %d 页（%d/%d）渲染 %.1fs、识别 %.1fs，图片 %dx%d，识别出 %d 字", logx.P(p), pg, i+1, len(pages),
-			r.dur.Seconds(), time.Since(t1).Seconds(), r.size.X, r.size.Y, len([]rune(text)))
+		logx.Debugf("OCR %s 第 %d 页（%d/%d）渲染 %.1fs、识别 %.1fs，图片 %dx%d，识别出 %d 字，%s", logx.P(p), pg, i+1, len(pages),
+			r.dur.Seconds(), time.Since(t1).Seconds(), r.size.X, r.size.Y, len([]rune(text)), LastBoxes())
 		res.texts[pg] = text
 	}
 	if big != nil && big.pages > 0 {

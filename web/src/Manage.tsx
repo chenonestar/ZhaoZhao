@@ -633,13 +633,20 @@ function SettingsTab() {
           </select></label>
         <div className="dim small">{MODEL_OPTIONS.find(([v]) => v === model)?.[2]}只影响之后识别的文件；已识别的可以在下面「重新识别」。</div>
       </div>
+      {model !== "win" && (
+        <div className="field">
+          {chk("ocrSmallText", "小字多的扫描件：每页找文字都用大图（表格、表单上的小字认得全得多，OCR 慢约一半）", true)}
+          <div className="dim small">平常只有比 A4 大的页（A3、图纸）用大图。你 F 盘那类表格、表单多的扫描件，每页都用大图多认出约四分之一的字；
+            普通文件只多认出 1%，却慢六成，所以默认不开。只影响之后识别的文件，已识别的可以在下面「重新识别」。</div>
+        </div>
+      )}
       {model !== "win" && models.includes("win") && (
         <div className="field">
           {chk("ocrFastFirst", "先快后准：没识别过的文件先用 Windows 自带的 OCR 快速识别（你那里整个 F 盘约 1 小时，PP-OCRv6 要 5 个多小时，很快就能搜起来，但会漏认约一成的字），全部识别完后再用上面的认字模型重新识别、替换掉", true)}
           <div className="dim small">总用时比只用认字模型多约两成（多了快速识别那一遍）。适合刚加入大量扫描件、想尽快先搜起来的时候。</div>
         </div>
       )}
-      <OCRSpeed key={saved.ocrModel ?? ""} />
+      <OCRSpeed key={`${saved.ocrModel ?? ""}|${saved.ocrSmallText ? 1 : 0}`} />
       <BigPages />
       <OCRTest />
       {chk("ocrHalfWhenActive", "你在用电脑时放慢建索引：OCR 只用一半核心，普通文件每处理完一个停一下。一般不需要开：建索引的进程本来就是低优先级，你的程序优先；开了建索引会慢很多", true)}
