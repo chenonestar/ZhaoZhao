@@ -1,0 +1,1129 @@
+package extract
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/chenonestar/zhaozhao/internal/awake"
+	"image"
+	"image/png"
+	"io"
+	"log"
+	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	_ "image/gif"
+	_ "image/jpeg"
+
+	"github.com/chenonestar/zhaozhao/internal/doc"
+	"github.com/chenonestar/zhaozhao/internal/logx"
+	"github.com/chenonestar/zhaozhao/internal/sysinfo"
+	"github.com/pdfcpu/pdfcpu/pkg/api"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
+	"golang.org/x/image/bmp"
+	"golang.org/x/image/tiff"
+	_ "golang.org/x/image/webp"
+)
+
+// OCRConfig 配置 OCR 组件。组件是一个常驻子进程，使用 RapidOCR-json 的管道协议：
+// 启动后打印 "OCR init completed."，之后每行输入 {"image_path": "..."}，每行输出
+// {"code":100,"data":[{"text":"..."}]}。
+type OCRConfig struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args,omitempty"`
+	MinSide int      `json:"minSide"` // 短边小于该像素数的图片不做 OCR（默认 200）
+	PageSec int      `json:"pageSec"` // 单页（单张图）OCR 超时秒数（默认 120）
+	// Threads 是每个 OCR 进程用的线程数（RapidOCR 的 --numThread，它默认 4）。0 表示不指定。
+	// 多个 OCR 进程的线程总数超过 CPU 核心数时互相争抢，总速度反而下降（实测可慢一倍）。
+	Threads int `json:"threads,omitempty"`
+	// Engine 为 "win" 时改用 Windows 自带的 OCR（在解析进程里直接调用，不启动 OCR 组件，见 winocr_windows.go）。
+	Engine string `json:"engine,omitempty"`
+	// MaxSide 是找文字时把图片长边缩到多少像素（RapidOCR 的 --maxSideLen，它默认 1024）。0 表示不指定。
+	MaxSide int `json:"maxSide,omitempty"`
+	// SmallBigPages 为真时，大幅面的 PDF 页（比 A4 大）也和平常一样缩小了找文字（0.2.12 及以前的做法，OCR 引擎
+	// 对比用）；默认大幅面页用大图找字，见 bigOCR。
+	SmallBigPages bool `json:"smallBigPages,omitempty"`
+}
+
+// args 返回启动 OCR 进程的参数。
+func (c OCRConfig) args() []string {
+	if c.Threads <= 0 && c.MaxSide <= 0 {
+		return c.Args
+	}
+	a := append([]string{}, c.Args...)
+	if c.Threads > 0 {
+		a = append(a, fmt.Sprintf("--numThread=%d", c.Threads))
+	}
+	if c.MaxSide > 0 {
+		a = append(a, fmt.Sprintf("--maxSideLen=%d", c.MaxSide))
+	}
+	return a
+}
+
+// Enabled 说明是否配置了 OCR 组件。
+func (c OCRConfig) Enabled() bool { return c.Command != "" }
+
+// FindOCR 自动发现 OCR 组件：环境变量 ZHAOZHAO_OCR，其次安装目录下 components/ocr/，最后 PATH。
+func FindOCR() OCRConfig {
+	c := OCRConfig{MinSide: 200, PageSec: 120}
+	if v := strings.TrimSpace(os.Getenv("ZHAOZHAO_OCR")); v != "" {
+		f := strings.Fields(v)
+		c.Command, c.Args = f[0], f[1:]
+		return c
+	}
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Join(filepath.Dir(exe), "components", "ocr")
+		for _, n := range []string{"RapidOCR_json.exe", "RapidOCR-json.exe", "RapidOCR_json", "RapidOCR-json"} {
+			p := filepath.Join(dir, n)
+			if st, err := os.Stat(p); err == nil && !st.IsDir() {
+				c.Command = p
+				c.Args = readArgsFile(filepath.Join(dir, "args.txt"))
+				return c
+			}
+		}
+	}
+	for _, n := range []string{"RapidOCR_json", "RapidOCR-json"} {
+		if p, err := exec.LookPath(n); err == nil {
+			c.Command = p
+			return c
+		}
+	}
+	return c
+}
+
+// readArgsFile 读取组件目录里的 args.txt：每行一个启动参数（如 --models=models），# 开头为注释。
+// 发行包用它指定识别语言所用的模型文件。
+func readArgsFile(p string) []string {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// ocrRequest 生成一行 OCR 请求。非 ASCII 字符一律写成 \uXXXX，反斜杠换成斜杠：
+// 组件按系统代码页读取命令行和管道，中文路径（如 C:\Users\张三\…）会因此出错。
+func ocrRequest(imgPath string) []byte {
+	var b strings.Builder
+	b.WriteString(`{"image_path":"`)
+	for _, r := range filepath.ToSlash(imgPath) {
+		switch {
+		case r == '"' || r == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r < 0x20:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		case r < 0x80:
+			b.WriteRune(r)
+		case r > 0xFFFF:
+			r -= 0x10000
+			fmt.Fprintf(&b, `\u%04x\u%04x`, 0xD800+(r>>10), 0xDC00+(r&0x3FF))
+		default:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		}
+	}
+	b.WriteString(`"}`)
+	b.WriteByte('\n')
+	return []byte(b.String())
+}
+
+// ---- 常驻 OCR 进程（每个解析子进程各自持有一个） ----
+
+type ocrProc struct {
+	cmd *exec.Cmd
+	in  io.WriteCloser
+	out *bufio.Reader
+	key string
+}
+
+var (
+	ocrMu   sync.Mutex
+	ocrCur  *ocrProc
+	ocrFail int
+	// ocrThreads 不为 0 时代替任务参数里的线程数：主程序在识别途中调整（队列收尾时把空出来的线程
+	// 分给还在识别的大文件），从下一张图片起生效（线程数不同要重新启动 OCR 组件，约 1 秒）。
+	ocrThreads atomic.Int32
+)
+
+// SetOCRThreads 调整之后识别用的线程数；0 表示按任务参数。
+func SetOCRThreads(n int) { ocrThreads.Store(int32(n)) }
+
+// OCRPeakMem 返回常驻 OCR 进程的内存峰值（字节）；没有常驻进程时返回 0。
+func OCRPeakMem() uint64 {
+	ocrMu.Lock()
+	defer ocrMu.Unlock()
+	if ocrCur == nil || ocrCur.cmd.Process == nil {
+		return 0
+	}
+	return sysinfo.PeakMem(ocrCur.cmd.Process.Pid)
+}
+
+func (c OCRConfig) key() string {
+	return c.Engine + "\x00" + c.Command + "\x00" + strings.Join(c.args(), "\x00")
+}
+
+func startOCR(c OCRConfig) (*ocrProc, error) {
+	cmd := exec.Command(c.Command, c.args()...)
+	cmd.Dir = filepath.Dir(c.Command)
+	if !filepath.IsAbs(c.Command) {
+		cmd.Dir = ""
+	}
+	errBuf := &tailBuffer{max: 2048}
+	cmd.Stderr = errBuf
+	setProcAttr(cmd)
+	cmd.Cancel = nil
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	t0 := time.Now()
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	p := &ocrProc{cmd: cmd, in: in, out: bufio.NewReaderSize(out, 1<<20), key: c.key()}
+	// 等待初始化完成（加载模型，首次可能需要数秒）
+	ready := make(chan error, 1)
+	go func() {
+		for {
+			line, err := p.out.ReadString('\n')
+			if err != nil {
+				ready <- fmt.Errorf("OCR 组件启动失败: %v", err)
+				return
+			}
+			if strings.Contains(line, "init completed") {
+				ready <- nil
+				return
+			}
+		}
+	}()
+	startTimer := awake.NewTimer(90 * time.Second) // 只计醒着的时间
+	defer startTimer.Stop()
+	select {
+	case err := <-ready:
+		if err != nil {
+			// 进程在初始化完成前就退出了：取退出码说明原因（例如缺少运行库）
+			p.in.Close()
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			var werr error
+			select {
+			case werr = <-done:
+			case <-time.After(5 * time.Second):
+				_ = cmd.Process.Kill()
+				werr = <-done
+			}
+			if werr == nil {
+				werr = err
+			}
+			return nil, fmt.Errorf("OCR 组件启动失败：%s", DescribeExit(werr, errBuf.String()))
+		}
+	case <-startTimer.C:
+		killOCR(p)
+		return nil, fmt.Errorf("OCR 组件启动超时（90 秒内没有完成初始化）%s", suffix(errBuf.String()))
+	}
+	threads := "默认线程数"
+	if c.Threads > 0 {
+		threads = fmt.Sprintf("%d 线程", c.Threads)
+	}
+	log.Printf("OCR 组件已启动（进程 %d，认字模型 %s，%s，加载模型用时 %.1fs）", cmd.Process.Pid,
+		OCRModelName(c.Model()), threads, time.Since(t0).Seconds())
+	return p, nil
+}
+
+func suffix(s string) string {
+	if s = strings.TrimSpace(s); s != "" {
+		return "：" + truncate(s, 300)
+	}
+	return ""
+}
+
+// tailBuffer 只保留最后 max 个字节的输出，用于错误诊断。
+type tailBuffer struct {
+	mu  sync.Mutex
+	max int
+	b   []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.b = append(t.b, p...)
+	if len(t.b) > t.max {
+		t.b = t.b[len(t.b)-t.max:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.ToValidUTF8(string(t.b), "?")
+}
+
+// ShutdownOCR 结束常驻的 OCR 子进程。解析子进程退出前调用，避免留下孤儿进程。
+func ShutdownOCR() {
+	ocrMu.Lock()
+	defer ocrMu.Unlock()
+	killOCR(ocrCur)
+	ocrCur = nil
+}
+
+func killOCR(p *ocrProc) {
+	if p == nil {
+		return
+	}
+	p.in.Close()
+	if p.cmd.Process != nil {
+		_ = p.cmd.Process.Kill()
+	}
+	_, _ = p.cmd.Process.Wait()
+}
+
+type ocrResp struct {
+	Code int             `json:"code"`
+	Data json.RawMessage `json:"data"`
+}
+
+// bigPageSide：PDF 页按 200 dpi 渲染后长边超过这么多像素（比 A4、Letter 大：B4、A3、图纸）时，找文字用大图
+// （ocrBigSide）。找文字前组件把图片长边缩到 1024 像素：A4 页缩小后字还看得清，A3 页缩得更狠，小字就找不到了
+// （0.2.12 某位用户的 OCR 引擎对比：一个 A3 页平常认出 963 字，大图 1570 字；37 个 A4 页两种认法只差几个字）。
+const bigPageSide = 2600
+
+// IsBigPage 说明这么大的页（像素）要不要用大图找字。
+func IsBigPage(size image.Point) bool { return max(size.X, size.Y) > bigPageSide }
+
+// bigOCR 是识别大幅面页用的 OCR 进程（找文字用大图）：一份文件里第一次遇到大幅面页时启动，文件识别完就结束，
+// 不多占内存。大幅面页不多，平常的页照样用常驻的进程。
+type bigOCR struct {
+	c     OCRConfig
+	p     *ocrProc
+	pages int // 用大图识别了几页
+}
+
+// newBigOCR 返回识别大幅面页用的进程（还没启动）；不需要时（设置了大幅面页也缩小、Windows 自带 OCR、本来就用
+// 大图）返回 nil。
+func newBigOCR(c OCRConfig) *bigOCR {
+	if c.SmallBigPages || c.Engine == OCRModelWin || c.MaxSide >= ocrBigSide || !c.Enabled() {
+		return nil
+	}
+	c.MaxSide = ocrBigSide
+	return &bigOCR{c: c}
+}
+
+func (b *bigOCR) recognize(path string) (string, error) {
+	if b.p == nil {
+		c := b.c
+		if n := ocrThreads.Load(); n > 0 {
+			c.Threads = int(n)
+		}
+		p, err := startOCR(c)
+		if err != nil {
+			return "", err
+		}
+		b.p = p
+	}
+	b.pages++
+	text, err := recognizeWith(b.p, b.c, path)
+	if err != nil && (errors.Is(err, errOCRDead) || errors.Is(err, errOCRTimeout)) {
+		killOCR(b.p) // 进程已退出或卡住：下次重新启动
+		b.p = nil
+	}
+	return text, err
+}
+
+func (b *bigOCR) close() {
+	if b != nil && b.p != nil {
+		killOCR(b.p)
+		b.p = nil
+	}
+}
+
+// ocrImage 识别一张图片，返回按阅读顺序拼接的文字。
+func ocrImage(c OCRConfig, imgPath string) (string, error) {
+	if c.Engine == OCRModelWin {
+		return ocrImageWin(c, imgPath)
+	}
+	if n := ocrThreads.Load(); n > 0 {
+		c.Threads = int(n)
+	}
+	ocrMu.Lock()
+	defer ocrMu.Unlock()
+	if ocrCur == nil || ocrCur.key != c.key() {
+		if ocrCur != nil {
+			logx.Debugf("OCR 参数改变（每个进程 %d 线程），重新启动 OCR 组件", c.Threads)
+		}
+		killOCR(ocrCur)
+		ocrCur = nil
+		p, err := startOCR(c)
+		if err != nil {
+			return "", err
+		}
+		ocrCur = p
+	}
+	p := ocrCur
+	text, err := recognizeWith(p, c, imgPath)
+	if err != nil && (errors.Is(err, errOCRDead) || errors.Is(err, errOCRTimeout)) {
+		log.Printf("OCR 组件（进程 %d）%v，结束后重新启动", p.cmd.Process.Pid, err)
+		killOCR(p) // 进程已退出或卡住：下次重新启动
+		ocrCur = nil
+	}
+	return text, err
+}
+
+// ocrImageWin 用 Windows 自带的 OCR 识别图片文件。之前常驻的 OCR 组件进程（换模型前用的）先结束，省内存。
+func ocrImageWin(c OCRConfig, imgPath string) (string, error) {
+	ocrMu.Lock()
+	killOCR(ocrCur)
+	ocrCur = nil
+	ocrMu.Unlock()
+	img, err := decodeForWinOCR(imgPath)
+	if err != nil {
+		return "", fmt.Errorf("OCR 读图失败：%v", err)
+	}
+	sec := c.PageSec
+	if sec <= 0 {
+		sec = 120
+	}
+	timeout := time.Duration(sec) * time.Second
+	text, deg, err := winOCRBest(img, func(i image.Image) (string, error) { return winOCRImage(i, timeout) })
+	if err != nil && !errors.Is(err, errOCRTimeout) {
+		err = fmt.Errorf("OCR 识别失败（%v）", err)
+	}
+	if deg != 0 {
+		logx.Debugf("Windows OCR：%s 转 %d° 后认出的字更多", logx.P(imgPath), deg)
+	}
+	return text, err
+}
+
+// decodeForWinOCR 读出图片文件。Go 的解码器解不开时（某些 JPEG，OCR 组件能读）改用 Windows 自带的解码组件。
+func decodeForWinOCR(p string) (image.Image, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	img, _, err := image.Decode(bufio.NewReaderSize(f, 1<<20))
+	f.Close()
+	if err == nil {
+		return img, nil
+	}
+	var got *image.Gray
+	errStop := errors.New("stop")
+	if werr := wicDecode(p, 0, func(i, n int, g *image.Gray) error { got = g; return errStop }); got != nil {
+		return got, nil
+	} else if werr != nil && !errors.Is(werr, errNoWIC) {
+		return nil, fmt.Errorf("%v；Windows 也解不开：%v", err, werr)
+	}
+	return nil, err
+}
+
+var (
+	errOCRDead    = errors.New("OCR 组件已退出")
+	errOCRTimeout = errors.New("OCR 超时")
+)
+
+// recognizeWith 用一个已启动的 OCR 进程识别一张图片。
+func recognizeWith(p *ocrProc, c OCRConfig, imgPath string) (string, error) {
+	if _, err := p.in.Write(ocrRequest(imgPath)); err != nil {
+		return "", fmt.Errorf("%w: %v", errOCRDead, err)
+	}
+	sec := c.PageSec
+	if sec <= 0 {
+		sec = 120
+	}
+	type reply struct {
+		text string
+		err  error
+	}
+	ch := make(chan reply, 1)
+	go func() {
+		for {
+			line, err := p.out.ReadBytes('\n')
+			if err != nil {
+				ch <- reply{err: fmt.Errorf("%w: %v", errOCRDead, err)}
+				return
+			}
+			var r ocrResp
+			if json.Unmarshal(bytes.TrimSpace(line), &r) != nil {
+				continue // 非协议行
+			}
+			switch r.Code {
+			case 100:
+				var items []struct {
+					Text string       `json:"text"`
+					Box  [][2]float64 `json:"box"`
+				}
+				if err := json.Unmarshal(r.Data, &items); err != nil {
+					ch <- reply{err: err}
+					return
+				}
+				var b strings.Builder
+				var hs []float64
+				for _, it := range items {
+					b.WriteString(it.Text)
+					b.WriteByte('\n')
+					if len(it.Box) == 4 {
+						hs = append(hs, boxHeight(it.Box))
+					}
+				}
+				setLastBoxes(hs)
+				ch <- reply{text: b.String()}
+			case 101:
+				ch <- reply{}
+			default:
+				ch <- reply{err: fmt.Errorf("OCR 识别失败（代码 %d）: %s", r.Code, strings.Trim(string(r.Data), `"`))}
+			}
+			return
+		}
+	}()
+	tm := awake.NewTimer(time.Duration(sec) * time.Second) // 只计醒着的时间
+	defer tm.Stop()
+	select {
+	case r := <-ch:
+		return r.text, r.err
+	case <-tm.C:
+		return "", fmt.Errorf("%w（单张图片超过 %d 秒）", errOCRTimeout, sec)
+	}
+}
+
+// ---- 文字框的大小（找规律：哪些页有缩小后找不到的小字）----
+
+// boxHeight 返回一个文字框（四个角，按顺时针）的字高：两条边里短的那条（横排、竖排都对）。
+func boxHeight(b [][2]float64) float64 {
+	d := func(p, q [2]float64) float64 { return math.Hypot(p[0]-q[0], p[1]-q[1]) }
+	return min(d(b[0], b[1]), d(b[0], b[3]))
+}
+
+// BoxStats 是一页认出的文字框的个数和字高（原图上的像素）：中位数、最小的一成。
+type BoxStats struct {
+	N           int
+	Median, P10 float64
+}
+
+func (s BoxStats) String() string {
+	if s.N == 0 {
+		return "没有文字框"
+	}
+	return fmt.Sprintf("文字框 %d 个，字高中位数 %.0f 像素、最小一成 %.0f 像素", s.N, s.Median, s.P10)
+}
+
+var (
+	lastBoxesMu sync.Mutex
+	lastBoxes   BoxStats
+)
+
+func setLastBoxes(hs []float64) {
+	slices.Sort(hs)
+	s := BoxStats{N: len(hs)}
+	if len(hs) > 0 {
+		s.Median, s.P10 = hs[len(hs)/2], hs[len(hs)/10]
+	}
+	lastBoxesMu.Lock()
+	lastBoxes = s
+	lastBoxesMu.Unlock()
+}
+
+// LastBoxes 返回最近一次识别的文字框统计（日志里记下，看哪些页有小字）。
+func LastBoxes() BoxStats {
+	lastBoxesMu.Lock()
+	defer lastBoxesMu.Unlock()
+	return lastBoxes
+}
+
+// ---- 图片 ----
+
+// ImageTooSmall 只读图片的文件头，判断是否太小、不值得 OCR（与识别时的规则相同：宽或高小于 MinSide，
+// 多为图标、缩略图）。扫描时就排除，不进 OCR 队列。读不出尺寸时返回 false（交给识别时再判断）。
+func ImageTooSmall(p string, c OCRConfig) bool {
+	f, err := os.Open(p)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	cfg, _, err := image.DecodeConfig(bufio.NewReaderSize(f, 64<<10))
+	return err == nil && (cfg.Width < minSide(c) || cfg.Height < minSide(c))
+}
+
+// ErrTooSmall 是图片太小时的说明（扫描时排除和识别时跳过用同一句话，失败列表里归为一类）。
+const ErrTooSmall = "图片尺寸过小，已跳过 OCR"
+
+func minSide(c OCRConfig) int {
+	if c.MinSide > 0 {
+		return c.MinSide
+	}
+	return 200
+}
+
+// tiffPages 返回 TIFF 每一页的 IFD 偏移。
+func tiffPages(b []byte) []uint32 {
+	if len(b) < 8 {
+		return nil
+	}
+	var bo binary.ByteOrder
+	switch string(b[:2]) {
+	case "II":
+		bo = binary.LittleEndian
+	case "MM":
+		bo = binary.BigEndian
+	default:
+		return nil
+	}
+	if bo.Uint16(b[2:4]) != 42 {
+		return nil
+	}
+	var pages []uint32
+	off := bo.Uint32(b[4:8])
+	seen := map[uint32]bool{}
+	for off != 0 && int(off)+2 <= len(b) && !seen[off] && len(pages) < 2000 {
+		seen[off] = true
+		pages = append(pages, off)
+		n := int(bo.Uint16(b[off : off+2]))
+		next := int(off) + 2 + n*12
+		if next+4 > len(b) {
+			break
+		}
+		off = bo.Uint32(b[next : next+4])
+	}
+	return pages
+}
+
+// tiffPageImage 把 TIFF 的第 k 页转成交给 OCR 组件的图片（ocrImageData）：让解码器读到的文件头里，指向首个 IFD 的偏移是第 k 页的 IFD，
+// 所有数据偏移都是绝对的，因此标准解码器直接解出该页。不复制文件（每页复制一遍，100 页就是 100 份拷贝）。
+func tiffPageImage(b []byte, ifd uint32) ([]byte, string, error) {
+	if len(b) < 8 {
+		return nil, "", errors.New("TIFF 文件太短")
+	}
+	r := &tiffPage{b: b}
+	copy(r.hdr[:], b[:8])
+	if string(b[:2]) == "II" {
+		binary.LittleEndian.PutUint32(r.hdr[4:8], ifd)
+	} else {
+		binary.BigEndian.PutUint32(r.hdr[4:8], ifd)
+	}
+	img, err := tiff.Decode(r)
+	if err != nil {
+		return nil, "", err
+	}
+	return ocrImageData(img)
+}
+
+// tiffPage 是改了文件头前 8 字节的 TIFF 数据（解码器有 ReadAt 时直接用它，不会整份读进新的缓冲区）。
+//
+// 有些扫描软件写的 TIFF，最后一个条带声明的字节数比文件里实际剩下的多（多为补齐用的空白），
+// Windows 照片查看器照样打开，标准解码器却报「unexpected EOF」：读到文件末尾之后的部分补 0。
+type tiffPage struct {
+	b   []byte
+	hdr [8]byte
+	off int64
+}
+
+func (t *tiffPage) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, errors.New("偏移为负")
+	}
+	if off >= int64(len(t.b)) {
+		return 0, io.EOF
+	}
+	n := copy(p, t.b[off:])
+	if off < 8 {
+		copy(p[:n], t.hdr[off:])
+	}
+	clear(p[n:])
+	return len(p), nil
+}
+
+func (t *tiffPage) Read(p []byte) (int, error) {
+	if rest := int64(len(t.b)) - t.off; rest < int64(len(p)) {
+		p = p[:max(0, rest)]
+	}
+	n, err := t.ReadAt(p, t.off)
+	t.off += int64(n)
+	return n, err
+}
+
+// ocrImageData 把要识别的图片编码成交给 OCR 组件的临时文件，返回数据和扩展名。灰度图（PDF 渲染出的页、扫描件）
+// 用 BMP：不压缩，编码和组件解码都几乎不花时间（一页 A4 扫描页编码成 PNG 约 0.1～0.2 秒，占每页用时的
+// 5% 左右；BMP 约 3 毫秒），文件大些，但用完就删。彩色图仍用 PNG（透明的地方交给组件按 PNG 处理）。
+func ocrImageData(img image.Image) ([]byte, string, error) {
+	var out bytes.Buffer
+	if g, ok := img.(*image.Gray); ok {
+		if err := bmp.Encode(&out, g); err != nil {
+			return nil, "", err
+		}
+		return out.Bytes(), ".bmp", nil
+	}
+	enc := png.Encoder{CompressionLevel: png.BestSpeed}
+	if err := enc.Encode(&out, img); err != nil {
+		return nil, "", err
+	}
+	return out.Bytes(), ".png", nil
+}
+
+// tempImage 把图片数据写成 ASCII 文件名的临时文件（OCR 组件对非 ASCII 路径支持不好）。
+func tempImage(dir, name string, data []byte) (string, error) {
+	p := filepath.Join(dir, name)
+	return p, os.WriteFile(p, data, 0o600)
+}
+
+func extractImage(p, ext string, opt Options) doc.Result {
+	if !opt.OCR.Enabled() {
+		return doc.Result{Status: doc.StatusSkipped, Err: "OCR 组件未安装，仅索引文件名"}
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		return doc.Result{Status: doc.StatusFailed, Err: err.Error()}
+	}
+	tmp, err := os.MkdirTemp("", "zhaozhao-ocr-")
+	if err != nil {
+		return doc.Result{Status: doc.StatusFailed, Err: err.Error()}
+	}
+	defer os.RemoveAll(tmp)
+
+	var b doc.Builder
+	ocrOne := func(label string, img []byte, ext string) error {
+		cfg, _, derr := image.DecodeConfig(bytes.NewReader(img))
+		if derr == nil && (cfg.Width < minSide(opt.OCR) || cfg.Height < minSide(opt.OCR)) {
+			return errTooSmall
+		}
+		path, err := tempImage(tmp, "img"+ext, img)
+		if err != nil {
+			return err
+		}
+		t1 := time.Now()
+		text, err := ocrImage(opt.OCR, path)
+		if err != nil {
+			return err
+		}
+		logx.Debugf("OCR %s %s用时 %.1fs，识别出 %d 字，%s", logx.P(p), label, time.Since(t1).Seconds(), len([]rune(text)), LastBoxes())
+		if strings.TrimSpace(text) != "" {
+			if label != "" {
+				b.Mark(label)
+			}
+			b.WriteString(text)
+		}
+		return nil
+	}
+
+	// viaWindows 用 Windows 自带的解码组件从第 from 页起读图片（Go 的解码器解不开时）。
+	// 返回值：识别了几页、其中几页太小；Windows 也解不开时 err 说明原因。
+	viaWindows := func(from int, multi bool) (pages, small int, err error) {
+		err = wicDecode(p, from, func(i, n int, img *image.Gray) error {
+			pages++
+			if multi {
+				opt.Progress("第 %d/%d 页", i+1, n)
+			}
+			data, imgExt, err := ocrImageData(img)
+			if err != nil {
+				return err
+			}
+			label := ""
+			if multi {
+				label = "第" + strconv.Itoa(i+1) + "页"
+			}
+			if err := ocrOne(label, data, imgExt); err == errTooSmall {
+				small++
+			} else if err != nil {
+				return err
+			}
+			return nil
+		})
+		if err == nil {
+			logx.Debugf("%s：用 Windows 自带的图片解码组件读取（从第 %d 页起）", logx.P(p), from+1)
+		}
+		return
+	}
+	// windowsFallback：Go 的解码器出错（goErr）时改用 Windows 的；Windows 也不行时两个原因都写上。
+	windowsFallback := func(goErr error, from int, multi bool) (pages, small int, res *doc.Result) {
+		pages, small, err := viaWindows(from, multi)
+		switch {
+		case err == nil:
+			return pages, small, nil
+		case errors.Is(err, errNoWIC):
+			return 0, 0, &doc.Result{Status: doc.StatusFailed, Err: goErr.Error()}
+		case errors.Is(err, errOCRDead), errors.Is(err, errOCRTimeout), strings.HasPrefix(err.Error(), "OCR"):
+			return 0, 0, &doc.Result{Status: doc.StatusFailed, Err: err.Error()}
+		}
+		return 0, 0, &doc.Result{Status: doc.StatusFailed, Err: goErr.Error() + "；" + err.Error()}
+	}
+
+	switch ext {
+	case "tif", "tiff":
+		pages := tiffPages(raw)
+		total, small := len(pages), 0
+		for i, off := range pages {
+			opt.Progress("第 %d/%d 页", i+1, len(pages))
+			data, imgExt, err := tiffPageImage(raw, off)
+			if err != nil {
+				// JPEG 压缩、2/4 位色深等 Go 的解码器不支持：这一页起改用 Windows 自带的解码组件
+				n, sm, res := windowsFallback(fmt.Errorf("TIFF 第 %d 页无法解码: %v", i+1, err), i, true)
+				if res != nil {
+					return *res
+				}
+				total, small = i+n, small+sm
+				break
+			}
+			err = ocrOne("第"+strconv.Itoa(i+1)+"页", data, imgExt)
+			if err == errTooSmall {
+				small++
+				continue
+			}
+			if err != nil {
+				return doc.Result{Status: doc.StatusFailed, Err: err.Error()}
+			}
+		}
+		if len(pages) == 0 {
+			n, sm, res := windowsFallback(errors.New("TIFF 文件已损坏"), 0, true)
+			if res != nil {
+				return *res
+			}
+			total, small = n, sm
+		}
+		if total > 0 && small == total {
+			return doc.Result{Status: doc.StatusSkipped, Err: ErrTooSmall}
+		}
+	case "webp", "bmp", "gif":
+		// OCR 组件不一定支持这些格式（BMP 有多种写法）：统一转成 ocrImageData 的格式
+		img, _, err := image.Decode(bytes.NewReader(raw))
+		if err != nil {
+			n, small, res := windowsFallback(errors.New("图片无法解码: "+err.Error()), 0, false)
+			if res != nil {
+				return *res
+			}
+			if n > 0 && small == n {
+				return doc.Result{Status: doc.StatusSkipped, Err: ErrTooSmall}
+			}
+			break
+		}
+		data, imgExt, err := ocrImageData(img)
+		if err != nil {
+			return doc.Result{Status: doc.StatusFailed, Err: "图片无法转换: " + err.Error()}
+		}
+		if err := ocrOne("", data, imgExt); err != nil {
+			return imageErr(err)
+		}
+	default:
+		e := "." + ext
+		if ext == "jpeg" {
+			e = ".jpg"
+		}
+		if err := ocrOne("", raw, e); err != nil {
+			return imageErr(err)
+		}
+	}
+	if strings.TrimSpace(b.String()) == "" {
+		return doc.Result{Status: doc.StatusNoContent, Err: "没有识别到文字", OCR: true}
+	}
+	return doc.Result{Status: doc.StatusOK, Text: b.String(), Locs: b.Locs, OCR: true}
+}
+
+var errTooSmall = errors.New(ErrTooSmall)
+
+// errNoWIC：没有 Windows 自带的图片解码组件（不是 Windows）。
+var errNoWIC = errors.New("没有 Windows 图片解码组件")
+
+// wicDecode 用 Windows 自带的图片解码组件逐页读图片（测试里可以换掉）。
+var wicDecode = wicDecodeImpl
+
+func imageErr(err error) doc.Result {
+	if err == errTooSmall {
+		return doc.Result{Status: doc.StatusSkipped, Err: err.Error()}
+	}
+	return doc.Result{Status: doc.StatusFailed, Err: err.Error()}
+}
+
+// ---- 扫描版 PDF ----
+
+func decodeConfig(b []byte, fileType string) (image.Config, error) {
+	if t := strings.ToLower(fileType); t == "tif" || t == "tiff" {
+		return tiff.DecodeConfig(bytes.NewReader(b))
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(b))
+	return cfg, err
+}
+
+// pdfOCRResult 是扫描版 PDF 的 OCR 结果。
+type pdfOCRResult struct {
+	texts   map[int]string // 页码 → 文字
+	skipped map[string]int // 无法识别的页：原因 → 页数
+}
+
+func (r pdfOCRResult) note() string {
+	if len(r.skipped) == 0 {
+		return ""
+	}
+	var parts []string
+	for why, n := range r.skipped {
+		parts = append(parts, fmt.Sprintf("%d 页%s", n, why))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "，")
+}
+
+// ocrPDFiumPages 用 PDFium 把没有文字层的页逐页渲染成图片并做 OCR：不管页面里是什么格式的图片
+// （JPEG、JBIG2、JPEG 2000、CCITT），也不管是一张图还是多张拼成，都按整页识别。
+// 几乎全白的页（空白页）不送去识别。调用方持有 pdfiumMu。
+//
+// 识别当前页的同时渲染下一页（renderAhead）：渲染、写临时文件约占每页用时的 5～8%，以前 OCR 组件这时干等着。
+func ocrPDFiumPages(d *pdfDoc, p string, pages []int, opt Options) (pdfOCRResult, error) {
+	res := pdfOCRResult{texts: map[int]string{}, skipped: map[string]int{}}
+	tmp, err := os.MkdirTemp("", "zhaozhao-pdfocr-")
+	if err != nil {
+		return res, err
+	}
+	defer os.RemoveAll(tmp)
+	skip := func(pg int, why string) {
+		res.skipped[why]++
+		logx.Debugf("PDF %s 第 %d 页%s，跳过", logx.P(p), pg, why)
+	}
+	logx.Debugf("PDF %s：共 %d 页，其中 %d 页没有文字层，渲染后 OCR", logx.P(p), d.pages(), len(pages))
+	ahead, stop := renderAhead(d, pages, tmp)
+	defer stop()
+	big := newBigOCR(opt.OCR)
+	defer big.close()
+	for i, pg := range pages {
+		opt.Progress("第 %d/%d 页", i+1, len(pages))
+		r := <-ahead
+		if r.err != nil {
+			return res, r.err
+		}
+		if r.skip != "" {
+			skip(pg, r.skip)
+			continue
+		}
+		if r.path == "" {
+			continue // 空白页
+		}
+		t1 := time.Now()
+		var text string
+		if big != nil && IsBigPage(r.size) {
+			text, err = big.recognize(r.path)
+		} else {
+			text, err = ocrImage(opt.OCR, r.path)
+		}
+		os.Remove(r.path)
+		if errors.Is(err, errOCRTimeout) {
+			skip(pg, "识别超时")
+			continue
+		}
+		if err != nil {
+			return res, err
+		}
+		logx.Debugf("OCR %s 第 %d 页（%d/%d）渲染 %.1fs、识别 %.1fs，图片 %dx%d，识别出 %d 字，%s", logx.P(p), pg, i+1, len(pages),
+			r.dur.Seconds(), time.Since(t1).Seconds(), r.size.X, r.size.Y, len([]rune(text)), LastBoxes())
+		res.texts[pg] = text
+	}
+	if big != nil && big.pages > 0 {
+		logx.Debugf("PDF %s：%d 页是大幅面页，用大图找字", logx.P(p), big.pages)
+	}
+	if n := res.note(); n != "" {
+		log.Printf("PDF %s：%s", logx.P(p), n)
+	}
+	return res, nil
+}
+
+// renderedPage 是渲染好、写成临时文件等着识别的一页。path 为空、skip 也为空表示空白页。
+type renderedPage struct {
+	path string
+	size image.Point
+	dark int           // 深色像素数（大图再认时判断用）
+	dur  time.Duration // 渲染加写文件的用时
+	skip string        // 无法渲染的原因
+	err  error         // 写临时文件失败：整份文件失败
+}
+
+// renderAhead 在另一个协程里按顺序渲染 pages，最多比识别提前一页（内存里、磁盘上最多多一页的图）。
+// stop 结束渲染并等协程退出：调用方返回后会释放 pdfiumMu、关闭文档，之后不能再碰 PDFium。
+func renderAhead(d *pdfDoc, pages []int, tmp string) (<-chan renderedPage, func()) {
+	out := make(chan renderedPage, 1)
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, pg := range pages {
+			select {
+			case <-quit:
+				return
+			default:
+			}
+			var r renderedPage
+			t0 := time.Now()
+			img, err := d.render(pg-1, 200, 3500)
+			switch {
+			case err != nil:
+				r.skip = "无法渲染（" + truncate(err.Error(), 80) + "）"
+			case !blankImage(img):
+				var data []byte
+				var ext string
+				if data, ext, r.err = ocrImageData(img); r.err == nil {
+					r.size = img.Rect.Size()
+					r.path, r.err = tempImage(tmp, "p"+strconv.Itoa(pg)+ext, data)
+				}
+			}
+			img = nil
+			r.dur = time.Since(t0)
+			select {
+			case out <- r:
+			case <-quit:
+				if r.path != "" {
+					os.Remove(r.path)
+				}
+				return
+			}
+			if r.err != nil {
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return out, func() {
+		once.Do(func() { close(quit) })
+		<-done
+	}
+}
+
+// blankImage 判断渲染出的页面是否几乎全白（深色像素不到万分之五）。
+func blankImage(g *image.Gray) bool {
+	dark, total := 0, len(g.Pix)
+	limit := total / 2000
+	for _, v := range g.Pix {
+		if v < 160 {
+			if dark++; dark > limit {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ocrPDFPages 对没有文字层的页逐页取出内嵌图片并做 OCR（没有 PDFium 时）：PDF 结构只读一次，
+// 每页取图、识别、删除临时文件后再处理下一页，内存里同时只有一页的图片。
+// 某一页识别超时只跳过这一页；OCR 组件无法启动等错误才让整份文件失败。
+func ocrPDFPages(p string, pages []int, opt Options) (pdfOCRResult, error) {
+	res := pdfOCRResult{texts: map[int]string{}, skipped: map[string]int{}}
+	f, err := os.Open(p)
+	if err != nil {
+		return res, err
+	}
+	defer f.Close()
+	t0 := time.Now()
+	opt.Progress("读取 PDF 结构")
+	conf := model.NewDefaultConfiguration()
+	conf.ValidationMode = model.ValidationRelaxed
+	ctx, err := api.ReadValidateAndOptimize(context.Background(), f, conf, nil)
+	if err != nil {
+		return res, fmt.Errorf("无法取出页面图片: %v", err)
+	}
+	logx.Debugf("PDF %s：读取结构用时 %.1fs，共 %d 页，其中 %d 页没有文字层需要 OCR", logx.P(p), time.Since(t0).Seconds(), ctx.PageCount, len(pages))
+	tmp, err := os.MkdirTemp("", "zhaozhao-pdfocr-")
+	if err != nil {
+		return res, err
+	}
+	defer os.RemoveAll(tmp)
+
+	skip := func(pg int, why string) {
+		res.skipped[why]++
+		logx.Debugf("PDF %s 第 %d 页%s，跳过", logx.P(p), pg, why)
+	}
+	for i, pg := range pages {
+		opt.Progress("第 %d/%d 页", i+1, len(pages))
+		imgs, err := pdfcpu.ExtractPageImages(context.Background(), ctx, pg, false)
+		if err != nil && len(imgs) == 0 {
+			skip(pg, "取不出图片（"+truncate(err.Error(), 80)+"）")
+			continue
+		}
+		// 一页可能有多张图（水印、印章、分条扫描）：取面积最大的一张
+		var best *model.Image
+		for k := range imgs {
+			im := imgs[k]
+			if im.Thumb {
+				continue
+			}
+			if best == nil || im.Width*im.Height > best.Width*best.Height {
+				best = &im
+			}
+		}
+		if best == nil {
+			skip(pg, "没有图片")
+			continue
+		}
+		b, err := io.ReadAll(best)
+		if err != nil || len(b) == 0 {
+			skip(pg, "图片无法读取")
+			continue
+		}
+		ext := "." + strings.ToLower(best.FileType)
+		switch strings.ToLower(best.FileType) {
+		case "jpg", "jpeg", "png":
+		case "tif", "tiff":
+			if tp := tiffPages(b); len(tp) > 0 {
+				if data, e, err := tiffPageImage(b, tp[0]); err == nil {
+					b, ext = data, e
+				}
+			}
+		case "jbig2":
+			skip(pg, "是 JBIG2 格式的黑白扫描图，暂不支持识别")
+			continue
+		case "jpx":
+			skip(pg, "是 JPEG 2000 格式的扫描图，暂不支持识别")
+			continue
+		default:
+			skip(pg, "的图片格式（"+best.FileType+"）暂不支持识别")
+			continue
+		}
+		w, h := best.Width, best.Height
+		if w == 0 || h == 0 {
+			if cfg, err := decodeConfig(b, strings.TrimPrefix(ext, ".")); err == nil { // TIFF 已转成别的格式
+				w, h = cfg.Width, cfg.Height
+			}
+		}
+		if w < minSide(opt.OCR) || h < minSide(opt.OCR) {
+			skip(pg, "图片太小")
+			continue
+		}
+		path, err := tempImage(tmp, "p"+strconv.Itoa(pg)+ext, b)
+		b = nil
+		if err != nil {
+			return res, err
+		}
+		t1 := time.Now()
+		text, err := ocrImage(opt.OCR, path)
+		os.Remove(path)
+		if errors.Is(err, errOCRTimeout) {
+			skip(pg, "识别超时")
+			continue
+		}
+		if err != nil {
+			return res, err
+		}
+		logx.Debugf("OCR %s 第 %d 页（%d/%d）用时 %.1fs，图片 %dx%d，识别出 %d 字", logx.P(p), pg, i+1, len(pages), time.Since(t1).Seconds(), w, h, len([]rune(text)))
+		res.texts[pg] = text
+	}
+	if n := res.note(); n != "" {
+		log.Printf("PDF %s：%s", logx.P(p), n)
+	}
+	return res, nil
+}

@@ -1,0 +1,847 @@
+package index
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/chenonestar/zhaozhao/internal/extract"
+	"github.com/chenonestar/zhaozhao/internal/logx"
+	"github.com/chenonestar/zhaozhao/internal/norm"
+	"github.com/chenonestar/zhaozhao/internal/store"
+	"github.com/chenonestar/zhaozhao/internal/volume"
+	"github.com/chenonestar/zhaozhao/internal/worker"
+)
+
+// Notice 是需要提示用户的事件，例如接入了从未索引过的移动硬盘。
+type Notice struct {
+	ID      int64  `json:"id"`
+	Kind    string `json:"kind"` // new-volume | volume-conflict | corrupt | info
+	Message string `json:"message"`
+	Volume  string `json:"volume,omitempty"`
+	Path    string `json:"path,omitempty"`
+	Time    int64  `json:"time"`
+}
+
+type volState struct {
+	info    volume.Info // 在线时 Mount 为当前挂载点；离线时为最后一次的挂载点
+	known   store.Volume
+	online  bool
+	syncing atomic.Bool
+}
+
+// rootRT 是索引根的运行时信息。
+type rootRT struct {
+	store.Root
+	vol   *volState
+	opts  RootOpts
+	rules *Rules
+}
+
+type scanReq struct {
+	rootID int64
+	sub    string // 卷内相对路径，空表示整个索引根
+	force  bool   // 忽略大小/时间对账，全部重新入队
+	// again：这个索引根正在扫描时，等它扫完再扫一遍（设置改了、变化事件溢出、磁盘重新接入，正在进行的扫描
+	// 可能看不到这些变化）。没有它的请求（启动、定时、手动点「扫描」）在正在扫描时直接忽略。
+	again bool
+}
+
+// scanState 记录某个索引根的扫描进度；各字段会被扫描协程和状态查询并发读写。
+type scanState struct {
+	running  atomic.Bool
+	count    int64        // 原子访问
+	lastDone atomic.Int64 // 最近一次完整扫描完成的 Unix 时间
+}
+
+// Manager 管理索引的整个生命周期。
+type Manager struct {
+	DB      *store.DB
+	Prov    volume.Provider
+	Pool    *worker.Pool
+	OCRPool *worker.Pool // OCR 专用进程池（并发数小，避免多个 OCR 引擎同时占用内存）；为空时使用 Pool
+	// LegacyPool 是老格式转换专用进程池（每个子进程常驻一个 LibreOffice）；为空时使用 Pool
+	LegacyPool *worker.Pool
+
+	ltest   legacyTester   // 老格式测试
+	otest   ocrTester      // OCR 引擎对比
+	bigChk  bigPageChecker // 检查 0.2.12 及以前识别的 PDF 的大幅面页
+	maint   maintState     // 后台整理索引库
+	ocrCfg  extract.OCRConfig
+	DataDir string
+
+	cfgMu sync.RWMutex
+	cfg   Config
+
+	mu    sync.RWMutex
+	vols  map[string]*volState
+	roots map[int64]*rootRT
+
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+
+	ocr ocrState // OCR 进程数 × 线程数的自动调整
+	// ocrBenching：正在测试本机 OCR 速度，普通文件、老格式暂停派发
+	ocrBenching atomic.Bool
+
+	cfgNotes []string // 读取设置时升级旧设置产生的说明，启动后提示一次
+
+	pausedAll atomic.Bool
+	// keepingAwake：正在阻止电脑自动睡眠（keepAwakeLoop）
+	keepingAwake atomic.Bool
+	awakeCh      chan struct{} // 有新任务时叫醒 keepAwakeLoop，不必等下一次定时检查
+	kickCh       chan struct{}
+
+	scanMu   sync.Mutex
+	scanQ    chan scanReq
+	scanSet  map[scanReq]bool
+	scanRun  map[int64]*scanReq // 正在整个扫描的索引根 → 扫完后要补扫的请求（nil 表示不用补扫）
+	scanInfo map[int64]*scanState
+
+	sched schedState
+	stats stageStats // 各阶段用时，定时写进日志（stats.go）
+
+	watch watchState
+
+	noticeMu  sync.Mutex
+	notices   []Notice
+	noticeSeq int64
+	noticed   map[string]bool
+
+	cpu cpuMeter // 子进程实际占用的 CPU（状态快照用）
+
+	corrupt  atomic.Bool
+	checking atomic.Bool // 后台完整性检查进行中
+
+	ibMu       sync.Mutex // 卷的索引占用（后台计算的缓存）
+	ibCache    map[string]int64
+	ibAt       time.Time
+	ibBusy     bool
+	rebuilding atomic.Bool
+	writeBulk  atomic.Bool // 写入积压，正在批量写入（全文索引暂停边写边合并）
+	startedAt  time.Time
+	baseline   atomic.Bool // 首次卷扫描完成后才通知「新卷」
+
+	compMu       sync.Mutex
+	spaceMu      sync.Mutex
+	spaceLast    *SpaceDetail // 这次运行里最近一次空间统计的结果（导出诊断信息时复用）
+	spaceAt      time.Time
+	components   []extract.ComponentStatus
+	compChecking bool
+	compModel    string // 自检 OCR 时用的认字模型
+}
+
+// New 创建管理器。pool 为 nil 时在进程内提取（测试用）。
+func New(db *store.DB, prov volume.Provider, pool *worker.Pool, dataDir string) *Manager {
+	m := &Manager{DB: db, Prov: prov, Pool: pool, DataDir: dataDir,
+		vols: map[string]*volState{}, roots: map[int64]*rootRT{},
+		kickCh: make(chan struct{}, 1), awakeCh: make(chan struct{}, 1), scanQ: make(chan scanReq, 1024),
+		scanSet: map[scanReq]bool{}, scanRun: map[int64]*scanReq{}, scanInfo: map[int64]*scanState{}}
+	m.watch.watched = map[int64]recursiveWatcher{}
+	m.watch.pending = map[string]pendingEvent{}
+	if m.Pool == nil {
+		m.Pool = worker.NewPool("", 1)
+	}
+	m.cfg = m.loadConfig()
+	logx.SetVerbose(m.cfg.Verbose())
+	m.ocrCfg = extract.FindOCR()
+	return m
+}
+
+func (m *Manager) configPath() string { return filepath.Join(m.DataDir, "config.json") }
+
+func (m *Manager) loadConfig() Config {
+	c := DefaultConfig(m.DataDir)
+	if b, err := os.ReadFile(m.configPath()); err == nil {
+		c.Version = 0 // 文件里没有版本号的是旧版本保存的
+		_ = json.Unmarshal(b, &c)
+		before := c
+		c = c.migrate()
+		if before.Version < 3 && c.OCRWorkers == 0 && (before.OCRWorkers > 1 || (before.OCRWorkers == 1 && before.Version == 2)) {
+			m.cfgNotes = append(m.cfgNotes, fmt.Sprintf("OCR 并发数已从手动设的 %d 改为「自动」：程序会在这台电脑上实测，选出最快的进程数和每个进程的线程数"+
+				"（进程开得多，线程总数超过 CPU 核心数时互相争抢，反而更慢）。需要的话可以在「设置」里改回手动。", before.OCRWorkers))
+		}
+	}
+	return c.normalized()
+}
+
+// Config 返回当前设置的副本。
+func (m *Manager) Config() Config {
+	m.cfgMu.RLock()
+	defer m.cfgMu.RUnlock()
+	return m.cfg.normalized()
+}
+
+// SetConfig 保存设置。繁简归一变化时在后台重建全文索引。
+func (m *Manager) SetConfig(c Config) error {
+	c = c.normalized()
+	c.Version = configVersion // 保存的总是当前格式，下次启动不会再按旧版本升级
+	old := m.Config()
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(m.configPath(), b, 0o600); err != nil {
+		return err
+	}
+	m.cfgMu.Lock()
+	m.cfg = c
+	m.cfgMu.Unlock()
+	logx.SetVerbose(c.Verbose())
+	if d := configDiff(old, c); d != "" {
+		m.logf("设置已修改：%s", d)
+	}
+	if old.OCRWorkers != c.OCRWorkers {
+		m.resetOCRPlan()
+	}
+	if old.OCRModel != c.OCRModel {
+		m.recheckOCRModel()
+	}
+	m.applyWorkers()
+	m.refreshRules()
+	if old.Simplify != c.Simplify {
+		go m.rebuildFTS()
+	}
+	if old.LegacyLOOnly != c.LegacyLOOnly && m.ctx != nil {
+		m.syncLegacyQueue(c.LegacyLOOnly)
+	}
+	// 排除规则按内容比较（只改了某条规则的内容、条数没变，也要重新扫描）
+	if old.MaxTextMB != c.MaxTextMB || old.MaxOtherMB != c.MaxOtherMB || !slices.Equal(old.ExcludeDirNames, c.ExcludeDirNames) ||
+		!slices.Equal(old.ExcludePrefixes, c.ExcludePrefixes) || !slices.Equal(old.ExcludeGlobs, c.ExcludeGlobs) ||
+		!slices.Equal(old.ExcludeExts, c.ExcludeExts) || old.FollowLinks != c.FollowLinks || old.SkipCloud != c.SkipCloud ||
+		old.SniffUnknown != c.SniffUnknown {
+		m.rescanAll(true)
+	}
+	return nil
+}
+
+// Norm 返回当前归一化选项（搜索与入库必须一致）。
+func (m *Manager) Norm() norm.Options { return m.Config().NormOptions() }
+
+// Start 启动后台任务：先识别在线卷，再对账、监听、调度。
+func (m *Manager) Start() error {
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.startedAt = time.Now()
+	if err := m.loadState(); err != nil {
+		return err
+	}
+	if len(m.cfgNotes) > 0 {
+		for _, n := range m.cfgNotes {
+			m.logf("%s", n)
+			m.addNotice(Notice{Kind: "info", Message: n})
+		}
+		m.cfgNotes = nil
+		_ = m.SetConfig(m.Config()) // 保存升级后的设置，下次启动不再提示
+	}
+	if n, err := m.DB.DeleteOrphans(); err == nil && n > 0 {
+		m.logf("清理了 %d 条不属于任何索引根的残留记录", n)
+	}
+	m.syncLegacyQueue(m.Config().LegacyLOOnly)
+	m.retryProtectedXls()
+	m.retryProtectedOOXML()
+	m.runUpgradeRetries()
+	m.refreshVolumes(true)
+	m.initWatch()
+	m.startScanners(2)
+	m.startScheduler()
+	m.wg.Add(1)
+	go m.volumeLoop()
+	m.wg.Add(1)
+	go m.maintainLoop()
+	m.wg.Add(1)
+	go m.keepAwakeLoop()
+	m.wg.Add(1)
+	go m.ocrTuneLoop()
+	// 启动对账：处理未运行期间发生的变化（F-BG-02）
+	m.RescanAll()
+	return nil
+}
+
+// syncLegacyQueue 让待处理的老格式文件排在与设置相符的队列：使用内置解析时排在普通队列
+// （先用内置解析器读取，读不了的再排到老格式转换队列），只用 LibreOffice 时排在老格式转换队列。
+// 从 0.1.x 升级时，以前转换失败（多为超时）的老格式文件也重新排队，用内置解析器再试一次。
+func (m *Manager) syncLegacyQueue(loOnly bool) {
+	want, prio := "native", prioFast
+	if loOnly {
+		want, prio = "lo", prioLegacy
+	}
+	cur, _ := m.DB.GetMeta("legacy_mode")
+	if cur == want {
+		return
+	}
+	moved, retried, err := m.DB.MoveLegacy(extract.LegacyExts(), prio, cur == "" && !loOnly)
+	if err != nil {
+		m.logf("调整老格式文件队列失败: %v", err)
+		return
+	}
+	_ = m.DB.SetMeta("legacy_mode", want)
+	if cur == "" && moved+retried == 0 {
+		return // 新建的索引库
+	}
+	m.logf("老格式处理方式：%s；%d 个待处理的老格式文件已调整队列，%d 个以前失败的重新排队",
+		map[bool]string{true: "只用 LibreOffice 转换", false: "内置解析优先，解析不了的再用 LibreOffice"}[loOnly], moved, retried)
+	m.kick()
+}
+
+// retryProtectedXls：0.2.0 把设了「保护工作簿」的 .xls（用默认密码加密，打开不需要密码）误记为「已加密」，
+// 0.2.1 起能读出内容。升级后把这些文件重新排队一次；真正有打开密码的会再次记为已加密。
+func (m *Manager) retryProtectedXls() {
+	if v, _ := m.DB.GetMeta("xls_default_password"); v == "1" {
+		return
+	}
+	prio := prioFast
+	if m.Config().LegacyLOOnly {
+		prio = prioLegacy
+	}
+	n, err := m.DB.RequeueEncrypted([]string{"xls", "xlt", "et", "ett"}, prio)
+	if err != nil {
+		m.logf("重新排队已加密的 .xls 失败: %v", err)
+		return
+	}
+	_ = m.DB.SetMeta("xls_default_password", "1")
+	if n > 0 {
+		m.logf("%d 个标记为「已加密」的 Excel 文件重新排队：设了「保护工作簿」的文件现在能读出内容", n)
+	}
+}
+
+// retryProtectedOOXML：0.2.1 以前把用默认密码加密的 docx/xlsx/pptx（打开时不要密码，常见于设了保护的 xlsx）
+// 记为「已加密」，0.2.2 起能读出内容。升级后把这些文件重新排队一次；真正有打开密码的会再次记为已加密，并注明原因。
+func (m *Manager) retryProtectedOOXML() {
+	if v, _ := m.DB.GetMeta("ooxml_default_password"); v == "1" {
+		return
+	}
+	n, err := m.DB.RequeueEncrypted(extract.OOXMLExts(), prioFast)
+	if err != nil {
+		m.logf("重新排队已加密的 Office 文件失败: %v", err)
+		return
+	}
+	_ = m.DB.SetMeta("ooxml_default_password", "1")
+	if n > 0 {
+		m.logf("%d 个标记为「已加密」的 docx/xlsx/pptx 重新排队：打开时不要密码的现在能读出内容", n)
+	}
+}
+
+// upgradeRetries：新版本能处理以前失败的文件、或提取得更好时，升级后把它们重新排队一次（每项只做一次，记在索引库里）。
+// fix 是重新排队前先执行的 SQL（可以为空）。
+var upgradeRetries = []struct{ key, cond, what, fix string }{
+	{"retry_zip_methods", `state=2 AND inner<>'' AND err='无法读取（超过解压总量上限、压缩比异常或数据损坏）'`,
+		"压缩包里以前读不出的文件（多为 Deflate64 等压缩方式）", ""},
+	{"retry_sleep_timeouts", `state=2 AND err LIKE '%超时%'`,
+		"以前超时的文件（以前的版本把电脑睡眠的时间也算进时限，醒来后会误判超时）", ""},
+	{"retry_wic_sniff", `state=2 AND (err LIKE 'TIFF 第 % 页无法解码%' OR err='TIFF 文件已损坏' OR err LIKE '图片无法解码%'
+		OR err LIKE '%RAR signature not found%')`,
+		"以前解不开的 TIFF、BMP 等图片（现在改用 Windows 自带的解码组件）和改过扩展名的压缩包", ""},
+	{"retry_encoded_text", `state=1 AND (ext='lrmx' OR (ext IN ('xml','txt','json','log','csv','htm','html','svg') AND text_len>=50000))`,
+		"文字里可能夹着照片等编码数据的文件（任免审批表 .lrmx，以及较大的 xml、txt 等），重新提取后索引库会变小",
+		`UPDATE files SET kind='doc' WHERE ext='lrmx'`},
+}
+
+func (m *Manager) runUpgradeRetries() {
+	for _, u := range upgradeRetries {
+		if v, _ := m.DB.GetMeta(u.key); v == "1" {
+			continue
+		}
+		if u.fix != "" {
+			if _, err := m.DB.W.Exec(u.fix); err != nil {
+				m.logf("升级索引库失败: %v", err)
+				continue
+			}
+		}
+		n, err := m.DB.RetryCond(u.cond)
+		if err != nil {
+			m.logf("重新排队%s失败: %v", u.what, err)
+			continue
+		}
+		_ = m.DB.SetMeta(u.key, "1")
+		if n > 0 {
+			m.logf("%d 个文件重新排队：%s", n, u.what)
+		}
+	}
+}
+
+// Stop 停止全部后台任务。
+func (m *Manager) Stop() {
+	if m.cancel != nil {
+		m.cancel()
+	}
+	m.stopWatch()
+	m.wg.Wait()
+	m.Pool.Close()
+	if m.OCRPool != nil {
+		m.OCRPool.Close()
+	}
+	if m.LegacyPool != nil {
+		m.LegacyPool.Close()
+	}
+}
+
+func (m *Manager) loadState() error {
+	vs, err := m.DB.ListVolumes()
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	for _, v := range vs {
+		st := &volState{known: v}
+		st.info = volume.Info{ID: v.ID, Label: v.Label, Serial: v.Serial, GUID: v.GUID, Capacity: v.Capacity, Kind: v.Kind, Mount: v.LastMount}
+		m.vols[v.ID] = st
+	}
+	m.mu.Unlock()
+	return m.reloadRoots()
+}
+
+func (m *Manager) reloadRoots() error {
+	rs, err := m.DB.ListRoots()
+	if err != nil {
+		return err
+	}
+	cfg := m.Config()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.roots = map[int64]*rootRT{}
+	for _, r := range rs {
+		rt := &rootRT{Root: r, vol: m.vols[r.VolumeID], opts: parseRootOpts(r.Opts)}
+		rt.rules = newRules(cfg, rt.opts)
+		m.roots[r.ID] = rt
+	}
+	return nil
+}
+
+func (m *Manager) refreshRules() {
+	cfg := m.Config()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, rt := range m.roots {
+		rt.rules = newRules(cfg, rt.opts)
+	}
+}
+
+func (m *Manager) getRoot(id int64) *rootRT {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.roots[id]
+}
+
+// kick 唤醒各通道的派发器（有新文件、有名额空出来了）。
+func (m *Manager) kick() {
+	m.sched.eachLane(func(l *lane) {
+		select {
+		case l.kick <- struct{}{}:
+		default:
+		}
+	})
+	m.pokeAwake()
+}
+
+// pokeAwake 叫醒 keepAwakeLoop：有任务时立即阻止自动睡眠（几秒就做完的任务也照样记录）。
+func (m *Manager) pokeAwake() {
+	select {
+	case m.awakeCh <- struct{}{}:
+	default:
+	}
+}
+
+// ---- 路径 ----
+
+func (m *Manager) volOf(id string) *volState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.vols[id]
+}
+
+// volSnapshot 在锁内取出卷信息的副本，避免与卷监控协程并发读写。
+func (m *Manager) volSnapshot(id string) (info volume.Info, known store.Volume, online, ok bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	v := m.vols[id]
+	if v == nil {
+		return volume.Info{}, store.Volume{}, false, false
+	}
+	return v.info, v.known, v.online, true
+}
+
+func joinMount(mount, rel string) string {
+	if rel == "" {
+		return mount
+	}
+	return filepath.Join(mount, filepath.FromSlash(rel))
+}
+
+// AbsPath 把「卷 + 相对路径」换成当前真实路径；卷离线时 online 为 false。
+func (m *Manager) AbsPath(volID, rel string) (string, bool) {
+	v := m.volOf(volID)
+	if v == nil {
+		return "", false
+	}
+	m.mu.RLock()
+	mount, on := v.info.Mount, v.online
+	m.mu.RUnlock()
+	return joinMount(mount, rel), on
+}
+
+// Display 实现 search.Resolver。
+func (m *Manager) Display(f *store.File) (string, bool, string) {
+	v := m.volOf(f.VolumeID)
+	if v == nil {
+		return filepath.FromSlash(f.RelPath), false, f.VolumeID
+	}
+	m.mu.RLock()
+	mount, on, label := v.info.Mount, v.online, v.info.Label
+	m.mu.RUnlock()
+	p := joinMount(mount, f.RelPath)
+	if f.Inner != "" {
+		inner := f.Inner
+		if filepath.Separator == '\\' {
+			inner = strings.ReplaceAll(inner, "/", `\`)
+		}
+		p += " › " + inner
+	}
+	return p, on, label
+}
+
+// OpenTarget 返回打开文件所需的真实路径。容器内的文件需要调用方先解出到临时目录。
+func (m *Manager) OpenTarget(f *store.File) (path string, err error) {
+	p, on := m.AbsPath(f.VolumeID, f.RelPath)
+	if !on {
+		info, known, _, ok := m.volSnapshot(f.VolumeID)
+		if !ok {
+			return "", fmt.Errorf("文件所在的磁盘已不在索引中")
+		}
+		return "", &OfflineError{Label: info.Label, LastMount: known.LastMount, LastSeen: known.LastSeen}
+	}
+	if _, err := os.Stat(p); err != nil {
+		return "", fmt.Errorf("文件不存在或无法访问：%v", err)
+	}
+	return p, nil
+}
+
+// OfflineError 说明需要接入哪块盘才能打开文件（F-VOL-04）。
+type OfflineError struct {
+	Label     string
+	LastMount string
+	LastSeen  int64
+}
+
+func (e *OfflineError) Error() string {
+	t := "未知"
+	if e.LastSeen > 0 {
+		t = time.Unix(e.LastSeen, 0).Format("2006-01-02 15:04")
+	}
+	return fmt.Sprintf("文件所在的磁盘当前未接入：请接入卷标为「%s」的磁盘（上次盘符 %s，最后在线时间 %s）", e.Label, strings.TrimRight(e.LastMount, `\/`), t)
+}
+
+// ---- 索引根 ----
+
+func nestedIn(a, b string) bool { // a 是否位于 b 之内（含相等），都是卷内相对路径
+	return b == "" || a == b || strings.HasPrefix(a, b+"/")
+}
+
+// AddRoot 添加索引根并开始建立索引。
+func (m *Manager) AddRoot(path string) (*store.Root, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("无法访问该目录：%v", err)
+	}
+	if !st.IsDir() {
+		return nil, fmt.Errorf("%s 不是目录", path)
+	}
+	info, rel, err := m.Prov.Detect(path)
+	if err != nil {
+		return nil, err
+	}
+	roots, _ := m.DB.ListRoots()
+	for _, r := range roots {
+		if r.VolumeID != info.ID {
+			continue
+		}
+		if nestedIn(rel, r.RelPath) {
+			return nil, fmt.Errorf("该目录已包含在索引根「%s」中", m.rootDisplay(r))
+		}
+		if nestedIn(r.RelPath, rel) {
+			return nil, fmt.Errorf("该目录包含已有的索引根「%s」，请先移除它再添加上层目录", m.rootDisplay(r))
+		}
+	}
+	if err := m.DB.UpsertVolume(store.Volume{ID: info.ID, Label: info.Label, Serial: info.Serial, GUID: info.GUID,
+		Capacity: info.Capacity, Kind: info.Kind, LastMount: info.Mount, LastSeen: time.Now().Unix()}); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	vs := m.vols[info.ID]
+	if vs == nil {
+		vs = &volState{}
+		m.vols[info.ID] = vs
+	}
+	vs.info, vs.online = info, true
+	vs.known = store.Volume{ID: info.ID, Label: info.Label, LastMount: info.Mount, LastSeen: time.Now().Unix(), Kind: info.Kind}
+	m.mu.Unlock()
+	id, err := m.DB.AddRoot(info.ID, rel)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.reloadRoots(); err != nil {
+		return nil, err
+	}
+	m.saveRootsBackup()
+	m.dropVolumeNotices(info.ID)
+	rt := m.getRoot(id)
+	m.watchRoot(rt)
+	m.enqueueScan(scanReq{rootID: id})
+	r := rt.Root
+	return &r, nil
+}
+
+func (m *Manager) rootDisplay(r store.Root) string {
+	p, _ := m.AbsPath(r.VolumeID, r.RelPath)
+	if p == "" {
+		return r.RelPath
+	}
+	return p
+}
+
+// RemoveRoot 删除索引根及其全部索引数据。
+func (m *Manager) RemoveRoot(id int64) error {
+	if rt := m.getRoot(id); rt != nil {
+		m.unwatchRoot(rt)
+	}
+	if err := m.DB.RemoveRoot(id); err != nil {
+		return err
+	}
+	_ = m.reloadRoots() // 正在进行的扫描会在下一次检查时发现索引根已删除并停止
+	m.saveRootsBackup()
+	m.kick()
+	return nil
+}
+
+func (m *Manager) PauseRoot(id int64, paused bool) error {
+	if err := m.DB.SetRootPaused(id, paused); err != nil {
+		return err
+	}
+	_ = m.reloadRoots()
+	if !paused {
+		m.enqueueScan(scanReq{rootID: id, again: true})
+		m.kick()
+	}
+	return nil
+}
+
+func (m *Manager) SetRootOpts(id int64, o RootOpts) error {
+	b, _ := json.Marshal(o)
+	if err := m.DB.SetRootOpts(id, b); err != nil {
+		return err
+	}
+	_ = m.reloadRoots()
+	m.saveRootsBackup()
+	m.enqueueScan(scanReq{rootID: id, again: true})
+	return nil
+}
+
+// PauseAll / ResumeAll 暂停或恢复全部后台任务（F-BG-07）。
+func (m *Manager) PauseAll()      { m.pausedAll.Store(true) }
+func (m *Manager) ResumeAll()     { m.pausedAll.Store(false); m.kick() }
+func (m *Manager) IsPaused() bool { return m.pausedAll.Load() }
+
+// RescanAll 对全部索引根做增量对账（正在扫描的索引根不再重复扫描）。
+func (m *Manager) RescanAll() { m.rescanAll(false) }
+
+func (m *Manager) rescanAll(again bool) {
+	m.mu.RLock()
+	var ids []int64
+	for id, rt := range m.roots {
+		if !rt.Paused {
+			ids = append(ids, id)
+		}
+	}
+	m.mu.RUnlock()
+	for _, id := range ids {
+		m.enqueueScan(scanReq{rootID: id, again: again})
+	}
+}
+
+func (m *Manager) RescanRoot(id int64) { m.enqueueScan(scanReq{rootID: id}) }
+
+// RebuildRoot 重新提取某个索引根的全部内容；id 为 0 表示全部（F-BG-12）。
+func (m *Manager) RebuildRoot(id int64) error {
+	if err := m.DB.ResetContent(id); err != nil {
+		return err
+	}
+	if id == 0 {
+		m.rescanAll(true)
+	} else {
+		m.enqueueScan(scanReq{rootID: id, force: true, again: true})
+	}
+	m.kick()
+	return nil
+}
+
+// RetryFailed 重试失败的文件。
+func (m *Manager) RetryFailed(ids []int64) error {
+	if err := m.DB.RetryFailed(ids); err != nil {
+		return err
+	}
+	m.kick()
+	return nil
+}
+
+// DeleteVolume 删除某个卷的全部索引（F-VOL-08）。
+func (m *Manager) DeleteVolume(id string) error {
+	m.mu.RLock()
+	for _, rt := range m.roots {
+		if rt.VolumeID == id {
+			m.mu.RUnlock()
+			m.unwatchRoot(rt)
+			m.mu.RLock()
+		}
+	}
+	m.mu.RUnlock()
+	if err := m.DB.RemoveVolume(id); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	delete(m.vols, id)
+	m.mu.Unlock()
+	_ = m.reloadRoots()
+	m.saveRootsBackup()
+	return nil
+}
+
+// ---- 通知 ----
+
+func (m *Manager) addNotice(n Notice) {
+	m.noticeMu.Lock()
+	defer m.noticeMu.Unlock()
+	m.noticeSeq++
+	n.ID, n.Time = m.noticeSeq, time.Now().Unix()
+	m.notices = append(m.notices, n)
+	if len(m.notices) > 50 {
+		m.notices = m.notices[len(m.notices)-50:]
+	}
+}
+
+// Notices 返回 id 之后的通知（after 为 0 时返回全部还有效的通知：关掉的、过时的不再返回）。
+func (m *Manager) Notices(after int64) []Notice {
+	m.noticeMu.Lock()
+	defer m.noticeMu.Unlock()
+	out := []Notice{}
+	for _, n := range m.notices {
+		if n.ID > after {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// DismissNotice 关掉一条通知。新接入磁盘的「是否加入索引」：记住这块盘，以后接入不再问
+// （要加入时用「添加目录」）。以前只在界面上隐藏，重新打开窗口又会出现。
+func (m *Manager) DismissNotice(id int64) {
+	m.noticeMu.Lock()
+	var gone *Notice
+	for i, n := range m.notices {
+		if n.ID == id {
+			gone = &n
+			m.notices = slices.Delete(m.notices, i, i+1)
+			break
+		}
+	}
+	m.noticeMu.Unlock()
+	if gone != nil && gone.Kind == "new-volume" && gone.Volume != "" {
+		m.ignoreVolume(gone.Volume)
+		m.logf("不再提示把磁盘 %s 加入索引（需要时可以用「添加目录」加入）", logx.P(gone.Path))
+	}
+}
+
+// dropVolumeNotices 去掉某块磁盘的「是否加入索引」提示（磁盘拔出了、已经加入索引），下次接入时可以再问。
+func (m *Manager) dropVolumeNotices(vol string) {
+	m.noticeMu.Lock()
+	defer m.noticeMu.Unlock()
+	m.notices = slices.DeleteFunc(m.notices, func(n Notice) bool { return n.Kind == "new-volume" && n.Volume == vol })
+	delete(m.noticed, "new:"+vol)
+}
+
+const metaIgnoredVolumes = "ignored_volumes" // 用户选择了不加入索引的磁盘（JSON 数组）
+
+func (m *Manager) ignoredVolumes() []string {
+	v, _ := m.DB.GetMeta(metaIgnoredVolumes)
+	var ids []string
+	_ = json.Unmarshal([]byte(v), &ids)
+	return ids
+}
+
+func (m *Manager) ignoreVolume(id string) {
+	ids := m.ignoredVolumes()
+	if slices.Contains(ids, id) {
+		return
+	}
+	data, _ := json.Marshal(append(ids, id))
+	_ = m.DB.SetMeta(metaIgnoredVolumes, string(data))
+}
+
+func (m *Manager) logf(format string, a ...any) { log.Printf(format, a...) }
+
+// ---- 索引根备份：索引库损坏重建后可恢复索引根列表 ----
+
+type rootBackup struct {
+	Roots []struct {
+		Volume store.Volume `json:"volume"`
+		Rel    string       `json:"rel"`
+		Opts   RootOpts     `json:"opts"`
+	} `json:"roots"`
+}
+
+func (m *Manager) saveRootsBackup() {
+	var b rootBackup
+	rs, _ := m.DB.ListRoots()
+	for _, r := range rs {
+		v, _ := m.DB.GetVolume(r.VolumeID)
+		if v == nil {
+			continue
+		}
+		b.Roots = append(b.Roots, struct {
+			Volume store.Volume `json:"volume"`
+			Rel    string       `json:"rel"`
+			Opts   RootOpts     `json:"opts"`
+		}{*v, r.RelPath, parseRootOpts(r.Opts)})
+	}
+	data, _ := json.MarshalIndent(b, "", "  ")
+	_ = os.WriteFile(filepath.Join(m.DataDir, "roots.json"), data, 0o600)
+}
+
+// RestoreRoots 从备份恢复索引根（索引库被重建之后调用），返回恢复的数量。
+func RestoreRoots(db *store.DB, dataDir string) int {
+	data, err := os.ReadFile(filepath.Join(dataDir, "roots.json"))
+	if err != nil {
+		return 0
+	}
+	var b rootBackup
+	if json.Unmarshal(data, &b) != nil {
+		return 0
+	}
+	n := 0
+	for _, r := range b.Roots {
+		if db.UpsertVolume(r.Volume) != nil {
+			continue
+		}
+		id, err := db.AddRoot(r.Volume.ID, r.Rel)
+		if err != nil {
+			continue
+		}
+		o, _ := json.Marshal(r.Opts)
+		_ = db.SetRootOpts(id, o)
+		n++
+	}
+	return n
+}
+
+var _ = runtime.GOOS
+
+// RefreshVolumes 立即重新识别在线卷（收到系统的设备变化通知时调用）。
+func (m *Manager) RefreshVolumes() { m.refreshVolumes(false) }

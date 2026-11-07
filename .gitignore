@@ -1,0 +1,9 @@
+/zhaozhao
+/zhaozhao.exe
+/dist/
+/web/node_modules/
+*.db
+*.db-wal
+*.db-shm
+/packaging/ChineseSimplified.isl
+/cmd/zhaozhao/*.syso

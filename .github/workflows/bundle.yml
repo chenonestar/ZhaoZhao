@@ -1,0 +1,191 @@
+name: Bundle
+
+# 构建「完整版」：主程序 + LibreOffice（老格式转换）+ RapidOCR-json（OCR）+ PDFium（PDF 引擎），全部离线可用。
+# 在真实 Windows 上做冒烟测试：老格式转换和 OCR 真正跑一遍，通过后才产出压缩包。
+# 触发：手动、修改打包相关文件、被 release.yml 调用。
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: dev
+  push:
+    branches: ["claude/**"]
+    paths:
+      - ".github/workflows/bundle.yml"
+      - "packaging/**"
+
+jobs:
+  full:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ inputs.version || 'dev' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 构建界面与主程序
+        shell: pwsh
+        run: |
+          Push-Location web; npm ci --no-audit --no-fund; npm run build; Pop-Location
+          New-Item -ItemType Directory -Force ZhaoZhao/components/libreoffice, ZhaoZhao/components/ocr | Out-Null
+          go run ./packaging/tools/winres -version $env:VERSION   # 图标、版本信息、清单
+          $built = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
+          go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$env:VERSION -X main.built=$built" -o ZhaoZhao/zhaozhao.exe ./cmd/zhaozhao
+          Copy-Item packaging/components-README.txt ZhaoZhao/components/README.txt
+          Copy-Item packaging/portable-README.txt ZhaoZhao/README.txt
+          New-Item ZhaoZhao/portable.flag -ItemType File | Out-Null
+
+      - name: 放入 PDFium
+        shell: bash
+        run: packaging/fetch-pdfium.sh win ZhaoZhao/components/pdfium
+
+      - name: 安装 LibreOffice 并放入 components
+        shell: pwsh
+        run: |
+          $lo = "${env:ProgramFiles}\LibreOffice"
+          # 下载服务器偶尔连不上：最多试 3 次
+          for ($i = 1; $i -le 3 -and -not (Test-Path "$lo\program\soffice.exe"); $i++) {
+            if ($i -gt 1) { Write-Host "第 $i 次重试安装 LibreOffice"; Start-Sleep -Seconds 30 }
+            choco install libreoffice-still -y --no-progress --force
+          }
+          if (-not (Test-Path "$lo\program\soffice.exe")) { throw "没有找到 $lo\program\soffice.exe" }
+          robocopy $lo ZhaoZhao\components\libreoffice /E /NFL /NDL /NJH /NJS /NP | Out-Null
+          if ($LASTEXITCODE -ge 8) { throw "robocopy 失败: $LASTEXITCODE" }
+          $global:LASTEXITCODE = 0
+          # 帮助文档和素材库对转换没有用，删掉以减小体积（冒烟测试会验证转换仍然可用）
+          foreach ($d in 'help', 'share\gallery') { Remove-Item "ZhaoZhao\components\libreoffice\$d" -Recurse -Force -ErrorAction SilentlyContinue }
+          & "ZhaoZhao\components\libreoffice\program\soffice.exe" --version
+          "{0:N0} MB" -f ((Get-ChildItem ZhaoZhao\components\libreoffice -Recurse | Measure-Object Length -Sum).Sum / 1MB)
+
+      - name: 获取 RapidOCR-json 并放入 components
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ocr-dl, ocr-ex | Out-Null
+          gh release download --repo hiroi-sora/RapidOCR-json --dir ocr-dl --pattern '*.7z'
+          foreach ($f in Get-ChildItem ocr-dl -Filter *.7z) { 7z x -y "-oocr-ex" $f.FullName | Select-Object -Last 2 }
+          $exe = Get-ChildItem ocr-ex -Recurse -Include 'RapidOCR-json.exe', 'RapidOCR_json.exe' | Select-Object -First 1
+          if (-not $exe) { throw "发布包里没有找到 RapidOCR-json.exe" }
+          Copy-Item $exe.FullName ZhaoZhao\components\ocr\
+          Copy-Item (Join-Path $exe.DirectoryName 'models') ZhaoZhao\components\ocr\models -Recurse
+          # 简体中文（V4）：与发布包 cmd.txt 里的语言库表一致；ensureAscii 让输出全是 ASCII，避免代码页问题
+          @('--models=models', '--det=ch_PP-OCRv4_det_infer.onnx', '--cls=ch_ppocr_mobile_v2.0_cls_infer.onnx',
+            '--rec=rec_ch_PP-OCRv4_infer.onnx', '--keys=dict_chinese.txt', '--ensureAscii=1') |
+            Set-Content ZhaoZhao\components\ocr\args.txt -Encoding utf8
+          Get-ChildItem ZhaoZhao\components\ocr | Format-Table Name, Length
+
+      # 找找默认用新认字模型 PP-OCRv6 small（比组件自带的 PP-OCRv4 快、准得多），另带它的 INT8 量化版，
+      # 程序测速时按本机实测选用哪个。模型取自 rapidocr 的安装包，量化用模拟文字行校准（见脚本说明）
+      - name: 放入新认字模型（PP-OCRv6 small 和它的 INT8 量化版）
+        shell: pwsh
+        run: |
+          python -m pip install --quiet --disable-pip-version-check onnx==1.18.0 onnxruntime==1.22.1 pillow numpy
+          python -m pip download --quiet --disable-pip-version-check --no-deps -d ocr-model rapidocr==3.10.0
+          $whl = (Get-ChildItem ocr-model -Filter 'rapidocr-*.whl' | Select-Object -First 1).FullName
+          $env:PYTHONIOENCODING = 'utf-8'
+          python packaging/tools/make_ocr_models.py $whl ZhaoZhao\components\ocr\models
+          if ($LASTEXITCODE -ne 0) { throw "生成新认字模型失败" }
+
+      - name: 随包放入 VC++ 运行库（目标电脑没装 VC++ 2015-2022 运行库时组件也能启动）
+        shell: pwsh
+        run: |
+          # LibreOffice 和 RapidOCR 都依赖 VC++ 2015-2022 x64 运行库。安装版 LibreOffice 会把它装进系统，
+          # 但我们是直接复制程序目录，目标电脑可能没有。按微软允许的「应用本地部署」方式放在 exe 旁边。
+          $dlls = 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll', 'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll',
+                  'vcruntime140.dll', 'vcruntime140_1.dll', 'concrt140.dll', 'vcomp140.dll'
+          foreach ($dest in 'ZhaoZhao\components\libreoffice\program', 'ZhaoZhao\components\ocr') {
+            foreach ($d in $dlls) {
+              $src = Join-Path $env:SystemRoot "System32\$d"
+              if (Test-Path (Join-Path $dest $d)) { Write-Host "$dest 已自带 $d"; continue }
+              if (Test-Path $src) { Copy-Item $src $dest; Write-Host "复制 $d → $dest" }
+              else { Write-Warning "系统里没有 $d" }
+            }
+          }
+
+      - name: 冒烟测试（真实运行：老格式转换、OCR、压缩包，TEMP 设为含中文的路径）
+        shell: pwsh
+        run: ./packaging/smoke-windows.ps1 -Stage ZhaoZhao
+
+      - name: 网络盘冒烟测试（共享文件夹映射成盘符，几百个混合文件，默认设置）
+        shell: pwsh
+        run: |
+          go build -o mkscanpdf.exe ./packaging/tools/mkscanpdf
+          ./packaging/smoke-network.ps1 -Stage ZhaoZhao -MkScanPdf (Resolve-Path mkscanpdf.exe).Path
+
+      - name: OCR 测速（随包的 RapidOCR-json：各种进程数 × 线程数的速度和每个进程的内存）
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'ocr-bench.txt'
+          $p = Start-Process -FilePath ZhaoZhao\zhaozhao.exe -ArgumentList '--ocr-bench', "`"$out`"" -Wait -PassThru
+          if (Test-Path $out) { Get-Content $out -Encoding utf8 }
+          if ($p.ExitCode -ne 0) { throw "OCR 测速失败（退出码 $($p.ExitCode)）" }
+          $left = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(zhaozhao|RapidOCR)' }
+          if ($left) { $left | Format-Table Name, Id; throw "测速结束后还有进程没有退出" }
+
+      # Windows 自带的 OCR 要装了中文识别语言才能认中文，服务器版 Windows 默认没有（装不上时下一步只记录）
+      - name: 安装 Windows 自带 OCR 的中文识别语言
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          $n = 'Language.OCR~~~zh-CN~0.0.1.0'
+          $c = Get-WindowsCapability -Online -Name $n
+          "安装前：$n $($c.State)"
+          if ($c.State -ne 'Installed') { Add-WindowsCapability -Online -Name $n | Out-Host }
+
+      # 同一批模拟扫描页，直接驱动发布包里的 RapidOCR-json，比较各个认字模型的速度和准确率；新模型（默认用的）
+      # 不能用或准确率太低时打包失败。顺带确认组件读 BMP（找找交给它的格式）没问题。
+      # 再用找找里的 Windows 自带 OCR（可选的实验模型）认同样的页面：装上了中文识别语言、准确率却太低时也失败
+      - name: OCR 认字模型检查（各模型速度和准确率，含 Windows 自带的 OCR）
+        shell: pwsh
+        run: |
+          $env:PYTHONIOENCODING = 'utf-8'
+          go build -o winocr.exe ./packaging/tools/winocr
+          python packaging/tools/ocr_model_test.py ZhaoZhao\components\ocr (Join-Path $env:RUNNER_TEMP 'ocr-model') (Resolve-Path winocr.exe).Path
+          if ($LASTEXITCODE -ne 0) { throw "新认字模型检查没通过" }
+
+      - name: 打包完整版 zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          7z a -tzip -mx=5 "dist\ZhaoZhao-full-$env:VERSION.zip" .\ZhaoZhao | Select-Object -Last 3
+          Get-ChildItem dist | Format-Table Name, @{n='MB';e={[math]::Round($_.Length/1MB)}}
+
+      - name: 编译完整版安装包
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          # 简体中文语言文件：新版 Inno Setup 自带；否则从源码仓库下载（新旧两个位置都试）
+          $isl = "${env:ProgramFiles(x86)}\Inno Setup 6\Languages\ChineseSimplified.isl"
+          if (Test-Path $isl) { Copy-Item $isl packaging\ChineseSimplified.isl; Write-Host "使用 Inno Setup 自带的简体中文" }
+          else {
+            foreach ($u in 'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl',
+                           'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl') {
+              try { Invoke-WebRequest -UseBasicParsing -OutFile packaging\ChineseSimplified.isl $u; Write-Host "下载 $u"; break } catch { }
+            }
+            if (-not (Test-Path packaging\ChineseSimplified.isl)) { Write-Warning "没能获取简体中文语言文件，安装向导将使用英文" }
+          }
+          $env:ZZ_VERSION = $env:VERSION -replace '^v', ''
+          $stage = (Resolve-Path ZhaoZhao).Path
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DStageDir=$stage" packaging\zhaozhao.iss
+          Get-ChildItem dist | Format-Table Name, @{n='MB';e={[math]::Round($_.Length/1MB)}}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: full
+          path: |
+            dist/ZhaoZhao-full-*.zip
+            dist/ZhaoZhao-setup-*.exe
+          retention-days: 14
+          compression-level: 0

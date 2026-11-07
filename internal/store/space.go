@@ -1,0 +1,261 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"math/rand/v2"
+	"os"
+	"sort"
+	"strings"
+	"time"
+)
+
+// SpaceInfo 是索引库文件的空间概况（很快，只读几个 PRAGMA）。
+type SpaceInfo struct {
+	DBBytes     int64 `json:"dbBytes"`     // index.db 文件大小
+	WALBytes    int64 `json:"walBytes"`    // index.db-wal 文件大小
+	FreeBytes   int64 `json:"freeBytes"`   // 空闲页（删除内容后空出来、还没还给磁盘的空间）
+	Incremental bool  `json:"incremental"` // 空闲页会在空闲时逐步还给磁盘
+}
+
+// Space 返回索引库文件的空间概况。
+func (d *DB) Space() SpaceInfo {
+	var s SpaceInfo
+	if st, err := os.Stat(d.Path); err == nil {
+		s.DBBytes = st.Size()
+	}
+	if st, err := os.Stat(d.Path + "-wal"); err == nil {
+		s.WALBytes = st.Size()
+	}
+	var free, pageSize, av int64
+	_ = d.R.QueryRow(`PRAGMA freelist_count`).Scan(&free)
+	_ = d.R.QueryRow(`PRAGMA page_size`).Scan(&pageSize)
+	_ = d.R.QueryRow(`PRAGMA auto_vacuum`).Scan(&av)
+	s.FreeBytes = free * pageSize
+	s.Incremental = av == 2
+	return s
+}
+
+// Checkpoint 把 WAL 里的内容写回主文件并把 WAL 截短为 0（空闲时调用）。
+func (d *DB) Checkpoint() error {
+	_, err := d.W.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	return err
+}
+
+// CheckpointIfLarge 在 WAL 文件超过 limit 字节时把它写回主文件并截短为 0（写入期间调用）。
+//
+// SQLite 的自动检查点不等读者：一直有人在搜索、刷新状态时，WAL 写回了也不能从头复用，
+// 只会越积越长（journal_size_limit 也只在检查点完成之后才截短）。这里等读者读完最多 wait
+// （期间其他写入等待）；等不到返回 busy，下次再试。did 表示 WAL 超过了 limit、做了检查点。
+func (d *DB) CheckpointIfLarge(limit int64, wait time.Duration) (did, busy bool, err error) {
+	st, err := os.Stat(d.Path + "-wal")
+	if err != nil || st.Size() <= limit {
+		return false, false, nil
+	}
+	ctx := context.Background()
+	c, err := d.W.Conn(ctx)
+	if err != nil {
+		return false, false, err
+	}
+	defer c.Close()
+	if _, err := c.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout=%d`, wait.Milliseconds())); err != nil {
+		return false, false, err
+	}
+	defer c.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout=%d`, busyTimeout.Milliseconds()))
+	var b, frames, done int
+	if err := c.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&b, &frames, &done); err != nil {
+		return true, false, err
+	}
+	return true, b != 0, nil
+}
+
+// IncrementalVacuum 把最多 pages 个空闲页还给磁盘（只对增量回收模式的索引库有效）。
+func (d *DB) IncrementalVacuum(pages int) error {
+	_, err := d.W.Exec(`PRAGMA incremental_vacuum(?)`, pages)
+	return err
+}
+
+// Vacuum 重写整个索引库，把空闲空间全部还给磁盘，并改为增量回收模式（以后删除内容空出的空间
+// 会在空闲时逐步归还，不必再手动压缩）。需要与索引库差不多大的临时空间，期间写入会等待。
+func (d *DB) Vacuum() error {
+	if _, err := d.W.Exec(`PRAGMA auto_vacuum=INCREMENTAL`); err != nil {
+		return err
+	}
+	if _, err := d.W.Exec(`VACUUM`); err != nil {
+		return err
+	}
+	return d.Checkpoint()
+}
+
+// SpaceItem 是空间统计里的一项。
+type SpaceItem struct {
+	Name  string `json:"name"`
+	Bytes int64  `json:"bytes"`
+	Count int64  `json:"count,omitempty"`
+}
+
+// BigText 是占用空间最多的提取文本之一。
+type BigText struct {
+	FileID  int64 `json:"fileId"`
+	Bytes   int64 `json:"bytes"`   // 压缩后
+	Chars   int64 `json:"chars"`   // 文字数
+	Sharers int64 `json:"sharers"` // 共用这份文本的文件数
+}
+
+// SpaceStats 是索引库空间的详细统计（要读遍整个索引库，大索引库需要几秒到几十秒）。
+type SpaceStats struct {
+	SpaceInfo
+	Parts     []SpaceItem `json:"parts"`     // 全文索引、提取文本、文件信息……各占多少
+	ByExt     []SpaceItem `json:"byExt"`     // 各扩展名的提取文本（压缩后）大小与文件数，前 20
+	Biggest   []BigText   `json:"biggest"`   // 最大的 20 份提取文本
+	Texts     int64       `json:"texts"`     // 文本份数
+	TextFiles int64       `json:"textFiles"` // 有文本的文件数（多于份数的部分是共用的）
+	RawChars  int64       `json:"rawChars"`  // 全部文本的文字数
+	Legacy    int64       `json:"legacy"`    // 还是旧格式（未重新压缩）的文本份数
+	FTS       *FTSInfo    `json:"fts,omitempty"`
+}
+
+// partName 把 SQLite 内部对象名翻译成能看懂的类别。
+func partName(n string) string {
+	switch {
+	case strings.HasPrefix(n, "fts"):
+		return "全文索引"
+	case n == "texts":
+		return "提取文本"
+	case n == "files" || strings.HasPrefix(n, "files_") || strings.HasPrefix(n, "sqlite_autoindex_files"):
+		return "文件信息"
+	}
+	return "其他"
+}
+
+// Stats 统计索引库空间。
+func (d *DB) Stats() (*SpaceStats, error) { return d.StatsContext(context.Background()) }
+
+// StatsContext 统计索引库空间；ctx 结束时中止（大索引库要读遍整个文件）。
+func (d *DB) StatsContext(ctx context.Context) (*SpaceStats, error) {
+	st := &SpaceStats{SpaceInfo: d.Space()}
+	rows, err := d.R.QueryContext(ctx, `SELECT name, sum(pgsize) FROM dbstat GROUP BY name`)
+	if err != nil {
+		return nil, err
+	}
+	parts := map[string]int64{}
+	for rows.Next() {
+		var n string
+		var b int64
+		if err := rows.Scan(&n, &b); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		parts[partName(n)] += b
+	}
+	rows.Close()
+	for _, n := range []string{"全文索引", "提取文本", "文件信息", "其他"} {
+		if parts[n] > 0 {
+			st.Parts = append(st.Parts, SpaceItem{Name: n, Bytes: parts[n]})
+		}
+	}
+	if st.FreeBytes > 0 {
+		st.Parts = append(st.Parts, SpaceItem{Name: "空闲（可回收）", Bytes: st.FreeBytes})
+	}
+	if fi, err := d.FTSInfo(); err == nil {
+		st.FTS = &fi
+	}
+	_ = d.R.QueryRowContext(ctx, `SELECT count(*), ifnull(sum((flags & 2)=0),0) FROM texts`).Scan(&st.Texts, &st.Legacy)
+	_ = d.R.QueryRowContext(ctx, `SELECT count(*), ifnull(sum(text_len),0) FROM files WHERE text_id>0`).Scan(&st.TextFiles, &st.RawChars)
+
+	// 各扩展名：共用的文本只算给其中一个文件
+	rows, err = d.R.QueryContext(ctx, `SELECT f.ext, count(*), sum(length(t.data)+ifnull(length(t.locs),0)) FROM texts t
+JOIN files f ON f.id=(SELECT min(id) FROM files WHERE text_id=t.id AND text_id>0) GROUP BY f.ext`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var it SpaceItem
+		if err := rows.Scan(&it.Name, &it.Count, &it.Bytes); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if it.Name == "" {
+			it.Name = "（无扩展名）"
+		}
+		st.ByExt = append(st.ByExt, it)
+	}
+	rows.Close()
+	sort.Slice(st.ByExt, func(i, j int) bool { return st.ByExt[i].Bytes > st.ByExt[j].Bytes })
+	if len(st.ByExt) > 20 {
+		st.ByExt = st.ByExt[:20]
+	}
+
+	rows, err = d.R.QueryContext(ctx, `SELECT t.id, length(t.data)+ifnull(length(t.locs),0) b FROM texts t ORDER BY b DESC LIMIT 20`)
+	if err != nil {
+		return nil, err
+	}
+	var big []BigText
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		var bt BigText
+		if err := rows.Scan(&id, &bt.Bytes); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		big = append(big, bt)
+		ids = append(ids, id)
+	}
+	rows.Close()
+	for i, id := range ids {
+		_ = d.R.QueryRowContext(ctx, `SELECT min(id), count(*), max(text_len) FROM files WHERE text_id=? AND text_id>0`, id).Scan(&big[i].FileID, &big[i].Sharers, &big[i].Chars)
+	}
+	st.Biggest = big
+	return st, ctx.Err()
+}
+
+// randomTextIDs 随机取最多 n 个文本编号（按编号范围随机探测，不用 ORDER BY random() 扫全表）。
+func (d *DB) randomTextIDs(n int) ([]int64, error) {
+	var maxID sql.NullInt64
+	if err := d.R.QueryRow(`SELECT max(id) FROM texts`).Scan(&maxID); err != nil || !maxID.Valid {
+		return nil, err
+	}
+	seen := map[int64]bool{}
+	var out []int64
+	for tries := 0; tries < n*3 && len(out) < n; tries++ {
+		var id int64
+		if err := d.R.QueryRow(`SELECT id FROM texts WHERE id>=? ORDER BY id LIMIT 1`, 1+rand.Int64N(maxID.Int64)).Scan(&id); err != nil {
+			continue
+		}
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+// RandomTexts 随机读最多 n 份文件里本来就有的文字（不是 OCR 认出的；内容相同的文件只读一份），每份最多
+// maxBytes 字节，交给 fn。按文件编号范围随机探测，不扫全表。OCR 引擎对比拿它当「这台电脑上真实用到的词」。
+func (d *DB) RandomTexts(ctx context.Context, n, maxBytes int, fn func(string)) error {
+	var maxID sql.NullInt64
+	if err := d.R.QueryRowContext(ctx, `SELECT max(id) FROM files`).Scan(&maxID); err != nil || !maxID.Valid {
+		return err
+	}
+	seen := map[int64]bool{}
+	for tries := 0; tries < n*3 && len(seen) < n && ctx.Err() == nil; tries++ {
+		var tid int64
+		if err := d.R.QueryRowContext(ctx, `SELECT text_id FROM files WHERE id>=? AND ocr=0 AND state=1 AND text_id>0 AND text_len>=200 ORDER BY id LIMIT 1`,
+			1+rand.Int64N(maxID.Int64)).Scan(&tid); err != nil || seen[tid] {
+			continue
+		}
+		seen[tid] = true
+		t, err := d.GetTextByID(tid)
+		if err != nil || t == nil {
+			continue
+		}
+		s := t.Text
+		if len(s) > maxBytes {
+			s = s[:maxBytes]
+		}
+		fn(s)
+	}
+	return ctx.Err()
+}
