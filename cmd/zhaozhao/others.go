@@ -48,8 +48,8 @@ func (o otherInstance) logLabel() string {
 // label 是对话框里显示的名字，如「v0.2.9（E:\找找0.2.9）」。
 func (o otherInstance) label() string { return fmt.Sprintf("%s（%s）", o.ver(), filepath.Dir(o.Exe)) }
 
-// probeInstance 读数据目录里的 instance.json，确认那个找找在运行，取它的版本号。
-func probeInstance(dataDir string) (otherInstance, bool) {
+// readInstance 读数据目录里的 instance.json：那个找找的进程号、界面端口和令牌（不管它是否还在运行）。
+func readInstance(dataDir string) (otherInstance, bool) {
 	b, err := os.ReadFile(filepath.Join(dataDir, "instance.json"))
 	if err != nil {
 		return otherInstance{}, false
@@ -58,39 +58,71 @@ func probeInstance(dataDir string) (otherInstance, bool) {
 	if json.Unmarshal(b, &in) != nil || in.Port == 0 {
 		return otherInstance{}, false
 	}
-	o := otherInstance{PID: in.PID, DataDir: dataDir, port: in.Port, token: in.Token}
-	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/api/ping", in.Port), nil)
-	for _, c := range server.AuthCookies(in.Port, in.Token) {
+	return otherInstance{PID: in.PID, DataDir: dataDir, port: in.Port, token: in.Token,
+		URL: fmt.Sprintf("http://127.0.0.1:%d/?t=%s", in.Port, in.Token)}, true
+}
+
+// pingInstance 问那个找找的版本号。它很忙时（刚开机、机械硬盘满负荷）可能好几秒才回答。
+func pingInstance(o otherInstance, timeout time.Duration) (string, error) {
+	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/api/ping", o.port), nil)
+	for _, c := range server.AuthCookies(o.port, o.token) {
 		req.AddCookie(c)
 	}
-	resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
 	if err != nil {
-		return o, false
+		return "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("返回 %s", resp.Status)
+	}
 	var p struct {
 		Version string `json:"version"`
 	}
-	if resp.StatusCode != 200 || json.NewDecoder(resp.Body).Decode(&p) != nil {
-		return o, false
+	if err := json.NewDecoder(resp.Body).Decode(&p); err != nil {
+		return "", err
 	}
-	o.Version = p.Version
-	o.URL = fmt.Sprintf("http://127.0.0.1:%d/?t=%s", in.Port, in.Token)
-	return o, true
+	return p.Version, nil
 }
 
-// quitInstance 请另一个找找退出，等它的进程结束（最多 20 秒）。
-func quitInstance(o otherInstance) bool {
+// instanceRunning 说明数据目录 dataDir 是否正被一个找找使用：instance.json 里的进程还在、是用这个数据目录的
+// 找找程序；查不了进程时（不是 Windows，或用命令行参数指定了数据目录）看连不连得上。
+func instanceRunning(dataDir string) bool {
+	o, ok := readInstance(dataDir)
+	if !ok {
+		return false
+	}
+	if exe := pidExe(o.PID); exe != "" && samePath(dataDirOfExe(exe), dataDir) {
+		return true
+	}
+	_, err := pingInstance(o, 2*time.Second)
+	return err == nil
+}
+
+// quitInstance 请另一个找找退出，等它的进程结束（最多 20 秒）。没退出时返回原因。
+func quitInstance(o otherInstance) (bool, string) {
 	req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/quit", o.port), strings.NewReader("{}"))
 	for _, c := range server.AuthCookies(o.port, o.token) {
 		req.AddCookie(c)
 	}
 	req.Header.Set("X-ZhaoZhao", "1")
 	req.Header.Set("Content-Type", "application/json")
-	if resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req); err == nil {
+	why := ""
+	if resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req); err != nil {
+		why = "请它退出时出错：" + err.Error()
+	} else {
 		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			why = "请它退出时返回 " + resp.Status
+		}
 	}
-	return waitProcessExit(o.PID, 20*time.Second)
+	if waitProcessExit(o.PID, 20*time.Second) {
+		return true, ""
+	}
+	if why == "" {
+		why = "它 20 秒内没有退出"
+	}
+	return false, why
 }
 
 // dataDirOfExe 返回某个找找程序用的数据目录（和 resolveDataDir 的规则相同，不看命令行参数和环境变量）。
@@ -154,25 +186,44 @@ func rememberDataDir(dataDir, exe string) {
 }
 
 // hasIndex 说明数据目录里有没有索引库。
-func hasIndex(dataDir string) bool {
+func hasIndex(dataDir string) bool { return indexSize(dataDir) > 0 }
+
+// indexSize 是数据目录里索引库的大小（含还没写回的部分），没有索引库时为 0。
+func indexSize(dataDir string) int64 {
 	st, err := os.Stat(filepath.Join(dataDir, "index.db"))
-	return err == nil && st.Size() > 0
+	if err != nil || st.Size() == 0 {
+		return 0
+	}
+	n := st.Size()
+	if w, err := os.Stat(filepath.Join(dataDir, "index.db-wal")); err == nil {
+		n += w.Size()
+	}
+	return n
 }
 
+// smallFactor：这里已有索引时，旧索引至少是它的这么多倍才问要不要换（这里的索引刚开始建、没什么内容）。
+const smallFactor = 10
+
+// declinedFile 记下用户在这个数据目录里选过「不换旧索引」，以后不再问。
+const declinedFile = "adopt-declined"
+
 // adoptCandidate 找一个可以搬过来接着用的旧数据目录：有索引库、和 dataDir 在同一个盘上（搬过来只是改名，
-// 一瞬间；不同盘要复制几个 GB，不做）、没有找找在用。prefer 不为空时优先用它（刚关掉的那个找找的）。
+// 一瞬间；不同盘要复制几个 GB，不做）、没有找找在用。dataDir 里已有索引时，只找比它大得多的（这里的是刚开始
+// 建的）。prefer 不为空时优先用它（刚关掉的那个找找的）。
 func adoptCandidate(dataDir string, prefer *knownDir) (knownDir, bool) {
+	cur := indexSize(dataDir)
 	var c []knownDir
 	if prefer != nil {
 		c = append(c, *prefer)
 	}
 	c = append(c, loadKnown()...)
 	for _, k := range c {
-		if samePath(k.DataDir, dataDir) || !hasIndex(k.DataDir) ||
+		n := indexSize(k.DataDir)
+		if samePath(k.DataDir, dataDir) || n == 0 || (cur > 0 && n < smallFactor*cur) ||
 			!strings.EqualFold(filepath.VolumeName(absPath(k.DataDir)), filepath.VolumeName(absPath(dataDir))) {
 			continue
 		}
-		if _, running := probeInstance(k.DataDir); running {
+		if instanceRunning(k.DataDir) {
 			continue
 		}
 		return k, true
@@ -187,25 +238,43 @@ func absPath(p string) string {
 	return p
 }
 
-// adoptDataDir 把旧数据目录 from 搬成 to（同一个盘上改名）。to 是刚建的空目录时先删掉。旧的找找刚退出时
-// 解析子进程可能还拿着文件，最多重试 10 秒。
+// asideName 是换下来的数据目录改成的名字，如「data-换下-20261109-1029」。
+func asideName(dir string, t time.Time) string {
+	return filepath.Clean(dir) + "-换下-" + t.Format("20060102-1504")
+}
+
+// adoptDataDir 把旧数据目录 from 搬成 to（同一个盘上改名）。to 里已有东西时：aside 为空就报错；不为空就先把
+// to 改名成 aside 留着（里面是刚开始建的小索引）。旧的找找刚退出时解析子进程可能还拿着文件，最多重试 10 秒。
 //
 // 安装版的数据目录（%LOCALAPPDATA%\ZhaoZhao）里放着用过的数据目录列表（known-data.json），搬之前先拿出来，
 // 搬完放回去。
-func adoptDataDir(from, to string) error {
+func adoptDataDir(from, to, aside string) error {
 	var known []byte
 	if ents, err := os.ReadDir(to); err == nil {
+		kn := filepath.Base(knownPath())
+		empty := true
 		for _, e := range ents {
-			if e.Name() != filepath.Base(knownPath()) {
-				return fmt.Errorf("%s 不是空的", to)
+			if e.Name() != kn {
+				empty = false
 			}
 		}
-		kp := filepath.Join(to, filepath.Base(knownPath()))
+		if !empty && aside == "" {
+			return fmt.Errorf("%s 不是空的", to)
+		}
+		kp := filepath.Join(to, kn)
 		if b, err := os.ReadFile(kp); err == nil {
 			known = b
 			_ = os.Remove(kp)
 		}
-		if err := os.Remove(to); err != nil {
+		if empty {
+			err = os.Remove(to)
+		} else {
+			err = retryRename(to, aside)
+		}
+		if err != nil {
+			if known != nil {
+				_ = os.WriteFile(kp, known, 0o600)
+			}
 			return err
 		}
 	}
@@ -214,6 +283,18 @@ func adoptDataDir(from, to string) error {
 			_ = os.WriteFile(filepath.Join(to, filepath.Base(knownPath())), known, 0o600)
 		}
 	}()
+	err := retryRename(from, to)
+	if err != nil {
+		if aside != "" && retryRename(aside, to) == nil { // 换回来，接着用这里的索引
+			return err
+		}
+		_ = os.MkdirAll(to, 0o700)
+	}
+	return err
+}
+
+// retryRename 改名，失败时（文件还被刚退出的程序拿着）最多重试 10 秒。
+func retryRename(from, to string) error {
 	var err error
 	for i := 0; i < 50; i++ {
 		if err = os.Rename(from, to); err == nil {
@@ -221,9 +302,19 @@ func adoptDataDir(from, to string) error {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	_ = os.MkdirAll(to, 0o700)
 	return err
 }
+
+// askWait 是启动时等用户在对话框里选择的总时长（启动用时里不算这段）。
+var askWait time.Duration
+
+func ask(title, main, content string, buttons []string) int {
+	t := time.Now()
+	defer func() { askWait += time.Since(t) }()
+	return askFunc(title, main, content, buttons)
+}
+
+var askFunc = askChoice // 测试时换掉
 
 // checkOthers 在启动时处理本机上别的找找和旧数据目录。返回 false 表示这个找找不用再启动了（切换到了正在运行的）。
 // 只在打开界面的启动方式下问（开机自启 --no-ui 时不弹窗，照常启动）。
@@ -235,15 +326,15 @@ func checkOthers(dataDir string) bool {
 	}
 	for _, o := range others {
 		me := "v" + strings.TrimPrefix(version, "v")
-		switch askChoice("找找", fmt.Sprintf("已有一个找找在运行：%s", o.label()),
+		switch ask("找找", fmt.Sprintf("已有一个找找在运行：%s", o.label()),
 			"两个找找同时运行会同时建索引、抢 CPU 和硬盘，托盘里有两个一样的图标，全局快捷键只有先启动的那个能用。",
 			[]string{fmt.Sprintf("关掉它，运行这个（%s）\n这个找找用自己文件夹里的索引", me),
 				fmt.Sprintf("切换到正在运行的 %s\n不启动这个", o.ver()),
 				"两个都运行\n比较不同版本时用"}) {
 		case 0:
 			startNotes = append(startNotes, "关掉了另一个找找 "+o.logLabel())
-			if !quitInstance(o) {
-				startNotes = append(startNotes, "它 20 秒内没有退出")
+			if ok, why := quitInstance(o); !ok {
+				startNotes = append(startNotes, why)
 			}
 			closed = &knownDir{DataDir: o.DataDir, Exe: o.Exe, Version: o.Version}
 		case 2:
@@ -253,7 +344,7 @@ func checkOthers(dataDir string) bool {
 			return false
 		}
 	}
-	if hasIndex(dataDir) {
+	if _, err := os.Stat(filepath.Join(dataDir, declinedFile)); err == nil {
 		return true
 	}
 	k, ok := adoptCandidate(dataDir, closed)
@@ -264,18 +355,58 @@ func checkOthers(dataDir string) bool {
 	if k.Version != "" {
 		what = fmt.Sprintf("v%s 用过的索引", strings.TrimPrefix(k.Version, "v"))
 	}
-	if askChoice("找找", "这里还没有索引，要接着用"+what+"吗？",
-		fmt.Sprintf("旧索引在 %s。搬过来不用重新建索引（扫描件要重新识别几个小时）；搬走后，旧文件夹里的找找下次运行时会从头建索引。", k.DataDir),
-		[]string{"搬过来接着用\n同一个盘上改个名，一瞬间就好", "重新建索引\n比较不同版本的建索引速度时选这个"}) != 0 {
+	when := "刚关掉"
+	if !k.Used.IsZero() {
+		when = "最后使用 " + k.Used.Format("2006-01-02 15:04")
+	}
+	cur, old := indexSize(dataDir), indexSize(k.DataDir)
+	aside := ""
+	var main, content string
+	var buttons []string
+	if cur == 0 {
+		main = "这里还没有索引，要接着用" + what + "吗？"
+		content = fmt.Sprintf("旧索引 %s，在 %s（%s）。搬过来不用重新建索引（扫描件要重新识别几个小时）；搬走后，旧文件夹里的找找下次运行时会从头建索引。",
+			sizeText(old), k.DataDir, when)
+		buttons = []string{"搬过来接着用\n同一个盘上改个名，一瞬间就好", "重新建索引\n比较不同版本的建索引速度时选这个，以后不再问"}
+	} else {
+		aside = asideName(dataDir, time.Now())
+		main = "这里的索引才建了一点，要换成" + what + "吗？"
+		content = fmt.Sprintf("这里的索引 %s；旧索引 %s，在 %s（%s）。换过来不用重新建索引（扫描件要重新识别几个小时）；这里的索引改名为 %s 留着，不要了可以删掉。搬走后，旧文件夹里的找找下次运行时会从头建索引。",
+			sizeText(cur), sizeText(old), k.DataDir, when, filepath.Base(aside))
+		buttons = []string{"换成旧索引\n同一个盘上改个名，一瞬间就好", "继续用这里的索引\n以后不再问"}
+	}
+	switch ask("找找", main, content, buttons) {
+	case 0:
+	case 1:
+		_ = os.WriteFile(filepath.Join(dataDir, declinedFile), []byte(k.DataDir), 0o600)
+		startNotes = append(startNotes, "没有搬来旧索引 "+logx.P(k.DataDir)+"（用户选了不搬，以后不再问）")
+		return true
+	default:
 		return true
 	}
-	if err := adoptDataDir(k.DataDir, dataDir); err != nil {
-		showMessage("找找", "没能搬过来："+err.Error()+"\n\n将重新建索引。")
+	if err := adoptDataDir(k.DataDir, dataDir, aside); err != nil {
+		showMessage("找找", "没能搬过来："+err.Error()+"\n\n将继续用这里的索引。")
 		startNotes = append(startNotes, "没能搬来旧索引 "+logx.P(k.DataDir)+"："+err.Error())
 		return true
 	}
-	startNotes = append(startNotes, "搬来了旧索引 "+logx.P(k.DataDir))
+	_ = os.Remove(filepath.Join(dataDir, declinedFile)) // 旧目录里以前记下的不算
+	startNotes = append(startNotes, fmt.Sprintf("搬来了旧索引 %s（%s）", logx.P(k.DataDir), sizeText(old)))
+	if aside != "" {
+		startNotes = append(startNotes, fmt.Sprintf("原来的索引（%s）改名为 %s", sizeText(cur), logx.P(aside)))
+	}
 	return true
+}
+
+// sizeText 把字节数写成「850 MB」这样。
+func sizeText(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.0f MB", float64(n)/(1<<20))
+	default:
+		return fmt.Sprintf("%.0f KB", float64(n)/(1<<10))
+	}
 }
 
 // startNotes 是启动前处理别的找找、旧索引的经过（日志还没打开，打开后写进去）。

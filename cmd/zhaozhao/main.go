@@ -30,7 +30,7 @@ import (
 	"github.com/chenonestar/zhaozhao/internal/worker"
 )
 
-var version = "0.2.14"
+var version = "0.2.15"
 
 // built 是打包日期（打包时用 -ldflags "-X main.built=2026-10-30" 写入）。
 var built = ""
@@ -84,13 +84,19 @@ func main() {
 	if !*noUI && !checkOthers(dataDir) {
 		return
 	}
+	// 启动用时里不算等用户在对话框里选择的时间
+	procStarted = procStarted.Add(askWait)
 	lg, err := logx.Setup(dataDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "无法打开日志文件:", err)
 	}
 	suppressErrorDialogs()
 	start := time.Now()
-	log.Printf("找找启动：%s；从启动进程到这里 %.1f 秒", environment(dataDir), start.Sub(procStarted).Seconds())
+	waited := ""
+	if askWait > 0 {
+		waited = fmt.Sprintf("（不算等用户选择的 %.1f 秒）", askWait.Seconds())
+	}
+	log.Printf("找找启动：%s；从启动进程到这里 %.1f 秒%s", environment(dataDir), start.Sub(procStarted).Seconds(), waited)
 	for _, n := range startNotes {
 		log.Printf("启动：%s", n)
 	}

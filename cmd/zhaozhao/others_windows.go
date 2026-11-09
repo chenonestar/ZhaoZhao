@@ -17,9 +17,12 @@ import (
 )
 
 // runningOthers 找出本机上正在运行、用别的数据目录的找找：进程名和本程序相同的进程，按程序位置推出数据目录，
-// 读那里的 instance.json，里面记的进程号是这个进程、连得上，就是在运行的找找主程序（解析子进程和主程序同名、
+// 读那里的 instance.json，里面记的进程号是这些进程之一，就是在运行的找找主程序（解析子进程和主程序同名、
 // 同一个数据目录，但进程号对不上）。0.2.10 及以前的版本也能这样找到。不按父进程区分主程序和子进程：从别的
 // 找找（或名字相同的程序）里启动的主程序会被当成子进程漏掉。
+//
+// 进程号对上就算在运行，不要求连得上：刚开机时机械硬盘很忙，对方可能好几秒才回答（0.2.14 等 2 秒没回答就
+// 当成没在运行，没有提示）。版本号先问它，问不到就读它的程序文件里的版本信息。
 func runningOthers(dataDir string) []otherInstance {
 	self, _ := os.Executable()
 	names := map[string]bool{strings.ToLower(filepath.Base(self)): true, "zhaozhao.exe": true}
@@ -56,16 +59,59 @@ func runningOthers(dataDir string) []otherInstance {
 		if d := dataDirOfExe(exes[key]); d != "" {
 			dd = d
 		}
-		o, ok := probeInstance(dd)
-		if ok && slices.Contains(ps, uint32(o.PID)) {
-			o.Exe = processExe(uint32(o.PID))
-			out = append(out, o)
+		o, ok := readInstance(dd)
+		if !ok || !slices.Contains(ps, uint32(o.PID)) {
+			startNotes = append(startNotes, fmt.Sprintf("找别的找找：%s 有 %d 个同名进程，但都不是 instance.json 里记的主程序（进程 %d）",
+				logx.P(dd), len(ps), o.PID))
 			continue
 		}
-		startNotes = append(startNotes, fmt.Sprintf("找别的找找：%s 有 %d 个同名进程，但没确认是在运行的找找（instance.json 里的进程 %d，连得上 %v）",
-			logx.P(dd), len(ps), o.PID, ok))
+		o.Exe = processExe(uint32(o.PID))
+		t := time.Now()
+		v, err := pingInstance(o, 5*time.Second)
+		if err == nil {
+			o.Version = v
+		} else {
+			o.Version = exeVersion(o.Exe)
+			startNotes = append(startNotes, fmt.Sprintf("找别的找找：%s 的进程 %d 在运行，但问它版本时没回答（%v，等了 %.1f 秒），版本号从程序文件里读：%s",
+				logx.P(dd), o.PID, err, time.Since(t).Seconds(), o.ver()))
+		}
+		out = append(out, o)
 	}
 	return out
+}
+
+// pidExe 返回进程 pid 的程序位置，没有这个进程时为空。
+func pidExe(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	return processExe(uint32(pid))
+}
+
+// exeVersion 读程序文件里的版本信息（0.2.11 起打包时写入），如「0.2.13」；没有时为空。
+func exeVersion(exe string) string {
+	n, err := windows.GetFileVersionInfoSize(exe, nil)
+	if err != nil || n == 0 {
+		return ""
+	}
+	buf := make([]byte, n)
+	if windows.GetFileVersionInfo(exe, 0, n, unsafe.Pointer(&buf[0])) != nil {
+		return ""
+	}
+	var fi *windows.VS_FIXEDFILEINFO
+	var l uint32
+	if windows.VerQueryValue(unsafe.Pointer(&buf[0]), `\`, unsafe.Pointer(&fi), &l) != nil || fi == nil ||
+		l < uint32(unsafe.Sizeof(*fi)) || fi.Signature != 0xFEEF04BD {
+		return ""
+	}
+	a, b, c, d := fi.FileVersionMS>>16, fi.FileVersionMS&0xFFFF, fi.FileVersionLS>>16, fi.FileVersionLS&0xFFFF
+	if a|b|c|d == 0 {
+		return "" // 开发时生成的资源（0.0.0）
+	}
+	if d != 0 {
+		return fmt.Sprintf("%d.%d.%d.%d", a, b, c, d)
+	}
+	return fmt.Sprintf("%d.%d.%d", a, b, c)
 }
 
 func processExe(pid uint32) string {

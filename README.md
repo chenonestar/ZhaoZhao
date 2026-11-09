@@ -96,7 +96,7 @@ iscc packaging\zhaozhao.iss
 | `.github/workflows/bundle.yml` | 手动、改动打包文件、被 release 调用 | **完整版**：choco 安装 LibreOffice，下载 RapidOCR-json（简体中文 V4 模型）和 PDFium，另放入 PP-OCRv6 small 认字模型及其 INT8 量化版（`packaging/tools/make_ocr_models.py`，用 Windows 上的组件检查各模型的速度和准确率，新模型不能用时打包失败；装上 Windows 的中文识别语言，用找找里的 Windows 自带 OCR 实现认同样的页面，准确率太低时打包失败），随包放入 VC++ 运行库，在真实 Windows 上冒烟测试（含组件自检、OCR 测速、退出后无残留进程）通过后，产出完整版 zip（约 340 MB）和离线安装包 |
 | `.github/workflows/release.yml` | 推送 `v*` 标签；或提交信息里带 `[release vX.Y.Z]` | 调用完整版构建，并发布完整版 zip、安装包、精简版 zip 到 GitHub Release |
 
-发布版本：`git tag v0.2.14 && git push origin v0.2.14`，或在推送的提交信息里写 `[release v0.2.14]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice、OCR 和 PDFium 组件**；精简版（主程序 + PDFium）需要按 `components\README.txt` 自行放入 LibreOffice 和 OCR。
+发布版本：`git tag v0.2.15 && git push origin v0.2.15`，或在推送的提交信息里写 `[release v0.2.15]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice、OCR 和 PDFium 组件**；精简版（主程序 + PDFium）需要按 `components\README.txt` 自行放入 LibreOffice 和 OCR。
 
 ### 组件
 
@@ -111,7 +111,7 @@ iscc packaging\zhaozhao.iss
 - **OCR**：把 [RapidOCR-json](https://github.com/hiroi-sora/RapidOCR-json) 放到 `components\ocr\`；
   或用 `ZHAOZHAO_OCR="命令 参数…"` 指定任何兼容**管道协议**的程序（见 `tools/ocr_bridge.py`，它用 `rapidocr-onnxruntime` 实现了同一协议，开发测试用）。
   没有 OCR 组件时，图片只索引文件名，扫描 PDF 只索引文字层并标记「需要 OCR」。
-- 数据目录：`%LOCALAPPDATA%\ZhaoZhao`（便携版为程序旁的 `data`；用过的数据目录记在 `%LOCALAPPDATA%\ZhaoZhao\known-data.json`，新文件夹里第一次运行时可以搬来旧索引），含 `index.db`、`config.json`、`roots.json`（索引根备份）、`zhaozhao.log`（异步写入，按 10 MB 滚动，旧日志压缩为 `.gz`，保留 5 个）、`crash.log`（程序崩溃报告）。
+- 数据目录：`%LOCALAPPDATA%\ZhaoZhao`（便携版为程序旁的 `data`；用过的数据目录记在 `%LOCALAPPDATA%\ZhaoZhao\known-data.json`，新文件夹里没有索引、或索引比旧的小得多时可以换成旧索引，原来的改名留着；选过不换记在 `adopt-declined`，以后不再问），含 `index.db`、`config.json`、`roots.json`（索引根备份）、`zhaozhao.log`（异步写入，按 10 MB 滚动，旧日志压缩为 `.gz`，保留 5 个）、`crash.log`（程序崩溃报告）。
   「设置 → 日志与诊断」可切换日志详细程度、导出诊断信息（可隐藏文件名和路径）。建索引期间日志里每 10 分钟汇总一次
   各阶段用时（读文件和查重、提取、等写入、写入速度、OCR 页数），诊断信息注明各个盘是固态还是机械硬盘。
 

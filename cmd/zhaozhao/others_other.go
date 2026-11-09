@@ -11,6 +11,10 @@ import (
 
 func runningOthers(dataDir string) []otherInstance { return nil }
 
+func pidExe(pid int) string { return "" }
+
+func exeVersion(exe string) string { return "" }
+
 func waitProcessExit(pid int, timeout time.Duration) bool { return true }
 
 func processStart() time.Time { return time.Now() }
