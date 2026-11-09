@@ -90,6 +90,7 @@ func TestAdoptOverSmallIndex(t *testing.T) {
 	answer := 1
 	askFunc = func(title, main, content string, buttons []string) int {
 		asked = append(asked, main+"｜"+content)
+		time.Sleep(20 * time.Millisecond) // 用户想一会儿（Windows 上计时精度不够，瞬间返回会算成 0）
 		return answer
 	}
 	t.Cleanup(func() { askFunc = askChoice })
