@@ -141,7 +141,7 @@ func TestRenderAhead(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.close()
-	ahead, stop := renderAhead(d, []int{1, 2, 3}, tmp)
+	ahead, stop := renderAhead(d, []int{1, 2, 3}, tmp, nil)
 	r := <-ahead
 	if r.err != nil || r.path == "" || !strings.HasSuffix(r.path, ".bmp") {
 		t.Fatalf("第 1 页：%+v", r)

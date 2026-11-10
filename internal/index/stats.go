@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/chenonestar/zhaozhao/internal/awake"
+	"github.com/chenonestar/zhaozhao/internal/store"
 	"github.com/chenonestar/zhaozhao/internal/sysinfo"
 	"github.com/chenonestar/zhaozhao/internal/worker"
 )
@@ -30,6 +31,8 @@ type stageCounts struct {
 	chars                  int64         // 写入的文字（字数）
 	queued                 time.Duration // 交给写入协程后等到开始写的时间之和
 	writeBusy, bulkBusy    time.Duration // 写入协程在事务里的时间、其中批量写入的
+	inTx                   time.Duration // 其中在事务里写各个文件的时间（其余是开始、提交事务）
+	split                  store.WriteSplit
 	paused                 time.Duration // 用户在用电脑时让出的时间之和（各处理线程相加）
 }
 
@@ -45,8 +48,16 @@ func (s *stageStats) addJob(read, extract, prepare time.Duration, reused bool) {
 	s.mu.Unlock()
 }
 
-// addBatch 记下写入的一批：事务用时、是否批量写入，以及每个文件交给写入协程后等了多久。
-func (s *stageStats) addBatch(batch []*prepared, start time.Time, dur time.Duration, bulk bool) {
+// addBatch 记下写入的一批：事务用时（其中写各个文件的用时 inTx）、是否批量写入，以及每个文件交给写入协程后等了多久。
+// 写入各步的用时从 store.Times 取出；内容和已索引的文件相同、提取前就查到的（复用、移动改名）也算进「相同」。
+func (s *stageStats) addBatch(batch []*prepared, start time.Time, dur, inTx time.Duration, bulk bool) {
+	split := store.Times.Take()
+	for _, p := range batch {
+		if (p.reuse != 0 || p.recycled != nil) && p.text != nil {
+			split.DupFiles++
+			split.DupChars += int64(utf8.RuneCountInString(p.text.Text))
+		}
+	}
 	var chars int64
 	var queued time.Duration
 	for _, p := range batch {
@@ -67,6 +78,8 @@ func (s *stageStats) addBatch(batch []*prepared, start time.Time, dur time.Durat
 	s.c.chars += chars
 	s.c.queued += queued
 	s.c.writeBusy += dur
+	s.c.inTx += inTx
+	s.c.split.Add(split)
 	if bulk {
 		s.c.bulkBusy += dur
 	}
@@ -105,6 +118,19 @@ func (s *stageStats) take(now time.Duration, pages int64) string {
 			w += fmt.Sprintf("，每秒写入 %s字", wanZi(int64(float64(old.chars)/old.writeBusy.Seconds())))
 		}
 		w += "，平均等写入 " + secs(old.queued/time.Duration(old.written))
+		if sp := old.split; old.writeBusy > 0 && old.inTx > 0 {
+			pct := func(d time.Duration) float64 { return 100 * d.Seconds() / old.writeBusy.Seconds() }
+			other := old.inTx - sp.FTS - sp.Text - sp.Files - sp.Dup - sp.Check
+			w += fmt.Sprintf("（写入线程的时间：全文索引 %.0f%%、文本 %.0f%%、文件信息 %.0f%%、查重 %.0f%%、确认没被修改 %.0f%%、其他 %.0f%%、提交事务 %.0f%%）",
+				pct(sp.FTS), pct(sp.Text), pct(sp.Files), pct(sp.Dup), pct(sp.Check), pct(max(0, other)), pct(max(0, old.writeBusy-old.inTx)))
+			if old.written > 0 {
+				w += fmt.Sprintf("，平均每个文件 %.1f 毫秒", 1000*old.writeBusy.Seconds()/float64(old.written))
+			}
+		}
+		if sp := old.split; sp.DupFiles > 0 && old.chars > 0 {
+			w += fmt.Sprintf("；其中 %d 个文件和别的文件内容相同（共用文本、全文索引另写一份），%s字，占写入字数的 %.0f%%",
+				sp.DupFiles, wanZi(sp.DupChars), 100*float64(sp.DupChars)/float64(old.chars))
+		}
 		parts = append(parts, w)
 	}
 	if ocr > 0 {
@@ -138,6 +164,7 @@ func (m *Manager) statsLoop() {
 	m.stats.since, m.stats.pages = awake.Now(), m.ocr.pages.Load()
 	m.stats.mu.Unlock()
 	cpu := sysinfo.NewCPUMonitor(worker.ChildrenCPU)
+	kern := kernelShare()
 	t := time.NewTicker(statsEvery)
 	defer t.Stop()
 	for {
@@ -150,6 +177,9 @@ func (m *Manager) statsLoop() {
 		if s := m.stats.take(awake.Now(), m.ocr.pages.Load()); s != "" {
 			if cs := c.String(); cs != "" {
 				s += "；" + cs
+			}
+			if k, ok := kern(); ok {
+				s += fmt.Sprintf("；子进程用的 CPU 时间里系统内核占 %.0f%%", k)
 			}
 			m.logf("%s", s)
 			m.checkCPUSlow(c)
@@ -172,4 +202,20 @@ func (m *Manager) checkCPUSlow(c sysinfo.CPUStat) {
 	msg += "可以在「控制面板 → 电源选项」改用「平衡」或「高性能」，或检查电脑散热（风扇、灰尘）。"
 	m.logf("%s", msg)
 	m.noticeOnce("cpu-slow", Notice{Kind: "info", Message: msg})
+}
+
+// kernelShare 返回一个函数：每次调用返回上次调用以来子进程用的 CPU 时间里，系统内核占百分之几（线程切换、
+// 等锁、内存分页多时高；正常的 OCR 应该很低）。取不到或这段时间子进程没用 CPU 时 ok 为 false。
+func kernelShare() func() (float64, bool) {
+	t0, k0, ok0 := worker.ChildrenKernel()
+	return func() (float64, bool) {
+		t1, k1, ok1 := worker.ChildrenKernel()
+		ok := ok0 && ok1 && t1 > t0
+		share := 0.0
+		if ok {
+			share = 100 * float64(k1-k0) / float64(t1-t0)
+		}
+		t0, k0, ok0 = t1, k1, ok1
+		return share, ok
+	}
 }

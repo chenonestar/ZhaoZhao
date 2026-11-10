@@ -129,11 +129,12 @@ func (d *DB) decode(flags int, b []byte) ([]byte, error) {
 
 // PutResult 记录提取结果。t 为 nil 表示无文本（失败、加密等）。
 func (d *DB) PutResult(tx *sql.Tx, id int64, state int, errMsg string, hash string, ocr bool, t *Text, ftsText, nameFTS string) error {
-	if _, err := tx.Exec(`DELETE FROM fts WHERE rowid=?`, id); err != nil {
+	if err := putFTS(tx, id, ftsText, nameFTS); err != nil {
 		return err
 	}
 	n, textID := 0, int64(0)
 	if t != nil {
+		t0 := time.Now()
 		n = len([]rune(t.Text))
 		d.Encode(t)
 		res, err := tx.Exec(`INSERT INTO texts(flags,data,locs) VALUES(?,?,?)`, t.enc.flags, t.enc.data, t.enc.locs)
@@ -141,13 +142,22 @@ func (d *DB) PutResult(tx *sql.Tx, id int64, state int, errMsg string, hash stri
 			return err
 		}
 		textID, _ = res.LastInsertId()
-	}
-	if _, err := tx.Exec(`INSERT INTO fts(rowid,c,n) VALUES(?,?,?)`, id, ftsText, nameFTS); err != nil {
-		return err
+		since(&Times.Text, t0)
 	}
 	// 换掉 text_id 后，旧文本如果没有别的文件引用，由触发器删除
+	defer since(&Times.Files, time.Now())
 	_, err := tx.Exec(`UPDATE files SET state=?, err=?, hash=CASE WHEN ?<>'' THEN ? ELSE hash END, text_len=?, ocr=?, indexed_at=?, text_id=? WHERE id=?`,
 		state, errMsg, hash, hash, n, b2i(ocr), time.Now().Unix(), textID, id)
+	return err
+}
+
+// putFTS 换掉文件 id 的全文索引条目。
+func putFTS(tx *sql.Tx, id int64, ftsText, nameFTS string) error {
+	defer since(&Times.FTS, time.Now())
+	if _, err := tx.Exec(`DELETE FROM fts WHERE rowid=?`, id); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`INSERT INTO fts(rowid,c,n) VALUES(?,?,?)`, id, ftsText, nameFTS)
 	return err
 }
 
@@ -190,12 +200,10 @@ func CopyResult(tx *sql.Tx, src, dst int64, ftsText, nameFTS string) error {
 	if err := tx.QueryRow(`SELECT text_id FROM files WHERE id=?`, src).Scan(&textID); err != nil || textID == 0 {
 		return fmt.Errorf("源文件没有提取文本")
 	}
-	if _, err := tx.Exec(`DELETE FROM fts WHERE rowid=?`, dst); err != nil {
+	if err := putFTS(tx, dst, ftsText, nameFTS); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO fts(rowid,c,n) VALUES(?,?,?)`, dst, ftsText, nameFTS); err != nil {
-		return err
-	}
+	defer since(&Times.Files, time.Now())
 	_, err := tx.Exec(`UPDATE files SET state=1, err='', text_id=?2, text_len=(SELECT text_len FROM files WHERE id=?1), ocr=(SELECT ocr FROM files WHERE id=?1),
 ocr_model=(SELECT ocr_model FROM files WHERE id=?1), indexed_at=?3 WHERE id=?4`,
 		src, textID, time.Now().Unix(), dst)
@@ -232,10 +240,7 @@ func AttachText(tx *sql.Tx, dst int64, r *Recycled, hash, ftsText, nameFTS strin
 	if err := tx.QueryRow(`SELECT 1 FROM texts WHERE id=?`, r.TextID).Scan(&one); err != nil {
 		return fmt.Errorf("回收区的文本已不存在")
 	}
-	if _, err := tx.Exec(`DELETE FROM fts WHERE rowid=?`, dst); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`INSERT INTO fts(rowid,c,n) VALUES(?,?,?)`, dst, ftsText, nameFTS); err != nil {
+	if err := putFTS(tx, dst, ftsText, nameFTS); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE files SET state=1, err='', hash=?, text_id=?, text_len=?, ocr=?, indexed_at=? WHERE id=?`,
@@ -267,6 +272,7 @@ func (d *DB) FindDuplicate(hash string, size int64, exclude int64) (int64, error
 
 // FindDuplicateTx 同 FindDuplicate，在事务里查（看得到同一批里刚写入的文件）。
 func FindDuplicateTx(tx *sql.Tx, hash string, size int64, exclude int64) (int64, error) {
+	defer since(&Times.Dup, time.Now())
 	return findDuplicate(tx.QueryRow(sqlFindDuplicate, hash, size, exclude))
 }
 

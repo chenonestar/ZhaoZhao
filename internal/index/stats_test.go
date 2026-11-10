@@ -19,11 +19,16 @@ func TestStageStats(t *testing.T) {
 	start := time.Now()
 	p := &prepared{text: &store.Text{Text: "一二三"}, sent: start.Add(-2 * time.Second),
 		children: []*preparedChild{{text: &store.Text{Text: "四五"}}}}
-	s.addBatch([]*prepared{p}, start, 30*time.Second, true)
+	store.Times.Take()
+	store.Times.FTS.Add(int64(15 * time.Second))
+	store.Times.Text.Add(int64(3 * time.Second))
+	p2 := &prepared{reuse: 7, text: &store.Text{Text: "六七八九十"}}
+	s.addBatch([]*prepared{p, p2}, start, 30*time.Second, 24*time.Second, true)
 	s.addPause(300 * time.Millisecond)
 	got := s.take(11*time.Minute, 600) // 这段从第 1 分钟开始
 	for _, want := range []string{"最近 10 分钟", "普通文件 2 个（复用已有结果 1 个）", "读取与查重 0.20 秒", "提取 0.10 秒",
-		"准备写入 0.01 秒", "写入 1 个文件、5 字", "写入线程忙 5%（其中批量写入 5%）", "平均等写入 2.00 秒",
+		"准备写入 0.01 秒", "写入 2 个文件、10 字",
+		"全文索引 50%、文本 10%", "其他 20%、提交事务 20%", "平均每个文件 15000.0 毫秒", "其中 1 个文件和别的文件内容相同", "5 字，占写入字数的 50%", "写入线程忙 5%（其中批量写入 5%）", "平均等写入 1.00 秒",
 		"OCR 600 页（每分钟 60 页）", "用电脑时让出 0.30 秒"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("缺少「%s」：%s", want, got)

@@ -22,6 +22,11 @@ const KIND: Record<string, string> = { local: "本地盘", removable: "移动硬
 let settingsDirty = false;
 const leaveSettings = () => !settingsDirty || confirm("设置有修改还没保存（排除规则、文件等部分要点页面底部的「保存设置」）。不保存就离开？");
 
+// ocrModeName 是 OCR 组件运行方式的说明（和 internal/index/ocrbench.go 的 ocrModeName 一致）。
+function ocrModeName(mode: string): string {
+  return mode === "tame" ? "限制辅助线程" : mode === "pin" ? "限制辅助线程并固定逻辑处理器" : "照常";
+}
+
 export function Manage({ status, tab, setTab: setTab0, onClose: onClose0, refresh, onQuit }: Props) {
   const setTab = (t: Tab) => { if (t === tab || tab !== "settings" || leaveSettings()) setTab0(t); };
   const onClose = () => { if (tab !== "settings" || leaveSettings()) onClose0(); };
@@ -791,6 +796,22 @@ function OCRSpeed() {
         {` 认字模型：${modelName(st.model)}。`}
       </div>
       {st.smtNote && <div className="dim small">超线程：{st.smtNote}。</div>}
+      {b?.fewer && <div className="dim small">少开几个进程和最快的搭配差不到 3%：选进程少的，占内存少，给普通文件留出 CPU。</div>}
+      {(b?.modes?.length ?? 0) > 1 && b && (
+        <table className="grid">
+          <thead><tr><th title="OCR 组件的运行方式：先比较这几种，再用选中的方式比较搭配">运行方式（{b.modes![0].procs} 个进程 × {b.modes![0].threads} 线程）</th><th>每分钟页数</th>
+            {b.modes!.some((x) => x.kernel) && <th title="识别进程用的 CPU 时间里花在系统内核的比例（线程切换、等锁、内存分页多时高）">系统内核占</th>}</tr></thead>
+          <tbody>
+            {b.modes!.map((x) => (
+              <tr key={x.mode}>
+                <td>{ocrModeName(x.mode)}{x.mode === (b.mode ?? "") ? "（选用）" : ""}</td>
+                <td className="num">{x.err ? `失败：${x.err}` : x.perMin.toFixed(1)}{!x.err && (x.runs?.length ?? 0) > 1 && <span className="dim small">（各轮 {x.runs!.map((v) => v.toFixed(1)).join(" / ")}）</span>}</td>
+                {b.modes!.some((y) => y.kernel) && <td className="num">{x.kernel ? `${x.kernel.toFixed(0)}%` : "—"}</td>}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
       {st.planNote && <div className="dim small">{st.planNote}。</div>}
       {plans.length > 1 && b && (
         <table className="grid">
@@ -798,7 +819,7 @@ function OCRSpeed() {
           <tbody>
             {plans.map((p, i) => (
               <tr key={i}>
-                <td>{p.procs} 个进程 × {p.threads} 线程{p.procs * p.threads > b.budget ? "（用上超线程）" : ""}{i === b.best ? "（选用）" : ""}</td>
+                <td>{p.procs} 个进程 × {p.threads} 线程{p.procs * p.threads > b.budget ? "（用上超线程）" : ""}{p.probe ? "（加测）" : ""}{i === b.best ? "（选用）" : ""}</td>
                 <td className="num">{p.err ? `失败：${p.err}` : p.perMin.toFixed(1)}{!p.err && (p.runs?.length ?? 0) > 1 && <span className="dim small">（各轮 {p.runs!.map((x) => x.toFixed(1)).join(" / ")}）</span>}</td>
                 <td className="num">{p.slotMem > 0 ? `${Math.round(p.slotMem / 1048576)} MB` : "—"}</td>
                 {plans.some((x) => x.cpu) && <td className="num">{p.cpu ? `${p.cpu.toFixed(1)} 个逻辑处理器` : "—"}</td>}

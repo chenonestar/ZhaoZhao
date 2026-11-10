@@ -57,6 +57,19 @@ type OCRConfig struct {
 	// SmallBigPages 为真时，大幅面的 PDF 页（比 A4 大）也和平常一样缩小了找文字（0.2.12 及以前的做法，OCR 引擎
 	// 对比用）；默认大幅面页用大图找字，见 bigOCR。
 	SmallBigPages bool `json:"smallBigPages,omitempty"`
+	// Tame 为真时限制 OCR 组件里的辅助线程：设成 1 线程的 RapidOCR 实际占约 2 个逻辑处理器（图像处理库、
+	// 并行库另开的线程，空闲时还会空转等活），多个进程同时识别时可能互相抢 CPU。本机测速比较开不开它，快才开。
+	Tame bool `json:"tame,omitempty"`
+	// Pin 为真时把每个 OCR 组件固定在自己的几个逻辑处理器上（同样由本机测速决定）。
+	Pin bool `json:"pin,omitempty"`
+}
+
+// tameEnv 返回限制辅助线程的环境变量：OpenMP（推理库可能用它）只开 threads 个线程、空闲时让出 CPU 不空转，
+// OpenCV 的并行计算只用 1 个线程（每页的图像处理很小，多个进程本来就在并行）。
+func tameEnv(threads int) []string {
+	t := strconv.Itoa(max(1, threads))
+	return []string{"OMP_NUM_THREADS=" + t, "OMP_WAIT_POLICY=PASSIVE", "KMP_BLOCKTIME=0", "MKL_NUM_THREADS=" + t,
+		"OPENBLAS_NUM_THREADS=" + t, "OPENCV_FOR_THREADS_NUM=1"}
 }
 
 // args 返回启动 OCR 进程的参数。
@@ -180,7 +193,7 @@ func OCRPeakMem() uint64 {
 }
 
 func (c OCRConfig) key() string {
-	return c.Engine + "\x00" + c.Command + "\x00" + strings.Join(c.args(), "\x00")
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%v%v", c.Engine, c.Command, strings.Join(c.args(), "\x00"), c.Tame, c.Pin)
 }
 
 func startOCR(c OCRConfig) (*ocrProc, error) {
@@ -191,6 +204,9 @@ func startOCR(c OCRConfig) (*ocrProc, error) {
 	}
 	errBuf := &tailBuffer{max: 2048}
 	cmd.Stderr = errBuf
+	if c.Tame {
+		cmd.Env = append(os.Environ(), tameEnv(c.Threads)...)
+	}
 	setProcAttr(cmd)
 	cmd.Cancel = nil
 	in, err := cmd.StdinPipe()
@@ -206,6 +222,10 @@ func startOCR(c OCRConfig) (*ocrProc, error) {
 		return nil, err
 	}
 	p := &ocrProc{cmd: cmd, in: in, out: bufio.NewReaderSize(out, 1<<20), key: c.key()}
+	pinNote := ""
+	if c.Pin {
+		pinNote = pinProcess(cmd.Process.Pid, c.Threads)
+	}
 	// 等待初始化完成（加载模型，首次可能需要数秒）
 	ready := make(chan error, 1)
 	go func() {
@@ -249,6 +269,12 @@ func startOCR(c OCRConfig) (*ocrProc, error) {
 	threads := "默认线程数"
 	if c.Threads > 0 {
 		threads = fmt.Sprintf("%d 线程", c.Threads)
+	}
+	if c.Tame {
+		threads += "，限制辅助线程"
+	}
+	if pinNote != "" {
+		threads += "，" + pinNote
 	}
 	log.Printf("OCR 组件已启动（进程 %d，认字模型 %s，%s，加载模型用时 %.1fs）", cmd.Process.Pid,
 		OCRModelName(c.Model()), threads, time.Since(t0).Seconds())
@@ -900,41 +926,75 @@ func ocrPDFiumPages(d *pdfDoc, p string, pages []int, opt Options) (pdfOCRResult
 		logx.Debugf("PDF %s 第 %d 页%s，跳过", logx.P(p), pg, why)
 	}
 	logx.Debugf("PDF %s：共 %d 页，其中 %d 页没有文字层，渲染后 OCR", logx.P(p), d.pages(), len(pages))
-	ahead, stop := renderAhead(d, pages, tmp)
-	defer stop()
+	share := pageShare{opt.OCRShare}
+	var want func(int) bool
+	if share.on() {
+		share.writePages(pages)
+		want = func(pg int) bool { return share.claim(pg, true) }
+	}
 	big := newBigOCR(opt.OCR)
 	defer big.close()
-	for i, pg := range pages {
-		opt.Progress("第 %d/%d 页", i+1, len(pages))
-		r := <-ahead
-		if r.err != nil {
-			return res, r.err
+	own := map[int]bool{} // 自己认了的页
+	progress := func() { opt.Progress("第 %d/%d 页", min(len(own)+share.resultsIf()+1, len(pages)), len(pages)) }
+	// recognize 按顺序认 list 里 want 允许的页（want 为 nil 时全部认）
+	recognize := func(list []int, want func(int) bool) error {
+		ahead, stop := renderAhead(d, list, tmp, want)
+		defer stop()
+		for r := range ahead {
+			progress()
+			own[r.pg] = true
+			if r.err != nil {
+				return r.err
+			}
+			if r.skip != "" {
+				skip(r.pg, r.skip)
+				continue
+			}
+			if r.path == "" {
+				continue // 空白页
+			}
+			t1 := time.Now()
+			var text string
+			var err error
+			if big != nil && IsBigPage(r.size) {
+				text, err = big.recognize(r.path)
+			} else {
+				text, err = ocrImage(opt.OCR, r.path)
+			}
+			os.Remove(r.path)
+			if errors.Is(err, errOCRTimeout) {
+				skip(r.pg, "识别超时")
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			logx.Debugf("OCR %s 第 %d 页（%d/%d）渲染 %.1fs、识别 %.1fs，图片 %dx%d，识别出 %d 字，%s", logx.P(p), r.pg, len(own), len(pages),
+				r.dur.Seconds(), time.Since(t1).Seconds(), r.size.X, r.size.Y, len([]rune(text)), LastBoxes())
+			res.texts[r.pg] = text
 		}
-		if r.skip != "" {
-			skip(pg, r.skip)
-			continue
+		return nil
+	}
+	if err := recognize(pages, want); err != nil {
+		return res, err
+	}
+	if share.on() {
+		var pending []int
+		for _, pg := range pages {
+			if !own[pg] {
+				pending = append(pending, pg)
+			}
 		}
-		if r.path == "" {
-			continue // 空白页
+		if len(pending) > 0 {
+			left := collectShared(share, pending, res, progress)
+			logx.Debugf("PDF %s：%d 页由别的进程帮忙识别", logx.P(p), len(pending)-len(left))
+			if len(left) > 0 {
+				logx.Debugf("PDF %s：帮手没认完的 %d 页自己认", logx.P(p), len(left))
+				if err := recognize(left, nil); err != nil {
+					return res, err
+				}
+			}
 		}
-		t1 := time.Now()
-		var text string
-		if big != nil && IsBigPage(r.size) {
-			text, err = big.recognize(r.path)
-		} else {
-			text, err = ocrImage(opt.OCR, r.path)
-		}
-		os.Remove(r.path)
-		if errors.Is(err, errOCRTimeout) {
-			skip(pg, "识别超时")
-			continue
-		}
-		if err != nil {
-			return res, err
-		}
-		logx.Debugf("OCR %s 第 %d 页（%d/%d）渲染 %.1fs、识别 %.1fs，图片 %dx%d，识别出 %d 字，%s", logx.P(p), pg, i+1, len(pages),
-			r.dur.Seconds(), time.Since(t1).Seconds(), r.size.X, r.size.Y, len([]rune(text)), LastBoxes())
-		res.texts[pg] = text
 	}
 	if big != nil && big.pages > 0 {
 		logx.Debugf("PDF %s：%d 页是大幅面页，用大图找字", logx.P(p), big.pages)
@@ -947,6 +1007,7 @@ func ocrPDFiumPages(d *pdfDoc, p string, pages []int, opt Options) (pdfOCRResult
 
 // renderedPage 是渲染好、写成临时文件等着识别的一页。path 为空、skip 也为空表示空白页。
 type renderedPage struct {
+	pg   int // 页码
 	path string
 	size image.Point
 	dark int           // 深色像素数（大图再认时判断用）
@@ -955,21 +1016,26 @@ type renderedPage struct {
 	err  error         // 写临时文件失败：整份文件失败
 }
 
-// renderAhead 在另一个协程里按顺序渲染 pages，最多比识别提前一页（内存里、磁盘上最多多一页的图）。
+// renderAhead 在另一个协程里按顺序渲染 pages，最多比识别提前一页（内存里、磁盘上最多多一页的图）。want 不为
+// nil 时只渲染它允许的页（渲染前问，多个进程认同一个文件时用来占页）。渲染完全部的页后关闭通道。
 // stop 结束渲染并等协程退出：调用方返回后会释放 pdfiumMu、关闭文档，之后不能再碰 PDFium。
-func renderAhead(d *pdfDoc, pages []int, tmp string) (<-chan renderedPage, func()) {
+func renderAhead(d *pdfDoc, pages []int, tmp string, want func(int) bool) (<-chan renderedPage, func()) {
 	out := make(chan renderedPage, 1)
 	quit := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer close(out)
 		for _, pg := range pages {
 			select {
 			case <-quit:
 				return
 			default:
 			}
-			var r renderedPage
+			if want != nil && !want(pg) {
+				continue
+			}
+			r := renderedPage{pg: pg}
 			t0 := time.Now()
 			img, err := d.render(pg-1, 200, 3500)
 			switch {

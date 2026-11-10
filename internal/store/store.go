@@ -105,6 +105,12 @@ END;
 // busyTimeout：数据库被占用时等待多久。
 const busyTimeout = 10 * time.Second
 
+// 写连接、每个读连接的页缓存上限（KB）。
+const (
+	writeCacheKB = 64 << 10
+	readCacheKB  = 8 << 10
+)
+
 // WALLimit：WAL 文件的目标上限。检查点之后截短到这个大小以内；写入期间超过它就主动做检查点（CheckpointIfLarge）。
 const WALLimit = 64 << 20
 
@@ -117,7 +123,9 @@ func Open(dir string) (*DB, error) {
 	// journal_size_limit：WAL 文件在检查点之后截短到 64 MB 以内，不会一直占着几百 MB
 	dsn := "file:" + filepath.ToSlash(p) + fmt.Sprintf("?_pragma=journal_mode(WAL)&_pragma=busy_timeout(%d)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(0)&_pragma=journal_size_limit(%d)",
 		busyTimeout.Milliseconds(), WALLimit)
-	w, err := sql.Open("sqlite", dsn)
+	// 页缓存：SQLite 默认只有 2 MB。写连接给 64 MB（全文索引、文件表的上层页常驻内存，机械硬盘上少读盘），
+	// 读连接各 8 MB（最多 8 个，按需增长）
+	w, err := sql.Open("sqlite", dsn+fmt.Sprintf("&_pragma=cache_size(%d)", -writeCacheKB))
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +152,7 @@ func Open(dir string) (*DB, error) {
 		w.Close()
 		return nil, fmt.Errorf("初始化索引库失败: %w", err)
 	}
-	r, err := sql.Open("sqlite", dsn)
+	r, err := sql.Open("sqlite", dsn+fmt.Sprintf("&_pragma=cache_size(%d)", -readCacheKB))
 	if err != nil {
 		w.Close()
 		return nil, err

@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenonestar/zhaozhao/internal/doc"
 	"github.com/chenonestar/zhaozhao/internal/extract"
@@ -59,6 +60,7 @@ type job struct {
 	pagesDone, pagesTotal int         // OCR：已识别的页数、总页数（由进度消息得到，用于实测每分钟页数）
 	ctl                   *worker.Ctl // OCR 识别期间不为 nil：可以调整之后识别用的线程数（队列收尾时）
 	ocrThreads            int         // OCR：开始识别时每个进程的线程数
+	share                 *jobShare   // OCR 的 PDF：和帮手共享的目录（ocrhelp.go）
 }
 
 // lane 是一条处理通道。普通文件、老格式转换、OCR 各一条，各有自己的派发器和提取协程，三条同时进行：
@@ -618,6 +620,7 @@ func (m *Manager) extractOptions(cfg Config, withOCR bool) extract.Options {
 			o.OCR.MaxSide = extract.OCRBigSide // 小字多的扫描件：每页都用大图找字（量化版、旧模型也一样）
 		}
 		o.OCR.Threads = m.ocrPlanNow().threads // 每个 OCR 进程的线程数：总数不超过 CPU 核心数
+		o.OCR.Tame, o.OCR.Pin = m.ocrModeNow() // 本机测速选出的运行方式
 	}
 	o.MaxTextBytes = int64(cfg.MaxTextMB) << 20
 	o.SniffUnknown = cfg.SniffUnknown
@@ -795,8 +798,16 @@ func (m *Manager) runJob(j *job) {
 	if useOCR {
 		m.ocrTailOff()
 		ctl = &worker.Ctl{}
+		var share *jobShare
+		if f.Ext == "pdf" && opts.OCR.Engine == "" {
+			if share = newJobShare(src, opts); share != nil {
+				opts.OCRShare = share.dir
+				share.opts = opts
+				defer share.finish() // 主力认完：帮手停下、退出后才删共享目录和网络盘文件的本地副本
+			}
+		}
 		s.mu.Lock()
-		j.ctl, j.ocrThreads = ctl, opts.OCR.Threads
+		j.ctl, j.ocrThreads, j.share = ctl, opts.OCR.Threads, share
 		s.mu.Unlock()
 	}
 	read := time.Since(start) // 读取文件信息、（网络盘）复制、计算校验值、查重
@@ -805,7 +816,7 @@ func (m *Manager) runJob(j *job) {
 	extracted := time.Since(t1)
 	if useOCR {
 		s.mu.Lock()
-		j.ctl = nil
+		j.ctl, j.share = nil, nil
 		s.mu.Unlock()
 	}
 	if m.ctx.Err() != nil {
@@ -1078,7 +1089,9 @@ func (m *Manager) writer() {
 			}
 		}
 		t0 := time.Now()
+		var inTx time.Duration // 事务里写各个文件的用时（其余是开始、提交事务）
 		err := m.DB.Tx(func(tx *sql.Tx) error {
+			defer func(t time.Time) { inTx = time.Since(t) }(time.Now())
 			for _, p := range batch {
 				if err := m.writeOne(tx, p); err != nil {
 					return fmt.Errorf("%s: %w", p.file.Name, err)
@@ -1086,7 +1099,6 @@ func (m *Manager) writer() {
 			}
 			return nil
 		})
-		m.stats.addBatch(batch, t0, time.Since(t0), m.writeBulk.Load())
 		if err != nil {
 			m.logf("批量写入失败，改为逐个写入: %v", err)
 			for _, p := range batch {
@@ -1094,7 +1106,9 @@ func (m *Manager) writer() {
 					m.logf("写入 %s 失败: %v", logx.P(p.file.RelPath), err)
 				}
 			}
+			inTx = 0
 		}
+		m.stats.addBatch(batch, t0, time.Since(t0), inTx, m.writeBulk.Load())
 		released := false
 		s.mu.Lock()
 		for _, p := range batch {
@@ -1135,7 +1149,10 @@ func (m *Manager) writeOne(tx *sql.Tx, p *prepared) error {
 	f := p.file
 	// 文件在提取期间被删除或再次修改时丢弃本次结果，避免写入过期内容
 	var size, mtime int64
-	if err := tx.QueryRow(`SELECT size,mtime FROM files WHERE id=?`, f.ID).Scan(&size, &mtime); err != nil {
+	t0 := time.Now()
+	err := tx.QueryRow(`SELECT size,mtime FROM files WHERE id=?`, f.ID).Scan(&size, &mtime)
+	store.Times.Check.Add(int64(time.Since(t0)))
+	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil
 		}
@@ -1217,6 +1234,8 @@ func (m *Manager) putResult(tx *sql.Tx, id, size int64, hash string, state int, 
 			if err := store.CopyResult(tx, src, id, fts, nameFTS); err != nil {
 				return err
 			}
+			store.Times.DupFiles.Add(1)
+			store.Times.DupChars.Add(int64(utf8.RuneCountInString(t.Text)))
 			_, err := tx.Exec(`UPDATE files SET hash=? WHERE id=?`, hash, id)
 			return err
 		}

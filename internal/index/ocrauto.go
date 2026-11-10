@@ -86,6 +86,14 @@ func (m *Manager) ocrModelNow() string {
 	return model
 }
 
+// ocrModeNow 返回本机测速选出的 OCR 组件运行方式：是否限制辅助线程、是否固定逻辑处理器。
+func (m *Manager) ocrModeNow() (tame, pin bool) {
+	m.ocr.mu.Lock()
+	defer m.ocr.mu.Unlock()
+	b := m.ocrBenchLocked()
+	return b.tame(), b.pin()
+}
+
 // ocrMachine 返回本机的处理器、核心数、内存。
 func (m *Manager) ocrMachine() sysinfo.Machine {
 	m.ocr.mu.Lock()
@@ -151,6 +159,11 @@ func (m *Manager) autoPlanLocked(cores int, half bool, live int) (ocrPlan, int) 
 	total, avail := sysinfo.Memory()
 	m.ocr.memCap = m.memCapLocked(nextMemCap(m.ocr.memCap, ocrMemSlots(total, avail, slot, live)), awake.Now())
 	budget := ocrBudget(cores, half)
+	// 测速时少开几个进程也差不多快（瓶颈不在 CPU）：按测出的那种搭配开，不按每个线程的速度推算（推算以为进程
+	// 越多越快）
+	if bp, ok := b.best(); ok && b.Fewer && bp.Procs <= m.ocr.memCap && bp.Procs*bp.Threads <= budget {
+		return bp.plan(), budget
+	}
 	phys, smt := b.curves()
 	if !half && b.smtFaster() {
 		return smt.bestPlan(b.Logical, m.ocr.memCap), b.Logical
@@ -248,8 +261,10 @@ func (m *Manager) ocrTuneStep() {
 	m.fastFirstStep(cfg)
 }
 
-// ocrTail：OCR 队列已经空了、正在识别的文件比进程少时（多半是排在最后的大文件），把空出来的线程平分给
-// 它们，从下一页起生效；队列里又有文件时恢复。连续两次（约 1 分钟）都这样才调整，免得队列偶尔见底时来回切换。
+// ocrTail：OCR 队列已经空了、正在识别的文件比进程少时（多半是排在最后的大文件），先让空着的进程当帮手，
+// 从后往前一起认剩下页数多的 PDF（ocrhelp.go）；还有空着的，再把线程平分给正在识别的文件，从下一页起生效
+// （多开进程比一个进程多开线程快得多，所以先加帮手；固定了逻辑处理器时不加线程）。队列里又有文件时恢复。
+// 连续两次（约 1 分钟）都这样才调整，免得队列偶尔见底时来回切换。
 // 不在收尾时，正在识别的文件用的线程比现在的搭配多（预算刚减半：用户开始用电脑、来了普通文件），也从下一页起
 // 减到现在的线程数，不等这个文件识别完。
 func (m *Manager) ocrTail(p ocrPlan, budget int) {
@@ -271,16 +286,24 @@ func (m *Manager) ocrTail(p ocrPlan, budget int) {
 		}
 	}
 	s.mu.Unlock()
+	busy := len(rs) + int(m.ocrHelpers.Load())
 	m.ocr.mu.Lock()
-	if !l.wantWork.Load() && len(rs) > 0 && len(rs) < p.procs {
+	if !l.wantWork.Load() && len(rs) > 0 && busy < p.procs {
 		m.ocr.tailSeen++
-	} else {
+	} else if l.wantWork.Load() || len(rs) == 0 {
 		m.ocr.tailSeen = 0
 	}
-	t := 0
-	if m.ocr.tailSeen >= 2 {
-		t = tailThreads(p, budget, len(rs))
+	tail := m.ocr.tailSeen >= 2
+	m.ocr.mu.Unlock()
+	if tail && busy < p.procs {
+		busy += m.ocrHelp(p.procs - busy)
 	}
+	_, pin := m.ocrModeNow()
+	t := 0
+	if tail && !pin {
+		t = tailThreads(p, budget, busy)
+	}
+	m.ocr.mu.Lock()
 	m.ocr.tail = t
 	m.ocr.mu.Unlock()
 	for _, r := range rs {
@@ -302,6 +325,7 @@ func (m *Manager) ocrTail(p ocrPlan, budget int) {
 
 // ocrTailOff：又有 OCR 文件开始处理，收尾时多分的线程立即收回（不等下一次调整）。
 func (m *Manager) ocrTailOff() {
+	m.stopOCRHelpers()
 	m.ocr.mu.Lock()
 	on := m.ocr.tail > 0
 	m.ocr.tail, m.ocr.tailSeen = 0, 0

@@ -311,6 +311,18 @@ export interface OCRBenchPlan {
   runs?: number[] | null; // 各轮的每分钟页数
   slotMem: number;
   cpu?: number; // 测速期间子进程实际平均占用几个逻辑处理器（只有 Windows 量得出来）
+  kernel?: number; // 子进程的 CPU 时间里系统内核占百分之几
+  err?: string;
+  probe?: boolean; // 只为看进程多了以后变快多少而加测的少进程搭配
+}
+
+export interface OCRBenchMode {
+  mode: string; // "" 照常、"tame" 限制辅助线程、"pin" 再固定逻辑处理器
+  procs: number;
+  threads: number;
+  perMin: number;
+  runs?: number[] | null;
+  kernel?: number;
   err?: string;
 }
 
@@ -326,6 +338,7 @@ export interface OCRBenchInfo {
   bench: {
     cpu: string; cores: number; logical?: number; memGB: number; at: number; budget: number; plans: OCRBenchPlan[] | null; best: number;
     planModel?: string; models?: OCRBenchModel[] | null; model?: string; cpuNote?: string;
+    mode?: string; modes?: OCRBenchMode[] | null; fewer?: boolean;
   } | null;
   model: string; // 现在用的认字模型
   models: string[] | null; // 组件里有的认字模型
