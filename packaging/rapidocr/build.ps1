@@ -22,7 +22,8 @@ if ($LASTEXITCODE -ne 0) { throw "打补丁失败" }
 $build = Join-Path $cpp "build-zz"
 # 用机器上最新的 Visual Studio（CMake 自动选），编译 64 位、静态链接 C 运行库（和原版一样）
 & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property displayName
-cmake -S $cpp -B $build -A x64 -DOCR_OUTPUT=BIN -DOCR_BUILD_CRT=True -DOCR_ONNX=CPU
+# 随源代码的 OpenCV 静态库是 VS 2019（vc16）编译的，OpenCV 的配置文件不认识更新的 VS：直接指定（新的 VS 能链接旧的库）
+cmake -S $cpp -B $build -A x64 -DOCR_OUTPUT=BIN -DOCR_BUILD_CRT=True -DOCR_ONNX=CPU -DOpenCV_ARCH=x64 -DOpenCV_RUNTIME=vc16
 if ($LASTEXITCODE -ne 0) { throw "cmake 配置失败" }
 cmake --build $build --config Release -- /m /v:minimal
 if ($LASTEXITCODE -ne 0) { throw "编译失败" }
