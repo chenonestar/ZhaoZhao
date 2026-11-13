@@ -152,7 +152,7 @@ func TestOCR(t *testing.T) {
 
 func TestOCRRequestEscapesNonASCII(t *testing.T) {
 	in := `C:\Users\张三\AppData\Local\Temp\a b\"x".png`
-	got := string(ocrRequest(in))
+	got := string(ocrRequest(in, 0))
 	var m map[string]string
 	if err := json.Unmarshal([]byte(got), &m); err != nil {
 		t.Fatalf("不是合法 JSON: %v\n%s", err, got)
@@ -166,8 +166,16 @@ func TestOCRRequestEscapesNonASCII(t *testing.T) {
 		}
 	}
 	// 代理对（emoji 等）
-	if got := string(ocrRequest("/tmp/😀.png")); !strings.Contains(got, `\ud83d\ude00`) {
+	if got := string(ocrRequest("/tmp/😀.png", 0)); !strings.Contains(got, `\ud83d\ude00`) {
 		t.Fatalf("%s", got)
+	}
+	// 修好的组件：这张图找文字时用多大的图
+	var r struct {
+		Path string `json:"image_path"`
+		Side int    `json:"max_side_len"`
+	}
+	if err := json.Unmarshal(ocrRequest("a.bmp", 2048), &r); err != nil || r.Path != "a.bmp" || r.Side != 2048 {
+		t.Fatalf("%+v %v", r, err)
 	}
 }
 

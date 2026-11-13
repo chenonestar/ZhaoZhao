@@ -317,7 +317,7 @@ export interface OCRBenchPlan {
 }
 
 export interface OCRBenchMode {
-  mode: string; // "" 照常、"tame" 限制辅助线程、"pin" 再固定逻辑处理器
+  mode: string; // "" 原版组件、"fixed" 修好线程设置的组件
   procs: number;
   threads: number;
   perMin: number;

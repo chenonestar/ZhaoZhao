@@ -204,7 +204,7 @@ func CheckOCR(c OCRConfig) ComponentStatus {
 		return st
 	}
 	defer killOCR(proc)
-	if _, err := recognizeWith(proc, c, p); err != nil {
+	if _, err := recognizeWith(proc, c, p, 0); err != nil {
 		st.Message = "不可用：" + err.Error()
 		return st
 	}

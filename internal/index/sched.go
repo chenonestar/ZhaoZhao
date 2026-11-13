@@ -620,7 +620,7 @@ func (m *Manager) extractOptions(cfg Config, withOCR bool) extract.Options {
 			o.OCR.MaxSide = extract.OCRBigSide // 小字多的扫描件：每页都用大图找字（量化版、旧模型也一样）
 		}
 		o.OCR.Threads = m.ocrPlanNow().threads // 每个 OCR 进程的线程数：总数不超过 CPU 核心数
-		o.OCR.Tame, o.OCR.Pin = m.ocrModeNow() // 本机测速选出的运行方式
+		o.OCR.UseFixed = m.ocrFixedNow()       // 本机测速选出的组件
 	}
 	o.MaxTextBytes = int64(cfg.MaxTextMB) << 20
 	o.SniffUnknown = cfg.SniffUnknown

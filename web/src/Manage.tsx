@@ -24,7 +24,7 @@ const leaveSettings = () => !settingsDirty || confirm("设置有修改还没保�
 
 // ocrModeName 是 OCR 组件运行方式的说明（和 internal/index/ocrbench.go 的 ocrModeName 一致）。
 function ocrModeName(mode: string): string {
-  return mode === "tame" ? "限制辅助线程" : mode === "pin" ? "限制辅助线程并固定逻辑处理器" : "照常";
+  return mode === "fixed" ? "修好线程设置的组件" : "原版组件";
 }
 
 export function Manage({ status, tab, setTab: setTab0, onClose: onClose0, refresh, onQuit }: Props) {
@@ -799,7 +799,7 @@ function OCRSpeed() {
       {b?.fewer && <div className="dim small">少开几个进程和最快的搭配差不到 3%：选进程少的，占内存少，给普通文件留出 CPU。</div>}
       {(b?.modes?.length ?? 0) > 1 && b && (
         <table className="grid">
-          <thead><tr><th title="OCR 组件的运行方式：先比较这几种，再用选中的方式比较搭配">运行方式（{b.modes![0].procs} 个进程 × {b.modes![0].threads} 线程）</th><th>每分钟页数</th>
+          <thead><tr><th title="原版 OCR 组件设的线程数不起作用，找找自己编译了修好的版本：先比较两者，再用选中的组件比较搭配">OCR 组件（{b.modes![0].procs} 个进程 × {b.modes![0].threads} 线程）</th><th>每分钟页数</th>
             {b.modes!.some((x) => x.kernel) && <th title="识别进程用的 CPU 时间里花在系统内核的比例（线程切换、等锁、内存分页多时高）">系统内核占</th>}</tr></thead>
           <tbody>
             {b.modes!.map((x) => (

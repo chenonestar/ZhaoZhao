@@ -86,12 +86,11 @@ func (m *Manager) ocrModelNow() string {
 	return model
 }
 
-// ocrModeNow 返回本机测速选出的 OCR 组件运行方式：是否限制辅助线程、是否固定逻辑处理器。
-func (m *Manager) ocrModeNow() (tame, pin bool) {
+// ocrFixedNow 说明本机测速是否选了修好线程设置的 OCR 组件。
+func (m *Manager) ocrFixedNow() bool {
 	m.ocr.mu.Lock()
 	defer m.ocr.mu.Unlock()
-	b := m.ocrBenchLocked()
-	return b.tame(), b.pin()
+	return m.ocrBenchLocked().fixed() && m.ocrCfg.HasFixed()
 }
 
 // ocrMachine 返回本机的处理器、核心数、内存。
@@ -161,7 +160,8 @@ func (m *Manager) autoPlanLocked(cores int, half bool, live int) (ocrPlan, int) 
 	budget := ocrBudget(cores, half)
 	// 测速时少开几个进程也差不多快（瓶颈不在 CPU）：按测出的那种搭配开，不按每个线程的速度推算（推算以为进程
 	// 越多越快）
-	if bp, ok := b.best(); ok && b.Fewer && bp.Procs <= m.ocr.memCap && bp.Procs*bp.Threads <= budget {
+	// 最快的就是加测的少进程搭配时也一样（0.2.16 某位用户测出 2 个进程最快，却按推算开了 6 个）
+	if bp, ok := b.best(); ok && (b.Fewer || bp.Probe) && bp.Procs <= m.ocr.memCap && bp.Procs*bp.Threads <= budget {
 		return bp.plan(), budget
 	}
 	phys, smt := b.curves()
@@ -263,7 +263,7 @@ func (m *Manager) ocrTuneStep() {
 
 // ocrTail：OCR 队列已经空了、正在识别的文件比进程少时（多半是排在最后的大文件），先让空着的进程当帮手，
 // 从后往前一起认剩下页数多的 PDF（ocrhelp.go）；还有空着的，再把线程平分给正在识别的文件，从下一页起生效
-// （多开进程比一个进程多开线程快得多，所以先加帮手；固定了逻辑处理器时不加线程）。队列里又有文件时恢复。
+// （多开进程比一个进程多开线程快得多，所以先加帮手）。队列里又有文件时恢复。
 // 连续两次（约 1 分钟）都这样才调整，免得队列偶尔见底时来回切换。
 // 不在收尾时，正在识别的文件用的线程比现在的搭配多（预算刚减半：用户开始用电脑、来了普通文件），也从下一页起
 // 减到现在的线程数，不等这个文件识别完。
@@ -298,9 +298,8 @@ func (m *Manager) ocrTail(p ocrPlan, budget int) {
 	if tail && busy < p.procs {
 		busy += m.ocrHelp(p.procs - busy)
 	}
-	_, pin := m.ocrModeNow()
 	t := 0
-	if tail && !pin {
+	if tail {
 		t = tailThreads(p, budget, busy)
 	}
 	m.ocr.mu.Lock()

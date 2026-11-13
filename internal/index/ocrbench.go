@@ -51,30 +51,28 @@ type OCRBench struct {
 	Model     string          `json:"model,omitempty"`
 	// CPUNote 是测速期间 CPU 的情况：实际频率、全部程序和别的程序各占几个逻辑处理器、电源计划（只有 Windows 取得到）
 	CPUNote string `json:"cpuNote,omitempty"`
-	// Mode 是选用的 OCR 组件运行方式（""：照常；ocrModeTame：限制辅助线程；ocrModePin：再固定在各自的逻辑处理器上），
-	// Modes 是比较各种方式的结果。先比较方式，再用选中的方式比较搭配。
+	// Mode 是选用的 OCR 组件（""：原版；ocrModeFixed：找找自己编译、修好线程设置的），Modes 是比较两者的结果。
+	// 先比较组件，再用选中的组件比较搭配。
 	Mode  string          `json:"mode,omitempty"`
 	Modes []OCRBenchModeR `json:"modes,omitempty"`
 	// Fewer：选用的搭配比最快的少用线程（差不到 ocrSameSpeed，进程少、占内存少、留出 CPU 给普通文件）。
 	Fewer bool `json:"fewer,omitempty"`
 }
 
-// OCR 组件的运行方式（本机测速比较）。
-const (
-	ocrModeTame = "tame" // 限制辅助线程
-	ocrModePin  = "pin"  // 限制辅助线程，并固定在各自的逻辑处理器上
-)
+// ocrModeFixed：用找找自己编译、修好线程设置的 OCR 组件（extract.OCRConfig.Fixed）。0.2.16 比较过「限制辅助
+// 线程」「固定逻辑处理器」：前者没有效果（原版的线程不归它管），后者慢一半，0.2.17 起不再比较。
+const ocrModeFixed = "fixed"
 
-// ocrModeName 是运行方式的说明。
+// ocrModeName 是组件的说明。
 func ocrModeName(mode string) string {
-	switch mode {
-	case ocrModeTame:
-		return "限制辅助线程"
-	case ocrModePin:
-		return "限制辅助线程并固定逻辑处理器"
+	if mode == ocrModeFixed {
+		return "修好线程设置的组件"
 	}
-	return "照常"
+	return "原版组件"
 }
+
+// errModeUnavailable：这台电脑上没有这种组件（没有修好的版本），不比较。
+var errModeUnavailable = errors.New("没有这种组件")
 
 // OCRBenchModeR 是一种运行方式的实测结果（用同一种搭配）。
 type OCRBenchModeR struct {
@@ -87,9 +85,8 @@ type OCRBenchModeR struct {
 	Err     string    `json:"err,omitempty"`
 }
 
-// tame、pin 返回选用的运行方式是否限制辅助线程、是否固定逻辑处理器。
-func (b *OCRBench) tame() bool { return b != nil && (b.Mode == ocrModeTame || b.Mode == ocrModePin) }
-func (b *OCRBench) pin() bool  { return b != nil && b.Mode == ocrModePin }
+// fixed 返回选用的是不是修好线程设置的组件。
+func (b *OCRBench) fixed() bool { return b != nil && b.Mode == ocrModeFixed }
 
 // cpuNote 把测速期间的 CPU 情况连同电源计划写成一句话。
 func cpuNote(c sysinfo.CPUStat) string {
@@ -275,7 +272,7 @@ func (b *OCRBench) Summary() string {
 			ms = append(ms, m)
 		}
 		pl := ocrPlan{b.Modes[0].Procs, b.Modes[0].Threads}
-		s = fmt.Sprintf("运行方式（%s）：%s；选用%s。搭配（%s）：%s", pl, strings.Join(ms, "，"), ocrModeName(b.Mode), ocrModeName(b.Mode), s)
+		s = fmt.Sprintf("组件（%s）：%s；选用%s。搭配（%s）：%s", pl, strings.Join(ms, "，"), ocrModeName(b.Mode), ocrModeName(b.Mode), s)
 	}
 	if bp, ok := b.best(); ok {
 		s += "；选用：" + bp.plan().String()
@@ -329,7 +326,8 @@ func smtNote(b *OCRBench) string {
 // 3：0.2.7 起用新认字模型比较搭配，再比较各个认字模型。
 // 4：0.2.8 起各种搭配交替测两轮以上取中位数，每个进程至少认 2 页。
 // 5：0.2.16 起先比较运行方式（限制辅助线程、固定逻辑处理器），再加测 1、2、3 个进程。
-const ocrBenchVersion = 5
+// 6：0.2.17 起比较原版组件和修好线程设置的组件。
+const ocrBenchVersion = 6
 
 // ocrMachineKey 是电脑连同 OCR 组件的指纹：处理器、核心数、内存（GB）、OCR 程序及其参数、测速方法。
 // 任何一项变了（换了电脑、加了内存、升级了 OCR 组件）都要重新测速。
@@ -337,6 +335,9 @@ func ocrMachineKey(m sysinfo.Machine, c extract.OCRConfig) string {
 	comp := filepath.Base(c.Command)
 	if st, err := os.Stat(c.Command); err == nil {
 		comp += fmt.Sprintf("/%d", st.Size())
+	}
+	if st, err := os.Stat(c.Fixed); c.Fixed != "" && err == nil {
+		comp += fmt.Sprintf("+%d", st.Size())
 	}
 	s := fmt.Sprintf("%s|%d|%d|%d|%s|%s|b%d", m.CPU, m.Cores, m.Logical, (m.MemTotal+(1<<29))>>30, comp, strings.Join(c.Args, " "), ocrBenchVersion)
 	h := sha1.Sum([]byte(s))
@@ -587,14 +588,8 @@ func (b *OCRBench) choose() int {
 	return best
 }
 
-// benchModes 返回要比较的运行方式（照常、限制辅助线程，能固定逻辑处理器时再加上固定）。测试里换掉。
-var benchModes = func() []string {
-	m := []string{"", ocrModeTame}
-	if extract.PinSupported() {
-		m = append(m, ocrModePin)
-	}
-	return m
-}
+// benchModes 返回要比较的组件（原版、修好的；没有修好的版本时测速返回 errModeUnavailable，不比较）。测试里换掉。
+var benchModes = func() []string { return []string{"", ocrModeFixed} }
 
 // benchProbes：测速时加测 1、2、3 个进程 × 1 线程（看进程多了以后变快多少）。测试里关掉。
 var benchProbes = true
@@ -625,9 +620,7 @@ func modeBenchPlan(cands []ocrPlan, budget int) (ocrPlan, bool) {
 	return best, best.procs >= 2
 }
 
-// compareModes 用搭配 p 比较各种运行方式：交替测两轮，取平均。限制辅助线程每一轮都比照常快、平均快 3% 以上才用；
-// 再固定逻辑处理器要比只限制辅助线程（或照常）每一轮都快、平均快 5% 以上才用（固定后别的程序占着那个处理器时
-// OCR 只能等，所以要明显快才用）。
+// compareModes 用搭配 p 比较原版组件和修好线程设置的组件：交替测两轮，取中位数。修好的不比原版慢 3% 以上就用它。
 func compareModes(ctx context.Context, run ocrBenchRunner, model string, modes []string, p ocrPlan, pages int, step func(what string)) ([]OCRBenchModeR, string) {
 	res := make([]OCRBenchModeR, len(modes))
 	for i, md := range modes {
@@ -641,6 +634,10 @@ func compareModes(ctx context.Context, run ocrBenchRunner, model string, modes [
 			}
 			step(p.String() + "，" + ocrModeName(md))
 			r, err := runRetry(ctx, run, model, md, p, pages)
+			if errors.Is(err, errModeUnavailable) {
+				x.Err = err.Error()
+				continue
+			}
 			if err != nil {
 				if ctx.Err() == nil {
 					x.Err, x.Runs, x.PerMin = truncate(err.Error(), 200), nil, 0
@@ -651,6 +648,7 @@ func compareModes(ctx context.Context, run ocrBenchRunner, model string, modes [
 			x.Kernel = max(x.Kernel, r.kernel)
 		}
 	}
+	res = slices.DeleteFunc(res, func(x OCRBenchModeR) bool { return x.Err == errModeUnavailable.Error() })
 	for i := range res {
 		if x := &res[i]; x.Err == "" && len(x.Runs) > 0 {
 			x.PerMin = median(x.Runs)
@@ -658,24 +656,19 @@ func compareModes(ctx context.Context, run ocrBenchRunner, model string, modes [
 			x.Err = "没有测完"
 		}
 	}
-	beats := func(a, b OCRBenchModeR, gain float64) bool {
-		return a.Err == "" && b.Err == "" && a.PerMin >= b.PerMin*gain && slices.Min(a.Runs) > slices.Max(b.Runs)
+	if len(res) < 2 {
+		return nil, "" // 只有原版组件：不用比较
 	}
+	// 修好的组件不比原版慢 3% 以上就用它：大幅面页不用另开进程，搭配也真正按测出的线程数开。原版用不了时
+	// （照理不会）用修好的
 	cur := 0
-	if res[0].Err != "" {
-		return res, ""
-	}
 	for i, x := range res {
-		switch x.Mode {
-		case ocrModeTame:
-			if beats(x, res[cur], 1.03) {
-				cur = i
-			}
-		case ocrModePin:
-			if beats(x, res[cur], 1.05) {
-				cur = i
-			}
+		if x.Mode == ocrModeFixed && x.Err == "" && (res[0].Err != "" || x.PerMin >= res[0].PerMin*ocrSameSpeed) {
+			cur = i
 		}
+	}
+	if res[cur].Err != "" {
+		return res, ""
 	}
 	return res, res[cur].Mode
 }
@@ -754,7 +747,10 @@ func poolBench(pool *worker.Pool, opts extract.Options, sample string) ocrBenchR
 		o := opts
 		o.OCR = o.OCR.WithModel(model)
 		o.OCR.Threads = pl.threads
-		o.OCR.Tame, o.OCR.Pin = mode == ocrModeTame || mode == ocrModePin, mode == ocrModePin
+		if mode == ocrModeFixed && !o.OCR.HasFixed() {
+			return benchRun{}, errModeUnavailable
+		}
+		o.OCR.UseFixed = mode == ocrModeFixed
 		o.ReportMem = true
 		t := worker.Timeouts{Total: 10 * time.Minute}
 		var text string

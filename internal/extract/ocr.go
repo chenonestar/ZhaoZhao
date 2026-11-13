@@ -57,20 +57,18 @@ type OCRConfig struct {
 	// SmallBigPages 为真时，大幅面的 PDF 页（比 A4 大）也和平常一样缩小了找文字（0.2.12 及以前的做法，OCR 引擎
 	// 对比用）；默认大幅面页用大图找字，见 bigOCR。
 	SmallBigPages bool `json:"smallBigPages,omitempty"`
-	// Tame 为真时限制 OCR 组件里的辅助线程：设成 1 线程的 RapidOCR 实际占约 2 个逻辑处理器（图像处理库、
-	// 并行库另开的线程，空闲时还会空转等活），多个进程同时识别时可能互相抢 CPU。本机测速比较开不开它，快才开。
-	Tame bool `json:"tame,omitempty"`
-	// Pin 为真时把每个 OCR 组件固定在自己的几个逻辑处理器上（同样由本机测速决定）。
-	Pin bool `json:"pin,omitempty"`
+	// Fixed 是找找自己编译的组件（RapidOCR-json-zz.exe，见 packaging/rapidocr）：原版设的线程数不起作用（推理库
+	// 「节点内部」的线程数设置被注释掉了），每个进程都按物理核心数开线程，多个进程同时识别时线程数成倍超过
+	// CPU；修好的版本按设的线程数开，还能每张图单独指定找文字时的图多大。UseFixed 为真时用它（本机测速决定）。
+	Fixed    string `json:"fixed,omitempty"`
+	UseFixed bool   `json:"useFixed,omitempty"`
 }
 
-// tameEnv 返回限制辅助线程的环境变量：OpenMP（推理库可能用它）只开 threads 个线程、空闲时让出 CPU 不空转，
-// OpenCV 的并行计算只用 1 个线程（每页的图像处理很小，多个进程本来就在并行）。
-func tameEnv(threads int) []string {
-	t := strconv.Itoa(max(1, threads))
-	return []string{"OMP_NUM_THREADS=" + t, "OMP_WAIT_POLICY=PASSIVE", "KMP_BLOCKTIME=0", "MKL_NUM_THREADS=" + t,
-		"OPENBLAS_NUM_THREADS=" + t, "OPENCV_FOR_THREADS_NUM=1"}
-}
+// fixedOn 说明这次用不用修好的组件。
+func (c OCRConfig) fixedOn() bool { return c.UseFixed && c.Fixed != "" }
+
+// HasFixed 说明有没有修好的组件。
+func (c OCRConfig) HasFixed() bool { return c.Fixed != "" }
 
 // args 返回启动 OCR 进程的参数。
 func (c OCRConfig) args() []string {
@@ -105,6 +103,9 @@ func FindOCR() OCRConfig {
 			if st, err := os.Stat(p); err == nil && !st.IsDir() {
 				c.Command = p
 				c.Args = readArgsFile(filepath.Join(dir, "args.txt"))
+				if f := filepath.Join(dir, fixedName); fileExists(f) {
+					c.Fixed = f
+				}
 				return c
 			}
 		}
@@ -116,6 +117,14 @@ func FindOCR() OCRConfig {
 		}
 	}
 	return c
+}
+
+// fixedName 是找找自己编译的组件的文件名（和原版放在一起，用同样的模型和参数）。
+const fixedName = "RapidOCR-json-zz.exe"
+
+func fileExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir()
 }
 
 // readArgsFile 读取组件目录里的 args.txt：每行一个启动参数（如 --models=models），# 开头为注释。
@@ -137,7 +146,7 @@ func readArgsFile(p string) []string {
 
 // ocrRequest 生成一行 OCR 请求。非 ASCII 字符一律写成 \uXXXX，反斜杠换成斜杠：
 // 组件按系统代码页读取命令行和管道，中文路径（如 C:\Users\张三\…）会因此出错。
-func ocrRequest(imgPath string) []byte {
+func ocrRequest(imgPath string, side int) []byte {
 	var b strings.Builder
 	b.WriteString(`{"image_path":"`)
 	for _, r := range filepath.ToSlash(imgPath) {
@@ -156,8 +165,11 @@ func ocrRequest(imgPath string) []byte {
 			fmt.Fprintf(&b, `\u%04x`, r)
 		}
 	}
-	b.WriteString(`"}`)
-	b.WriteByte('\n')
+	b.WriteByte('"')
+	if side > 0 {
+		fmt.Fprintf(&b, `,"max_side_len":%d`, side) // 修好的组件才认：这张图找文字时把长边缩到多少
+	}
+	b.WriteString("}\n")
 	return []byte(b.String())
 }
 
@@ -193,20 +205,21 @@ func OCRPeakMem() uint64 {
 }
 
 func (c OCRConfig) key() string {
-	return fmt.Sprintf("%s\x00%s\x00%s\x00%v%v", c.Engine, c.Command, strings.Join(c.args(), "\x00"), c.Tame, c.Pin)
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%v", c.Engine, c.Command, strings.Join(c.args(), "\x00"), c.fixedOn())
 }
 
 func startOCR(c OCRConfig) (*ocrProc, error) {
-	cmd := exec.Command(c.Command, c.args()...)
+	exe := c.Command
+	if c.fixedOn() {
+		exe = c.Fixed // 和原版在同一个目录，用同样的模型和参数
+	}
+	cmd := exec.Command(exe, c.args()...)
 	cmd.Dir = filepath.Dir(c.Command)
 	if !filepath.IsAbs(c.Command) {
 		cmd.Dir = ""
 	}
 	errBuf := &tailBuffer{max: 2048}
 	cmd.Stderr = errBuf
-	if c.Tame {
-		cmd.Env = append(os.Environ(), tameEnv(c.Threads)...)
-	}
 	setProcAttr(cmd)
 	cmd.Cancel = nil
 	in, err := cmd.StdinPipe()
@@ -222,10 +235,6 @@ func startOCR(c OCRConfig) (*ocrProc, error) {
 		return nil, err
 	}
 	p := &ocrProc{cmd: cmd, in: in, out: bufio.NewReaderSize(out, 1<<20), key: c.key()}
-	pinNote := ""
-	if c.Pin {
-		pinNote = pinProcess(cmd.Process.Pid, c.Threads)
-	}
 	// 等待初始化完成（加载模型，首次可能需要数秒）
 	ready := make(chan error, 1)
 	go func() {
@@ -270,11 +279,8 @@ func startOCR(c OCRConfig) (*ocrProc, error) {
 	if c.Threads > 0 {
 		threads = fmt.Sprintf("%d 线程", c.Threads)
 	}
-	if c.Tame {
-		threads += "，限制辅助线程"
-	}
-	if pinNote != "" {
-		threads += "，" + pinNote
+	if c.fixedOn() {
+		threads += "，修好线程设置的组件"
 	}
 	log.Printf("OCR 组件已启动（进程 %d，认字模型 %s，%s，加载模型用时 %.1fs）", cmd.Process.Pid,
 		OCRModelName(c.Model()), threads, time.Since(t0).Seconds())
@@ -344,7 +350,8 @@ const bigPageSide = 2600
 func IsBigPage(size image.Point) bool { return max(size.X, size.Y) > bigPageSide }
 
 // bigOCR 是识别大幅面页用的 OCR 进程（找文字用大图）：一份文件里第一次遇到大幅面页时启动，文件识别完就结束，
-// 不多占内存。大幅面页不多，平常的页照样用常驻的进程。
+// 不多占内存。大幅面页不多，平常的页照样用常驻的进程。用修好的组件时不另开进程：常驻的进程每张图可以单独
+// 指定找文字的图多大（0.2.16 某位用户的 F 盘另开了 2126 次，每个名额的内存翻倍，程序以为内存不够少开了进程）。
 type bigOCR struct {
 	c     OCRConfig
 	p     *ocrProc
@@ -354,7 +361,7 @@ type bigOCR struct {
 // newBigOCR 返回识别大幅面页用的进程（还没启动）；不需要时（设置了大幅面页也缩小、Windows 自带 OCR、本来就用
 // 大图）返回 nil。
 func newBigOCR(c OCRConfig) *bigOCR {
-	if c.SmallBigPages || c.Engine == OCRModelWin || c.MaxSide >= ocrBigSide || !c.Enabled() {
+	if c.SmallBigPages || c.Engine == OCRModelWin || c.MaxSide >= ocrBigSide || !c.Enabled() || c.fixedOn() {
 		return nil
 	}
 	c.MaxSide = ocrBigSide
@@ -374,12 +381,29 @@ func (b *bigOCR) recognize(path string) (string, error) {
 		b.p = p
 	}
 	b.pages++
-	text, err := recognizeWith(b.p, b.c, path)
+	text, err := recognizeWith(b.p, b.c, path, 0)
 	if err != nil && (errors.Is(err, errOCRDead) || errors.Is(err, errOCRTimeout)) {
 		killOCR(b.p) // 进程已退出或卡住：下次重新启动
 		b.p = nil
 	}
 	return text, err
+}
+
+// recognizePage 识别 PDF 的一页：大幅面页用大图找字（另开的进程，或者修好的组件直接指定），别的页照常。
+func recognizePage(c OCRConfig, big *bigOCR, path string, size image.Point) (text string, isBig bool, err error) {
+	switch {
+	case !IsBigPage(size):
+		text, err = ocrImage(c, path)
+	case big != nil:
+		text, err = big.recognize(path)
+		isBig = true
+	case c.fixedOn() && !c.SmallBigPages && c.Engine == "" && c.MaxSide < ocrBigSide:
+		text, err = ocrImageSide(c, path, ocrBigSide)
+		isBig = true
+	default:
+		text, err = ocrImage(c, path)
+	}
+	return
 }
 
 func (b *bigOCR) close() {
@@ -390,7 +414,10 @@ func (b *bigOCR) close() {
 }
 
 // ocrImage 识别一张图片，返回按阅读顺序拼接的文字。
-func ocrImage(c OCRConfig, imgPath string) (string, error) {
+func ocrImage(c OCRConfig, imgPath string) (string, error) { return ocrImageSide(c, imgPath, 0) }
+
+// ocrImageSide 识别一张图片，side 大于 0 时找文字用长边这么多像素的图（只有修好的组件支持）。
+func ocrImageSide(c OCRConfig, imgPath string, side int) (string, error) {
 	if c.Engine == OCRModelWin {
 		return ocrImageWin(c, imgPath)
 	}
@@ -412,7 +439,7 @@ func ocrImage(c OCRConfig, imgPath string) (string, error) {
 		ocrCur = p
 	}
 	p := ocrCur
-	text, err := recognizeWith(p, c, imgPath)
+	text, err := recognizeWith(p, c, imgPath, side)
 	if err != nil && (errors.Is(err, errOCRDead) || errors.Is(err, errOCRTimeout)) {
 		log.Printf("OCR 组件（进程 %d）%v，结束后重新启动", p.cmd.Process.Pid, err)
 		killOCR(p) // 进程已退出或卡住：下次重新启动
@@ -473,8 +500,8 @@ var (
 )
 
 // recognizeWith 用一个已启动的 OCR 进程识别一张图片。
-func recognizeWith(p *ocrProc, c OCRConfig, imgPath string) (string, error) {
-	if _, err := p.in.Write(ocrRequest(imgPath)); err != nil {
+func recognizeWith(p *ocrProc, c OCRConfig, imgPath string, side int) (string, error) {
+	if _, err := p.in.Write(ocrRequest(imgPath, side)); err != nil {
 		return "", fmt.Errorf("%w: %v", errOCRDead, err)
 	}
 	sec := c.PageSec
@@ -934,6 +961,7 @@ func ocrPDFiumPages(d *pdfDoc, p string, pages []int, opt Options) (pdfOCRResult
 	}
 	big := newBigOCR(opt.OCR)
 	defer big.close()
+	bigPages := 0
 	own := map[int]bool{} // 自己认了的页
 	progress := func() { opt.Progress("第 %d/%d 页", min(len(own)+share.resultsIf()+1, len(pages)), len(pages)) }
 	// recognize 按顺序认 list 里 want 允许的页（want 为 nil 时全部认）
@@ -954,12 +982,9 @@ func ocrPDFiumPages(d *pdfDoc, p string, pages []int, opt Options) (pdfOCRResult
 				continue // 空白页
 			}
 			t1 := time.Now()
-			var text string
-			var err error
-			if big != nil && IsBigPage(r.size) {
-				text, err = big.recognize(r.path)
-			} else {
-				text, err = ocrImage(opt.OCR, r.path)
+			text, isBig, err := recognizePage(opt.OCR, big, r.path, r.size)
+			if isBig {
+				bigPages++
 			}
 			os.Remove(r.path)
 			if errors.Is(err, errOCRTimeout) {
@@ -996,8 +1021,8 @@ func ocrPDFiumPages(d *pdfDoc, p string, pages []int, opt Options) (pdfOCRResult
 			}
 		}
 	}
-	if big != nil && big.pages > 0 {
-		logx.Debugf("PDF %s：%d 页是大幅面页，用大图找字", logx.P(p), big.pages)
+	if bigPages > 0 {
+		logx.Debugf("PDF %s：%d 页是大幅面页，用大图找字", logx.P(p), bigPages)
 	}
 	if n := res.note(); n != "" {
 		log.Printf("PDF %s：%s", logx.P(p), n)

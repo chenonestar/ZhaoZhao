@@ -43,7 +43,8 @@ class OCR:
         return r.get("data") or []
 
     def close(self):
-        self.p.stdin.close()
+        # 组件读到输入结束后不会自己退出（一直读空行），直接结束（找找也是这样结束它的）
+        self.p.kill()
         self.p.wait(timeout=30)
 
 

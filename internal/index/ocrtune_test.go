@@ -616,7 +616,10 @@ func TestPoolBenchReal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cleanup()
-	r, err := poolBench(pool, opts, sample)(context.Background(), "", ocrModeTame, ocrPlan{2, 1}, 4)
+	if _, err := poolBench(pool, opts, sample)(context.Background(), "", ocrModeFixed, ocrPlan{1, 1}, 1); !errors.Is(err, errModeUnavailable) {
+		t.Fatalf("没有修好的组件时不比较：%v", err)
+	}
+	r, err := poolBench(pool, opts, sample)(context.Background(), "", "", ocrPlan{2, 1}, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -876,24 +879,21 @@ func TestOCRBenchChooseNoSMT(t *testing.T) {
 	}
 }
 
-// 先比较运行方式（照常、限制辅助线程、再固定逻辑处理器），再用选中的方式比较搭配，加测 1、2、3 个进程；
-// 少开进程也差不多快时选进程少的，自动时按它开。
+// 先比较原版组件和修好线程设置的组件，再用选中的组件比较搭配，加测 1、2、3 个进程；少开进程也差不多快时
+// 选进程少的，自动时按它开。
 func TestRunOCRBenchModesAndProbes(t *testing.T) {
 	oldModes, oldProbes := benchModes, benchProbes
-	benchModes = func() []string { return []string{"", ocrModeTame, ocrModePin} }
+	benchModes = func() []string { return []string{"", ocrModeFixed} }
 	benchProbes = true
 	t.Cleanup(func() { benchModes, benchProbes = oldModes, oldProbes })
-	// 模拟内存带宽不够：3 个进程以后不再变快；限制辅助线程快 20%，固定逻辑处理器再快 1%（不够 5%）
+	// 模拟：原版组件每个进程都开满线程，3 个进程以后不再变快；修好的版本按设的线程数开，快 20%
 	speed := func(mode string, p ocrPlan) float64 {
 		v := float64(min(p.procs*p.threads, 3)) * 10
 		if p.procs == 1 && p.threads > 1 {
 			v *= 0.8 // 一个进程里多线程有损耗
 		}
-		switch mode {
-		case ocrModeTame:
+		if mode == ocrModeFixed {
 			v *= 1.2
-		case ocrModePin:
-			v *= 1.212
 		}
 		return v
 	}
@@ -903,15 +903,15 @@ func TestRunOCRBenchModesAndProbes(t *testing.T) {
 		return benchRun{perMin: speed(mode, p), kernel: 3}, nil
 	}
 	b := runOCRBench(context.Background(), 6, ocrCandidates(6, 32), nil, run, nil)
-	if b.Mode != ocrModeTame || len(b.Modes) != 3 {
-		t.Fatalf("限制辅助线程快 20%% 应选它，固定只再快 1%% 不选：%+v", b.Modes)
+	if b.Mode != ocrModeFixed || len(b.Modes) != 2 || !b.fixed() {
+		t.Fatalf("修好的组件快 20%% 应选它：%+v", b.Modes)
 	}
-	if strings.Join(calls[:6], " ") != "@6×1 tame@6×1 pin@6×1 @6×1 tame@6×1 pin@6×1" {
-		t.Fatalf("各方式交替测两轮，用进程最多的 6×1：%v", calls)
+	if strings.Join(calls[:4], " ") != "@6×1 fixed@6×1 @6×1 fixed@6×1" {
+		t.Fatalf("两种组件交替测两轮，用进程最多的 6×1：%v", calls)
 	}
-	for _, c := range calls[6:] {
-		if !strings.HasPrefix(c, ocrModeTame+"@") {
-			t.Fatalf("比较搭配时用选中的方式：%v", calls)
+	for _, c := range calls[4:] {
+		if !strings.HasPrefix(c, ocrModeFixed+"@") {
+			t.Fatalf("比较搭配时用选中的组件：%v", calls)
 		}
 	}
 	probes := 0
@@ -928,32 +928,41 @@ func TestRunOCRBenchModesAndProbes(t *testing.T) {
 		t.Fatalf("加测的搭配不用来推算：%+v", phys)
 	}
 	s := b.Summary()
-	for _, w := range []string{"运行方式（6 个进程 × 1 线程）：照常 每分钟 30.0 页（系统内核占 3%），限制辅助线程 每分钟 36.0 页",
-		"选用限制辅助线程", "选用：3 个进程 × 1 线程（和最快的差不到 3%"} {
+	for _, w := range []string{"组件（6 个进程 × 1 线程）：原版组件 每分钟 30.0 页（系统内核占 3%），修好线程设置的组件 每分钟 36.0 页",
+		"选用修好线程设置的组件", "选用：3 个进程 × 1 线程（和最快的差不到 3%"} {
 		if !strings.Contains(s, w) {
 			t.Fatalf("缺少「%s」：%s", w, s)
 		}
 	}
-	if !b.tame() || b.pin() {
-		t.Fatal("限制辅助线程、不固定")
-	}
-	// 固定逻辑处理器明显更快（每一轮都快 5% 以上）时选它；哪种都不比照常快时照常
-	calls = nil
-	pinFast := func(ctx context.Context, model, mode string, p ocrPlan, pages int) (benchRun, error) {
-		v := speed(mode, p)
-		if mode == ocrModePin {
-			v = speed(ocrModeTame, p) * 1.1
+	// 修好的组件只慢一点（不到 3%）也用它；慢得多时用原版；没有修好的组件时不比较
+	slightly := func(ctx context.Context, model, mode string, p ocrPlan, pages int) (benchRun, error) {
+		v := speed("", p)
+		if mode == ocrModeFixed {
+			v *= 0.98
 		}
 		return benchRun{perMin: v}, nil
 	}
-	if b := runOCRBench(context.Background(), 6, ocrCandidates(6, 32), nil, pinFast, nil); b.Mode != ocrModePin || !b.pin() {
+	if b := runOCRBench(context.Background(), 6, ocrCandidates(6, 32), nil, slightly, nil); !b.fixed() {
 		t.Fatalf("%+v", b.Modes)
 	}
-	same := func(ctx context.Context, model, mode string, p ocrPlan, pages int) (benchRun, error) {
+	slower := func(ctx context.Context, model, mode string, p ocrPlan, pages int) (benchRun, error) {
+		v := speed("", p)
+		if mode == ocrModeFixed {
+			v *= 0.9
+		}
+		return benchRun{perMin: v}, nil
+	}
+	if b := runOCRBench(context.Background(), 6, ocrCandidates(6, 32), nil, slower, nil); b.fixed() || len(b.Modes) != 2 {
+		t.Fatalf("%+v", b.Modes)
+	}
+	none := func(ctx context.Context, model, mode string, p ocrPlan, pages int) (benchRun, error) {
+		if mode == ocrModeFixed {
+			return benchRun{}, errModeUnavailable
+		}
 		return benchRun{perMin: speed("", p)}, nil
 	}
-	if b := runOCRBench(context.Background(), 6, ocrCandidates(6, 32), nil, same, nil); b.Mode != "" || b.tame() {
-		t.Fatalf("%+v", b.Modes)
+	if b := runOCRBench(context.Background(), 6, ocrCandidates(6, 32), nil, none, nil); b.fixed() || len(b.Modes) != 0 {
+		t.Fatalf("没有修好的组件时不比较：%+v", b.Modes)
 	}
 }
 
@@ -977,5 +986,15 @@ func TestOCRAutoPlanFewer(t *testing.T) {
 	}
 	if p, _ := m.autoPlanLocked(2, false, 0); p.procs*p.threads > 2 {
 		t.Fatalf("预算只有 2 时照常推算：%v", p)
+	}
+	// 0.2.16 某位用户：加测的 2×1 就是最快的（不是「差不多快选少的」），却按推算开了 6 个进程
+	b = &OCRBench{Budget: 6, Logical: 12, Plans: []OCRBenchPlan{
+		{Procs: 6, Threads: 1, PerMin: 33.6}, {Procs: 3, Threads: 2, PerMin: 31.6}, {Procs: 1, Threads: 6, PerMin: 26.6},
+		{Procs: 9, Threads: 1, PerMin: 36.9}, {Procs: 6, Threads: 2, PerMin: 34.2},
+		{Procs: 1, Threads: 1, PerMin: 26.6, Probe: true}, {Procs: 2, Threads: 1, PerMin: 37.4, Probe: true}, {Procs: 3, Threads: 1, PerMin: 31.6, Probe: true}}}
+	b.Best = b.choose()
+	m.ocr.bench = b
+	if p, _ := m.autoPlanLocked(6, false, 0); b.Fewer || p != (ocrPlan{2, 1}) {
+		t.Fatalf("最快的是加测的 2×1，应按它开：%v（Fewer %v）", p, b.Fewer)
 	}
 }

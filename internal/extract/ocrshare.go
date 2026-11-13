@@ -195,11 +195,7 @@ func helpPDF(p string, opt Options) doc.Result {
 			sp.Skip = r.skip
 		case r.path != "":
 			var text string
-			if big != nil && IsBigPage(r.size) {
-				text, err = big.recognize(r.path)
-			} else {
-				text, err = ocrImage(opt.OCR, r.path)
-			}
+			text, _, err = recognizePage(opt.OCR, big, r.path, r.size)
 			os.Remove(r.path)
 			switch {
 			case errors.Is(err, errOCRTimeout):
