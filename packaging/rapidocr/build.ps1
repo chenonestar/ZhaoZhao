@@ -16,6 +16,7 @@ foreach ($d in "onnxruntime-static", "opencv-static") {
   if (-not (Test-Path "$cpp\$d") -and (Test-Path "$cpp\lib\$d")) { Move-Item "$cpp\lib\$d" "$cpp\$d" }
   if (-not (Test-Path "$cpp\$d")) { throw "lib.7z 里没有 $d" }
 }
+$env:PYTHONIOENCODING = "utf-8"
 python (Join-Path $PSScriptRoot "patch.py") $cpp
 if ($LASTEXITCODE -ne 0) { throw "打补丁失败" }
 $build = Join-Path $cpp "build-zz"
