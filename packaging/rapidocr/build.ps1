@@ -20,7 +20,9 @@ $env:PYTHONIOENCODING = "utf-8"
 python (Join-Path $PSScriptRoot "patch.py") $cpp
 if ($LASTEXITCODE -ne 0) { throw "打补丁失败" }
 $build = Join-Path $cpp "build-zz"
-cmake -S $cpp -B $build -G "Visual Studio 17 2022" -A x64 -DOCR_OUTPUT=BIN -DOCR_BUILD_CRT=True -DOCR_ONNX=CPU
+# 用机器上最新的 Visual Studio（CMake 自动选），编译 64 位、静态链接 C 运行库（和原版一样）
+& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property displayName
+cmake -S $cpp -B $build -A x64 -DOCR_OUTPUT=BIN -DOCR_BUILD_CRT=True -DOCR_ONNX=CPU
 if ($LASTEXITCODE -ne 0) { throw "cmake 配置失败" }
 cmake --build $build --config Release -- /m /v:minimal
 if ($LASTEXITCODE -ne 0) { throw "编译失败" }
