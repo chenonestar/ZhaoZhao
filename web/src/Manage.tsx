@@ -723,7 +723,7 @@ function HotkeyField({ value, onChange, state }: { value: string; onChange: (v: 
 
 const modelNames: Record<string, string> = {
   v6: "PP-OCRv6 small 普通版", v6q: "PP-OCRv6 small 量化版", v4: "PP-OCRv4（旧模型）", win: "Windows 自带 OCR（实验）",
-  v6big: "PP-OCRv6 small 大图找字", v6shrink: "PP-OCRv6 small 大幅面页也缩小（0.2.12 及以前）",
+  v6big: "PP-OCRv6 small 大图找字", v6shrink: "PP-OCRv6 small 大幅面页也缩小（0.2.12 及以前）", v6scaled: "PP-OCRv6 small 大幅面页按比例找字",
 };
 const modelName = (m: string) => modelNames[m] ?? m;
 

@@ -51,4 +51,16 @@ func TestOCRModels(t *testing.T) {
 	if v := auto.WithModel(OCRModelV6); v.SmallBigPages || v.Model() != OCRModelV6 {
 		t.Fatal("换回 v6 时去掉标记")
 	}
+	// 大幅面页按比例找字：要有修好的组件（每张图单独指定），用它
+	if c.HasModel(OCRModelV6Scaled) || c.WithModel(OCRModelV6Scaled).BigScaled {
+		t.Fatal("没有修好的组件时不能按比例找字")
+	}
+	c.Fixed = exe
+	sc := c.WithModel(OCRModelV6Scaled)
+	if !c.HasModel(OCRModelV6Scaled) || !sc.BigScaled || !sc.fixedOn() || sc.Model() != OCRModelV6Scaled || slices.Contains(c.Models(), OCRModelV6Scaled) {
+		t.Fatalf("按比例找字：%+v", sc)
+	}
+	if v := sc.WithModel(OCRModelV6); v.BigScaled || v.Model() != OCRModelV6 {
+		t.Fatal("换回 v6 时去掉标记")
+	}
 }

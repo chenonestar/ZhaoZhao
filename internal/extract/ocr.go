@@ -62,6 +62,8 @@ type OCRConfig struct {
 	// CPU；修好的版本按设的线程数开，还能每张图单独指定找文字时的图多大。UseFixed 为真时用它（本机测速决定）。
 	Fixed    string `json:"fixed,omitempty"`
 	UseFixed bool   `json:"useFixed,omitempty"`
+	// BigScaled 为真时大幅面页找文字的图按页面大小成比例（scaledSide），不是一律 2048（要用修好的组件）。
+	BigScaled bool `json:"bigScaled,omitempty"`
 }
 
 // fixedOn 说明这次用不用修好的组件。
@@ -346,6 +348,12 @@ type ocrResp struct {
 // （0.2.12 某位用户的 OCR 引擎对比：一个 A3 页平常认出 963 字，大图 1570 字；37 个 A4 页两种认法只差几个字）。
 const bigPageSide = 2600
 
+// scaledSide 返回大幅面页按比例找文字用的图多大：和 A4 页（200 dpi 长边约 2339 像素，找文字时缩到 1024）
+// 缩得一样多，字在找文字的图上和 A4 页一样大。最小 1024，最大 2048。
+func scaledSide(size image.Point) int {
+	return min(ocrBigSide, max(1024, (max(size.X, size.Y)*1024+2338/2)/2339))
+}
+
 // IsBigPage 说明这么大的页（像素）要不要用大图找字。
 func IsBigPage(size image.Point) bool { return max(size.X, size.Y) > bigPageSide }
 
@@ -394,6 +402,9 @@ func recognizePage(c OCRConfig, big *bigOCR, path string, size image.Point) (tex
 	switch {
 	case !IsBigPage(size):
 		text, err = ocrImage(c, path)
+	case c.fixedOn() && c.BigScaled && !c.SmallBigPages && c.Engine == "":
+		text, err = ocrImageSide(c, path, scaledSide(size))
+		isBig = true
 	case big != nil:
 		text, err = big.recognize(path)
 		isBig = true

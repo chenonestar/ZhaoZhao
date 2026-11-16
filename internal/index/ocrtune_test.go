@@ -130,7 +130,7 @@ func TestOCRSMT(t *testing.T) {
 	if b.smtFaster() {
 		t.Fatal("超线程只快 2.5% 时不用")
 	}
-	if !strings.Contains(b.Summary(), "用上超线程只快 2%，不到 10%") {
+	if !strings.Contains(b.Summary(), "用上超线程只快 2%，不到 5%") {
 		t.Fatal(b.Summary())
 	}
 }
@@ -303,7 +303,7 @@ func TestRunOCRBenchModels(t *testing.T) {
 	}
 }
 
-// 测速结果忽高忽低（同一种搭配两轮差 10% 以上）时再测一轮，取中位数。超线程要每一轮都快 10% 以上才用。
+// 测速结果忽高忽低（同一种搭配两轮差 10% 以上）时再测一轮，取中位数。超线程要每一轮都快 5% 以上才用。
 func TestRunOCRBenchRounds(t *testing.T) {
 	seq := map[ocrPlan][]float64{{6, 1}: {30, 40, 31}, {3, 2}: {28, 28, 28}, {1, 6}: {15, 15, 15}, {12, 1}: {36, 33, 34}, {6, 2}: {30, 30, 30}}
 	n := map[ocrPlan]int{}
@@ -320,11 +320,11 @@ func TestRunOCRBenchRounds(t *testing.T) {
 	if b.Plans[0].PerMin != 31 || len(b.Plans[0].Runs) != 3 {
 		t.Fatalf("应取中位数：%+v", b.Plans[0])
 	}
-	// 12×1 的中位数 34 比 6×1 的 31 快 9.7%：不到 10%，不用超线程，选用只用物理核心里最快的 6×1
+	// 12×1 的中位数 34 比 6×1 的 31 快 9.7%，但第二轮反而慢（33 对 40）：不稳定，不用超线程，选用只用物理核心里最快的 6×1
 	if bp, _ := b.best(); bp.plan() != (ocrPlan{6, 1}) || b.smtFaster() {
 		t.Fatalf("%+v", b.Plans)
 	}
-	if s := b.Summary(); !strings.Contains(s, "用上超线程只快 10%，不到 10%") {
+	if s := b.Summary(); !strings.Contains(s, "用上超线程只快 10%，不到 5% 或各轮不稳定") {
 		t.Fatal(s)
 	}
 	// 中位数快 16%，但第二轮反而慢 17%（物理核心那轮碰巧快）：不稳定，不用
@@ -334,7 +334,7 @@ func TestRunOCRBenchRounds(t *testing.T) {
 	}
 	b.Plans[0].Runs, b.Plans[3].Runs = []float64{30, 30, 31}, []float64{36, 34, 36}
 	if !b.smtFaster() {
-		t.Fatal("每轮都快 10% 以上时用超线程")
+		t.Fatal("每轮都快 5% 以上时用超线程")
 	}
 }
 
@@ -996,5 +996,34 @@ func TestOCRAutoPlanFewer(t *testing.T) {
 	m.ocr.bench = b
 	if p, _ := m.autoPlanLocked(6, false, 0); b.Fewer || p != (ocrPlan{2, 1}) {
 		t.Fatalf("最快的是加测的 2×1，应按它开：%v（Fewer %v）", p, b.Fewer)
+	}
+}
+
+// 0.2.17 某位用户（6 核 12 线程）的测速：6×2 每一轮都比只用物理核心最快的快 7%～9%，应用上超线程，按实测的
+// 6×2 开，不按每个线程的速度推算成 12×1（9×1 实测每分钟 42 页，推算 12×1 会有 56 页）。
+func TestOCRSMTUserBench(t *testing.T) {
+	b := &OCRBench{Budget: 6, Logical: 12, Plans: []OCRBenchPlan{
+		{Procs: 6, Threads: 1, PerMin: 41.7, Runs: []float64{40.4, 41.7, 43.0}},
+		{Procs: 3, Threads: 2, PerMin: 42.3, Runs: []float64{36.0, 42.6, 42.3}},
+		{Procs: 1, Threads: 6, PerMin: 32.0, Runs: []float64{32.0, 31.8, 32.2}},
+		{Procs: 9, Threads: 1, PerMin: 42.0, Runs: []float64{38.7, 42.4, 42.0}},
+		{Procs: 6, Threads: 2, PerMin: 46.1, Runs: []float64{43.5, 46.2, 46.1}},
+		{Procs: 1, Threads: 1, PerMin: 15.7, Probe: true}, {Procs: 2, Threads: 1, PerMin: 26.5, Probe: true},
+		{Procs: 3, Threads: 1, PerMin: 34.0, Probe: true}}}
+	b.Best = b.choose()
+	if !b.smtFaster() || b.Plans[b.Best].plan() != (ocrPlan{6, 2}) {
+		t.Fatalf("每轮都快 5%% 以上，应选 6×2：%+v", b.Plans[b.Best])
+	}
+	e := newEnvWith(t, &fakeProv{}, "", nil)
+	m := e.m
+	m.ocr.mu.Lock()
+	defer m.ocr.mu.Unlock()
+	m.ocrBenchLocked()
+	m.ocr.bench = b
+	if p, budget := m.autoPlanLocked(6, false, 0); p != (ocrPlan{6, 2}) || budget != 12 {
+		t.Fatalf("应按实测的 6×2 开：%v（预算 %d）", p, budget)
+	}
+	if p, _ := m.autoPlanLocked(6, true, 0); p.procs*p.threads > 3 {
+		t.Fatalf("用电脑时减半照常推算：%v", p)
 	}
 }

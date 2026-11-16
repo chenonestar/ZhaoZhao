@@ -134,6 +134,9 @@ func (m *Manager) ocrBenchLocked() *OCRBench {
 		}
 		m.ocr.key, m.ocr.keyFor = ocrMachineKey(m.ocr.machine, m.ocrCfg), comp
 		m.ocr.bench = m.loadOCRBench(m.ocr.key)
+		if b := m.ocr.bench; b != nil && b.Best >= 0 {
+			b.Best = b.choose() // 按现在的规则重新选（0.2.18 起超线程快 5% 就用，沿用以前的测速结果）
+		}
 	}
 	return m.ocr.bench
 }
@@ -166,6 +169,11 @@ func (m *Manager) autoPlanLocked(cores int, half bool, live int) (ocrPlan, int) 
 	}
 	phys, smt := b.curves()
 	if !half && b.smtFaster() {
+		// 按实测最快的超线程搭配开：推算会高估（0.2.17 某位用户 9×1 实测每分钟 42 页，按每个线程的速度推算 12×1
+		// 要 56 页，实际进程多了不会更快）。内存不够开那么多进程时再推算
+		if sp, ok := b.bestSMT(); ok && sp.Procs <= m.ocr.memCap {
+			return sp.plan(), b.Logical
+		}
 		return smt.bestPlan(b.Logical, m.ocr.memCap), b.Logical
 	}
 	return phys.bestPlan(budget, m.ocr.memCap), budget

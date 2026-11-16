@@ -176,9 +176,11 @@ func (b *OCRBench) curves() (phys, smt effCurve) {
 	return curve(eff[0]), curve(eff[1])
 }
 
-// ocrSMTGain：用上超线程的搭配要比只用物理核心的最快搭配快这么多才用（差不多时不用：进程多一倍、占内存、
-// 发热，实际处理真实文件时还可能更慢）。0.2.7 是 5%，某台电脑测速时快 15%，实际反而慢。
-const ocrSMTGain = 1.10
+// ocrSMTGain：用上超线程的搭配要比只用物理核心的最快搭配快这么多（而且每一轮都快这么多）才用（差不多时不用：
+// 进程多一倍、占内存、发热，实际处理真实文件时还可能更慢）。0.2.7 是 5%，某台电脑测速时快 15%，实际反而慢，
+// 0.2.8 起改成 10% 并要求每一轮都快；那时 OCR 组件设的线程数不起作用，测速忽高忽低。0.2.17 修好线程设置后，
+// 某位用户三轮的结果都稳定快 7%～9%，却因为不到 10% 没用上，0.2.18 起改回 5%（仍要求每一轮都快）。
+const ocrSMTGain = 1.05
 
 // smtGain 返回用上超线程的最快搭配比只用物理核心的最快搭配快多少（倍数）；每一轮都要快 ocrSMTGain 以上才算
 // 稳定地快（steady 为 true）。没有可比的结果（没有超线程，或某一类全部失败）时返回 0。
@@ -220,7 +222,19 @@ func (b *OCRBench) smtGain() (gain float64, steady bool) {
 	return gain, steady
 }
 
-// smtFaster：用上超线程每一轮都比只用物理核心快 10% 以上。
+// bestSMT 返回实测最快的用上超线程的搭配（加测的除外）。
+func (b *OCRBench) bestSMT() (OCRBenchPlan, bool) {
+	var best OCRBenchPlan
+	ok := false
+	for _, p := range b.Plans {
+		if p.Err == "" && p.PerMin > 0 && !p.Probe && p.smt(b.Budget) && (!ok || p.PerMin > best.PerMin) {
+			best, ok = p, true
+		}
+	}
+	return best, ok
+}
+
+// smtFaster：用上超线程每一轮都比只用物理核心快 5% 以上。
 func (b *OCRBench) smtFaster() bool {
 	_, ok := b.smtGain()
 	return ok
@@ -559,7 +573,7 @@ func runOCRBench(ctx context.Context, budget int, cands []ocrPlan, models []stri
 const ocrSameSpeed = 0.97
 
 // choose 返回选用的搭配（Plans 的下标；-1 表示全部失败）：最快的，和它差不到 3% 的选总线程数少的（Fewer）；
-// 超线程没有每一轮都快 10% 以上时，只在只用物理核心的搭配里选（0.2.8 打包测试里 2×2 比 2×1 只快 0.1%，
+// 超线程没有每一轮都快 5% 以上时，只在只用物理核心的搭配里选（0.2.8 打包测试里 2×2 比 2×1 只快 0.1%，
 // 以前标成「最快」，实际却按只用物理核心开进程）。
 func (b *OCRBench) choose() int {
 	_, smtOK := b.smtGain()

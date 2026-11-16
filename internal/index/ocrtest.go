@@ -154,6 +154,9 @@ func ocrTestModels(c extract.OCRConfig) []string {
 		out = append(out, x)
 		if x == extract.OCRModelV6 && c.HasModel(extract.OCRModelV6Big) {
 			out = append(out, extract.OCRModelV6Shrink, extract.OCRModelV6Big)
+			if c.HasModel(extract.OCRModelV6Scaled) {
+				out = append(out, extract.OCRModelV6Scaled)
+			}
 		}
 	}
 	return out
@@ -259,6 +262,7 @@ func (m *Manager) poolOCRTest() ocrTestRunner {
 	return func(ctx context.Context, model, path, ext string) (doc.Result, time.Duration) {
 		o := base
 		o.OCR = m.ocrCfg.WithModel(model)
+		o.OCR.UseFixed = o.OCR.UseFixed || base.OCR.UseFixed // 和平时识别一样用本机测速选出的组件
 		o.OCR.Threads = 1
 		t0 := time.Now()
 		res := pool.Run(ctx, path, ext, o, worker.Timeouts{Idle: 10 * time.Minute, Total: time.Hour}, nil)

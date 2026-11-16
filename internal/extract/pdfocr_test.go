@@ -33,6 +33,9 @@ func TestMain(m *testing.M) {
 			}
 			json.Unmarshal(sc.Bytes(), &req)
 			name := strings.TrimSuffix(filepath.Base(req.ImagePath), filepath.Ext(req.ImagePath))
+			if req.Side > 0 && req.Side != 2048 {
+				name = fmt.Sprintf("side%d-%s", req.Side, name) // 按比例找字：核对用了多大的图
+			}
 			if big || req.Side == 2048 {
 				name = "big-" + strings.Repeat("小字", 300)
 			}
@@ -137,6 +140,14 @@ func TestBigPageOCR(t *testing.T) {
 	}
 	if text, isBig, _ := recognizePage(c, nil, path, image.Pt(1654, 2339)); isBig || strings.Contains(text, "big-") {
 		t.Fatal("A4 页照常")
+	}
+	// 按比例找字：A3 页（200 dpi）用约 1448 像素，特别大的图纸最多 2048
+	c.BigScaled = true
+	if text, isBig, err := recognizePage(c, nil, path, image.Pt(2338, 3307)); err != nil || !isBig || !strings.Contains(text, "side1448-") {
+		t.Fatalf("A3 页应按比例用 1448 像素：%q %v %v", text, isBig, err)
+	}
+	if scaledSide(image.Pt(2700, 2000)) != 1182 || scaledSide(image.Pt(9000, 6000)) != 2048 || scaledSide(image.Pt(1000, 900)) != 1024 {
+		t.Fatal(scaledSide(image.Pt(2700, 2000)), scaledSide(image.Pt(9000, 6000)))
 	}
 }
 
