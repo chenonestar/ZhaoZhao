@@ -34,6 +34,8 @@ type stageCounts struct {
 	inTx                   time.Duration // 其中在事务里写各个文件的时间（其余是开始、提交事务）
 	split                  store.WriteSplit
 	paused                 time.Duration // 用户在用电脑时让出的时间之和（各处理线程相加）
+	cpDur                  time.Duration // 后台把 WAL 写回主文件的用时
+	cpPages                int64         // 写回的页数（每页 4 KB）
 }
 
 func (s *stageStats) addJob(read, extract, prepare time.Duration, reused bool) {
@@ -86,6 +88,13 @@ func (s *stageStats) addBatch(batch []*prepared, start time.Time, dur, inTx time
 	s.mu.Unlock()
 }
 
+func (s *stageStats) addCheckpoint(d time.Duration, pages int64) {
+	s.mu.Lock()
+	s.c.cpDur += d
+	s.c.cpPages += pages
+	s.mu.Unlock()
+}
+
 func (s *stageStats) addPause(d time.Duration) {
 	s.mu.Lock()
 	s.c.paused += d
@@ -135,6 +144,9 @@ func (s *stageStats) take(now time.Duration, pages int64) string {
 	}
 	if ocr > 0 {
 		parts = append(parts, fmt.Sprintf("OCR %d 页（每分钟 %.0f 页）", ocr, float64(ocr)/span.Minutes()))
+	}
+	if old.cpPages > 0 && (old.written > 0 || ocr > 0 || old.files > 0) {
+		parts = append(parts, fmt.Sprintf("后台写回索引库 %s、%s", secs(old.cpDur), fmtBytes(old.cpPages*4096)))
 	}
 	if old.paused > 0 {
 		parts = append(parts, "用电脑时让出 "+secs(old.paused))

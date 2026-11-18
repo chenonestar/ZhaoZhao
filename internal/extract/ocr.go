@@ -62,7 +62,8 @@ type OCRConfig struct {
 	// CPU；修好的版本按设的线程数开，还能每张图单独指定找文字时的图多大。UseFixed 为真时用它（本机测速决定）。
 	Fixed    string `json:"fixed,omitempty"`
 	UseFixed bool   `json:"useFixed,omitempty"`
-	// BigScaled 为真时大幅面页找文字的图按页面大小成比例（scaledSide），不是一律 2048（要用修好的组件）。
+	// BigScaled 为真时大幅面页找文字的图按页面大小成比例（scaledSide），不是一律 2048（要用修好的组件；
+	// 0.2.19 起用修好的组件时默认这样认，设置里打开「小字多的扫描件」时每页都用 2048）。
 	BigScaled bool `json:"bigScaled,omitempty"`
 }
 
@@ -402,7 +403,7 @@ func recognizePage(c OCRConfig, big *bigOCR, path string, size image.Point) (tex
 	switch {
 	case !IsBigPage(size):
 		text, err = ocrImage(c, path)
-	case c.fixedOn() && c.BigScaled && !c.SmallBigPages && c.Engine == "":
+	case c.fixedOn() && c.BigScaled && !c.SmallBigPages && c.Engine == "" && c.MaxSide < ocrBigSide:
 		text, err = ocrImageSide(c, path, scaledSide(size))
 		isBig = true
 	case big != nil:

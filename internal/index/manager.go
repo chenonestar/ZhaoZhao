@@ -263,6 +263,8 @@ func (m *Manager) Start() error {
 	go m.keepAwakeLoop()
 	m.wg.Add(1)
 	go m.ocrTuneLoop()
+	m.wg.Add(1)
+	go m.checkpointLoop()
 	// 启动对账：处理未运行期间发生的变化（F-BG-02）
 	m.RescanAll()
 	return nil

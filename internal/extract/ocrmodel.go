@@ -25,8 +25,9 @@ const (
 	// OCRConfig.SmallBigPages），只在 OCR 引擎对比里用，看大幅面页用大图多认出了多少。
 	OCRModelV6Shrink = "v6shrink"
 	// OCRModelV6Scaled：PP-OCRv6 small，大幅面页找文字的图按页面大小成比例（A4 页缩到 1024 像素，A3 页约 1450，
-	// 字缩得和 A4 页一样大；最大 2048），比一律用 2048 省时间。要用修好的组件（每张图单独指定），只在 OCR 引擎
-	// 对比里用：0.2.17 某位用户大幅面页占 OCR 时间的 47%，看少认多少字再决定要不要改成默认。
+	// 字缩得和 A4 页一样大；最大 2048），比一律用 2048 省时间。要用修好的组件（每张图单独指定）。0.2.18 某位
+	// 用户的 OCR 引擎对比：每页快 13%，基准认出的内容它有 99.8%，0.2.19 起用修好的组件时默认就这样认（记下的模型
+	// 仍是 PP-OCRv6 small：以前一律用 2048 认的文件不用重新识别）。这个名字只在 OCR 引擎对比里用。
 	OCRModelV6Scaled = "v6scaled"
 	// OCRBigSide 是大图找字用的图片长边（设置里「小字多的扫描件」打开时每页都用）。
 	OCRBigSide = ocrBigSide
@@ -75,9 +76,6 @@ func (c OCRConfig) Model() string {
 					}
 					if m == OCRModelV6 && c.SmallBigPages {
 						return OCRModelV6Shrink
-					}
-					if m == OCRModelV6 && c.BigScaled {
-						return OCRModelV6Scaled
 					}
 					return m
 				}

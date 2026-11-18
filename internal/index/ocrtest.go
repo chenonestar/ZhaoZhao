@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -178,6 +179,10 @@ func (m *Manager) StartOCRTest(n int) error {
 		return fmt.Errorf("OCR 组件没有安装或 OCR 已关闭")
 	}
 	models := ocrTestModels(m.ocrCfg)
+	if m.extractOptions(m.Config(), true).OCR.BigScaled {
+		// 平时就按比例找字了：PP-OCRv6 small 就是它，不用另比
+		models = slices.DeleteFunc(models, func(x string) bool { return x == extract.OCRModelV6Scaled })
+	}
 	if len(models) < 2 {
 		return fmt.Errorf("这台电脑上只有一个认字模型（%s），没有可比的", extract.OCRModelName(models[0]))
 	}
@@ -263,6 +268,11 @@ func (m *Manager) poolOCRTest() ocrTestRunner {
 		o := base
 		o.OCR = m.ocrCfg.WithModel(model)
 		o.OCR.UseFixed = o.OCR.UseFixed || base.OCR.UseFixed // 和平时识别一样用本机测速选出的组件
+		switch model {
+		case extract.OCRModelV6Big, extract.OCRModelV6Shrink, extract.OCRModelV6Scaled, extract.OCRModelWin:
+		default:
+			o.OCR.BigScaled = base.OCR.BigScaled // 大幅面页和平时识别一样（用修好的组件时按比例找字）
+		}
 		o.OCR.Threads = 1
 		t0 := time.Now()
 		res := pool.Run(ctx, path, ext, o, worker.Timeouts{Idle: 10 * time.Minute, Total: time.Hour}, nil)

@@ -57,7 +57,8 @@ func TestOCRModels(t *testing.T) {
 	}
 	c.Fixed = exe
 	sc := c.WithModel(OCRModelV6Scaled)
-	if !c.HasModel(OCRModelV6Scaled) || !sc.BigScaled || !sc.fixedOn() || sc.Model() != OCRModelV6Scaled || slices.Contains(c.Models(), OCRModelV6Scaled) {
+	// 记下的模型仍是 PP-OCRv6 small（默认就这样认，以前一律用 2048 认的文件不算别的模型）
+	if !c.HasModel(OCRModelV6Scaled) || !sc.BigScaled || !sc.fixedOn() || sc.Model() != OCRModelV6 || slices.Contains(c.Models(), OCRModelV6Scaled) {
 		t.Fatalf("按比例找字：%+v", sc)
 	}
 	if v := sc.WithModel(OCRModelV6); v.BigScaled || v.Model() != OCRModelV6 {

@@ -125,7 +125,8 @@ func Open(dir string) (*DB, error) {
 		busyTimeout.Milliseconds(), WALLimit)
 	// 页缓存：SQLite 默认只有 2 MB。写连接给 64 MB（全文索引、文件表的上层页常驻内存，机械硬盘上少读盘），
 	// 读连接各 8 MB（最多 8 个，按需增长）
-	w, err := sql.Open("sqlite", dsn+fmt.Sprintf("&_pragma=cache_size(%d)", -writeCacheKB))
+	// 写连接不在提交时自动写回主文件（由后台定时写回，见 CheckpointPassive）
+	w, err := sql.Open("sqlite", dsn+fmt.Sprintf("&_pragma=cache_size(%d)&_pragma=wal_autocheckpoint(0)", -writeCacheKB))
 	if err != nil {
 		return nil, err
 	}

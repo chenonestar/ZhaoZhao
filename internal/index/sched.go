@@ -621,6 +621,9 @@ func (m *Manager) extractOptions(cfg Config, withOCR bool) extract.Options {
 		}
 		o.OCR.Threads = m.ocrPlanNow().threads // 每个 OCR 进程的线程数：总数不超过 CPU 核心数
 		o.OCR.UseFixed = m.ocrFixedNow()       // 本机测速选出的组件
+		// 用修好的组件时，大幅面页找文字的图按页面大小成比例（不是一律 2048）：0.2.18 某位用户的 OCR 引擎对比，
+		// 每页快 13%，基准认出的内容它有 99.8%
+		o.OCR.BigScaled = o.OCR.UseFixed && !cfg.OCRSmallText
 	}
 	o.MaxTextBytes = int64(cfg.MaxTextMB) << 20
 	o.SniffUnknown = cfg.SniffUnknown
@@ -1127,6 +1130,39 @@ func (m *Manager) writer() {
 		if time.Since(walChecked) >= walCheckEvery {
 			walChecked = time.Now()
 			m.checkpointWAL()
+		}
+	}
+}
+
+// checkpointEvery：后台每隔多久把 WAL 写回主文件一次（store.CheckpointPassive）。
+var checkpointEvery = 3 * time.Second
+
+// checkpointLoop 在后台定时把 WAL 写回主文件：写连接不再在提交时写回，写入线程不用等机械硬盘的随机写。
+// 每一轮只写回上次以来新增的部分；WAL 从头复用后重新算。
+func (m *Manager) checkpointLoop() {
+	defer m.wg.Done()
+	prev := 0
+	t := time.NewTicker(checkpointEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-t.C:
+		}
+		t0 := time.Now()
+		_, done, err := m.DB.CheckpointPassive()
+		if err != nil {
+			logx.Debugf("后台写回索引库失败: %v", err)
+			continue
+		}
+		n := done - prev
+		if done < prev {
+			n = done // WAL 从头复用了
+		}
+		prev = done
+		if n > 0 {
+			m.stats.addCheckpoint(time.Since(t0), int64(n))
 		}
 	}
 }
