@@ -97,7 +97,7 @@ iscc packaging\zhaozhao.iss
 | `.github/workflows/ocr-component.yml` | 改动 `packaging/rapidocr` | 只编译修好线程设置的 OCR 组件并和原版比较（改组件时快速看结果） |
 | `.github/workflows/release.yml` | 推送 `v*` 标签；或提交信息里带 `[release vX.Y.Z]` | 调用完整版构建，并发布完整版 zip、安装包、精简版 zip 到 GitHub Release |
 
-发布版本：`git tag v0.2.19 && git push origin v0.2.19`，或在推送的提交信息里写 `[release v0.2.19]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice、OCR 和 PDFium 组件**；精简版（主程序 + PDFium）需要按 `components\README.txt` 自行放入 LibreOffice 和 OCR。
+发布版本：`git tag v0.2.20 && git push origin v0.2.20`，或在推送的提交信息里写 `[release v0.2.20]`（GitHub 会在该提交上创建标签）。**完整版自带 LibreOffice、OCR 和 PDFium 组件**；精简版（主程序 + PDFium）需要按 `components\README.txt` 自行放入 LibreOffice 和 OCR。
 
 ### 组件
 

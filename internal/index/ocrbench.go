@@ -179,11 +179,15 @@ func (b *OCRBench) curves() (phys, smt effCurve) {
 // ocrSMTGain：用上超线程的搭配要比只用物理核心的最快搭配快这么多（而且每一轮都快这么多）才用（差不多时不用：
 // 进程多一倍、占内存、发热，实际处理真实文件时还可能更慢）。0.2.7 是 5%，某台电脑测速时快 15%，实际反而慢，
 // 0.2.8 起改成 10% 并要求每一轮都快；那时 OCR 组件设的线程数不起作用，测速忽高忽低。0.2.17 修好线程设置后，
-// 某位用户三轮的结果都稳定快 7%～9%，却因为不到 10% 没用上，0.2.18 起改回 5%（仍要求每一轮都快）。
-const ocrSMTGain = 1.05
+// 某位用户三轮的结果都稳定快 7%～9%，却因为不到 10% 没用上，0.2.18 起改回 5%（仍要求每一轮都快 5%）。
+// 0.2.19 同一台电脑三轮快 4.5%、5.9%、1.2%，又没用上。修好线程设置后测速很稳（同一种搭配各轮只差 1%～3%），
+// 最快的超线程搭配多半是「进程数不变、每个进程 2 线程」（6×2），不多占内存；0.2.20 起中位数快 3% 以上、
+// 每一轮都比只用物理核心快就用。
+const ocrSMTGain = 1.03
 
-// smtGain 返回用上超线程的最快搭配比只用物理核心的最快搭配快多少（倍数）；每一轮都要快 ocrSMTGain 以上才算
-// 稳定地快（steady 为 true）。没有可比的结果（没有超线程，或某一类全部失败）时返回 0。
+// smtGain 返回用上超线程的最快搭配比只用物理核心的最快搭配快多少（倍数，按各轮中位数）；中位数快 ocrSMTGain
+// 以上、每一轮都比只用物理核心快才算稳定地快（steady 为 true）。没有可比的结果（没有超线程，或某一类全部失败）
+// 时返回 0。
 func (b *OCRBench) smtGain() (gain float64, steady bool) {
 	if b == nil {
 		return 0, false
@@ -217,7 +221,7 @@ func (b *OCRBench) smtGain() (gain float64, steady bool) {
 				ph = max(ph, p.Runs[i])
 			}
 		}
-		steady = ph > 0 && sm > ph*ocrSMTGain
+		steady = ph > 0 && sm > ph
 	}
 	return gain, steady
 }
@@ -234,7 +238,7 @@ func (b *OCRBench) bestSMT() (OCRBenchPlan, bool) {
 	return best, ok
 }
 
-// smtFaster：用上超线程每一轮都比只用物理核心快 5% 以上。
+// smtFaster：用上超线程中位数快 3% 以上、每一轮都比只用物理核心快。
 func (b *OCRBench) smtFaster() bool {
 	_, ok := b.smtGain()
 	return ok
@@ -329,7 +333,7 @@ func smtNote(b *OCRBench) string {
 	case ok:
 		return fmt.Sprintf("（用上超线程快 %.0f%%，用全部逻辑处理器）", (gain-1)*100)
 	case gain > 1:
-		return fmt.Sprintf("（用上超线程只快 %.0f%%，不到 %.0f%% 或各轮不稳定，只用物理核心：进程多一倍、占内存，实际处理时未必更快）",
+		return fmt.Sprintf("（用上超线程只快 %.0f%%，不到 %.0f%% 或有一轮不比只用物理核心快，只用物理核心：实际处理时未必更快）",
 			(gain-1)*100, (ocrSMTGain-1)*100)
 	}
 	return "（超线程对 OCR 没有帮助，只用物理核心）"
@@ -573,7 +577,7 @@ func runOCRBench(ctx context.Context, budget int, cands []ocrPlan, models []stri
 const ocrSameSpeed = 0.97
 
 // choose 返回选用的搭配（Plans 的下标；-1 表示全部失败）：最快的，和它差不到 3% 的选总线程数少的（Fewer）；
-// 超线程没有每一轮都快 5% 以上时，只在只用物理核心的搭配里选（0.2.8 打包测试里 2×2 比 2×1 只快 0.1%，
+// 超线程没有稳定地快（见 smtGain）时，只在只用物理核心的搭配里选（0.2.8 打包测试里 2×2 比 2×1 只快 0.1%，
 // 以前标成「最快」，实际却按只用物理核心开进程）。
 func (b *OCRBench) choose() int {
 	_, smtOK := b.smtGain()

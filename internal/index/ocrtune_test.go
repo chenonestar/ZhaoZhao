@@ -130,7 +130,7 @@ func TestOCRSMT(t *testing.T) {
 	if b.smtFaster() {
 		t.Fatal("超线程只快 2.5% 时不用")
 	}
-	if !strings.Contains(b.Summary(), "用上超线程只快 2%，不到 5%") {
+	if !strings.Contains(b.Summary(), "用上超线程只快 2%，不到 3%") {
 		t.Fatal(b.Summary())
 	}
 }
@@ -303,7 +303,7 @@ func TestRunOCRBenchModels(t *testing.T) {
 	}
 }
 
-// 测速结果忽高忽低（同一种搭配两轮差 10% 以上）时再测一轮，取中位数。超线程要每一轮都快 5% 以上才用。
+// 测速结果忽高忽低（同一种搭配两轮差 10% 以上）时再测一轮，取中位数。超线程要中位数快 3% 以上、每一轮都更快才用。
 func TestRunOCRBenchRounds(t *testing.T) {
 	seq := map[ocrPlan][]float64{{6, 1}: {30, 40, 31}, {3, 2}: {28, 28, 28}, {1, 6}: {15, 15, 15}, {12, 1}: {36, 33, 34}, {6, 2}: {30, 30, 30}}
 	n := map[ocrPlan]int{}
@@ -324,7 +324,7 @@ func TestRunOCRBenchRounds(t *testing.T) {
 	if bp, _ := b.best(); bp.plan() != (ocrPlan{6, 1}) || b.smtFaster() {
 		t.Fatalf("%+v", b.Plans)
 	}
-	if s := b.Summary(); !strings.Contains(s, "用上超线程只快 10%，不到 5% 或各轮不稳定") {
+	if s := b.Summary(); !strings.Contains(s, "用上超线程只快 10%，不到 3% 或有一轮不比只用物理核心快") {
 		t.Fatal(s)
 	}
 	// 中位数快 16%，但第二轮反而慢 17%（物理核心那轮碰巧快）：不稳定，不用
@@ -334,7 +334,7 @@ func TestRunOCRBenchRounds(t *testing.T) {
 	}
 	b.Plans[0].Runs, b.Plans[3].Runs = []float64{30, 30, 31}, []float64{36, 34, 36}
 	if !b.smtFaster() {
-		t.Fatal("每轮都快 5% 以上时用超线程")
+		t.Fatal("每轮都更快、中位数快 3% 以上时用超线程")
 	}
 }
 
@@ -1025,5 +1025,24 @@ func TestOCRSMTUserBench(t *testing.T) {
 	}
 	if p, _ := m.autoPlanLocked(6, true, 0); p.procs*p.threads > 3 {
 		t.Fatalf("用电脑时减半照常推算：%v", p)
+	}
+}
+
+// 0.2.19 同一台电脑的测速：6×2 三轮比只用物理核心最快的快 4.5%、5.9%、1.2%（中位数 4.5%），应用上超线程。
+// 有一轮更慢时不用。
+func TestOCRSMTUserBench0219(t *testing.T) {
+	b := &OCRBench{Budget: 6, Logical: 12, Plans: []OCRBenchPlan{
+		{Procs: 6, Threads: 1, PerMin: 42.2, Runs: []float64{42.2, 36.1, 43.3}},
+		{Procs: 3, Threads: 2, PerMin: 42.1, Runs: []float64{42.1, 42.2, 41.0}},
+		{Procs: 1, Threads: 6, PerMin: 32.1, Runs: []float64{32.0, 32.1, 32.4}},
+		{Procs: 9, Threads: 1, PerMin: 41.4, Runs: []float64{40.0, 41.4, 42.4}},
+		{Procs: 6, Threads: 2, PerMin: 44.1, Runs: []float64{44.1, 44.7, 43.8}}}}
+	b.Best = b.choose()
+	if !b.smtFaster() || b.Plans[b.Best].plan() != (ocrPlan{6, 2}) {
+		t.Fatalf("应选 6×2：%+v", b.Plans[b.Best])
+	}
+	b.Plans[4].Runs = []float64{44.1, 44.7, 43.0} // 第三轮比 6×1 的 43.3 慢
+	if b.smtFaster() {
+		t.Fatal("有一轮更慢时不用超线程")
 	}
 }
