@@ -27,6 +27,9 @@ type Options struct {
 	// BigPageCheck 为真时 PDF 不识别，只数需要 OCR 的页里有几页是大幅面（结果的 BigPages）：0.2.12 及以前识别的
 	// 文件，大幅面页缩小了找文字，找出来重新识别。
 	BigPageCheck bool `json:"bigPageCheck,omitempty"`
+	// OCRShare 是多个 OCR 进程一起认同一个 PDF 时的共享目录；OCRHelper 为真时这个进程是帮手（见 ocrshare.go）。
+	OCRShare  string `json:"ocrShare,omitempty"`
+	OCRHelper bool   `json:"ocrHelper,omitempty"`
 
 	progress func(string) // 进度回调（不序列化：子进程里由 Serve 设置）
 }
@@ -71,6 +74,12 @@ func Extract(p, ext string, opt Options) (res doc.Result) {
 			finish(&res, opt)
 		}
 	}()
+	if opt.OCRHelper { // 帮别的进程认同一个 PDF 的页，结果写进共享目录
+		if ext != "pdf" {
+			return doc.Result{Status: doc.StatusOK}
+		}
+		return helpPDF(p, opt)
+	}
 	if opt.BigPageCheck { // 只查 PDF 的大幅面页，不提取
 		if ext != "pdf" {
 			return doc.Result{Status: doc.StatusOK}

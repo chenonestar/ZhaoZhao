@@ -196,3 +196,32 @@ func TestHashLookupsUseIndex(t *testing.T) {
 		}
 	}
 }
+
+// 写连接不在提交时自动写回主文件（WAL 一直增长），由后台的被动检查点写回；写回时不挡写入。
+func TestCheckpointPassive(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var ac int
+	if err := db.W.QueryRow(`PRAGMA wal_autocheckpoint`).Scan(&ac); err != nil || ac != 0 {
+		t.Fatalf("写连接应关掉自动检查点：%d %v", ac, err)
+	}
+	big := strings.Repeat("x", 3000)
+	for i := range 3000 { // 约 9 MB，超过默认自动检查点的 4 MB
+		if err := db.SetMeta(fmt.Sprint("k", i), big); err != nil {
+			t.Fatal(err)
+		}
+	}
+	log, done, err := db.CheckpointPassive()
+	if err != nil || log < 1000 || done != log {
+		t.Fatalf("WAL 里应攒着没写回的内容，后台一次写回：log %d done %d %v", log, done, err)
+	}
+	if err := db.SetMeta("after", "v"); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := db.GetMeta("after"); v != "v" {
+		t.Fatal("写回后照常读写")
+	}
+}

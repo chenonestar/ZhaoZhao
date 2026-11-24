@@ -76,6 +76,20 @@ func ChildrenCPU() (d time.Duration, ok bool) {
 	return time.Duration(a.TotalUserTime+a.TotalKernelTime) * 100, true
 }
 
+// ChildrenKernel 返回全部子进程累计用掉的 CPU 时间，以及其中花在系统内核里的（线程切换、等锁、内存分页等）。
+func ChildrenKernel() (total, kernel time.Duration, ok bool) {
+	j := killOnCloseJob()
+	if j == 0 {
+		return 0, 0, false
+	}
+	var a jobAccounting
+	if err := windows.QueryInformationJobObject(j, windows.JobObjectBasicAccountingInformation,
+		uintptr(unsafe.Pointer(&a)), uint32(unsafe.Sizeof(a)), nil); err != nil {
+		return 0, 0, false
+	}
+	return time.Duration(a.TotalUserTime+a.TotalKernelTime) * 100, time.Duration(a.TotalKernelTime) * 100, true
+}
+
 // lowerPriority 在子进程启动后调用：低优先级已在创建时设置，这里把它加入作业对象。
 func lowerPriority(cmd *exec.Cmd, lowest bool) {
 	j := killOnCloseJob()

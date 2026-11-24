@@ -43,6 +43,22 @@ func (d *DB) Checkpoint() error {
 	return err
 }
 
+// CheckpointPassive 在读连接上做一次被动检查点：把 WAL 里已提交的内容尽量写回主文件，不等读者、也不挡写入
+// （写连接照常往 WAL 末尾追加）。返回 WAL 里现在有几页、其中已经写回了几页（都从这一轮 WAL 的开头算，
+// WAL 从头复用后重新算）。
+//
+// 写连接关掉了自动检查点（wal_autocheckpoint=0）：SQLite 默认 WAL 超过 1000 页（4 MB）就在提交时顺手写回，
+// 建索引时几乎每次提交都要写回一次，写入线程就等着机械硬盘做随机写、等写完确认。0.2.18 某位用户的
+// 机械硬盘上提交占写入线程时间的 55%～80%，每个文件 10～20 毫秒；同一些页（全文索引的目录页、文件表的
+// 索引页）一批批反复改，每次写回都写一遍。改由后台每隔几秒写回一次：本地实测提交快 70%，总写盘量少一半。
+func (d *DB) CheckpointPassive() (log, done int, err error) {
+	var busy int
+	if err := d.R.QueryRow(`PRAGMA wal_checkpoint(PASSIVE)`).Scan(&busy, &log, &done); err != nil {
+		return 0, 0, err
+	}
+	return max(0, log), max(0, done), nil
+}
+
 // CheckpointIfLarge 在 WAL 文件超过 limit 字节时把它写回主文件并截短为 0（写入期间调用）。
 //
 // SQLite 的自动检查点不等读者：一直有人在搜索、刷新状态时，WAL 写回了也不能从头复用，

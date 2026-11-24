@@ -51,7 +51,42 @@ type OCRBench struct {
 	Model     string          `json:"model,omitempty"`
 	// CPUNote 是测速期间 CPU 的情况：实际频率、全部程序和别的程序各占几个逻辑处理器、电源计划（只有 Windows 取得到）
 	CPUNote string `json:"cpuNote,omitempty"`
+	// Mode 是选用的 OCR 组件（""：原版；ocrModeFixed：找找自己编译、修好线程设置的），Modes 是比较两者的结果。
+	// 先比较组件，再用选中的组件比较搭配。
+	Mode  string          `json:"mode,omitempty"`
+	Modes []OCRBenchModeR `json:"modes,omitempty"`
+	// Fewer：选用的搭配比最快的少用线程（差不到 ocrSameSpeed，进程少、占内存少、留出 CPU 给普通文件）。
+	Fewer bool `json:"fewer,omitempty"`
 }
+
+// ocrModeFixed：用找找自己编译、修好线程设置的 OCR 组件（extract.OCRConfig.Fixed）。0.2.16 比较过「限制辅助
+// 线程」「固定逻辑处理器」：前者没有效果（原版的线程不归它管），后者慢一半，0.2.17 起不再比较。
+const ocrModeFixed = "fixed"
+
+// ocrModeName 是组件的说明。
+func ocrModeName(mode string) string {
+	if mode == ocrModeFixed {
+		return "修好线程设置的组件"
+	}
+	return "原版组件"
+}
+
+// errModeUnavailable：这台电脑上没有这种组件（没有修好的版本），不比较。
+var errModeUnavailable = errors.New("没有这种组件")
+
+// OCRBenchModeR 是一种运行方式的实测结果（用同一种搭配）。
+type OCRBenchModeR struct {
+	Mode    string    `json:"mode"`
+	Procs   int       `json:"procs"`
+	Threads int       `json:"threads"`
+	PerMin  float64   `json:"perMin"`
+	Runs    []float64 `json:"runs,omitempty"`
+	Kernel  float64   `json:"kernel,omitempty"` // 子进程的 CPU 时间里系统内核占百分之几
+	Err     string    `json:"err,omitempty"`
+}
+
+// fixed 返回选用的是不是修好线程设置的组件。
+func (b *OCRBench) fixed() bool { return b != nil && b.Mode == ocrModeFixed }
 
 // cpuNote 把测速期间的 CPU 情况连同电源计划写成一句话。
 func cpuNote(c sysinfo.CPUStat) string {
@@ -90,11 +125,15 @@ func (b *OCRBench) modelPerMin(model string) float64 {
 type OCRBenchPlan struct {
 	Procs   int       `json:"procs"`
 	Threads int       `json:"threads"`
-	PerMin  float64   `json:"perMin"`         // 每分钟页数（各轮的中位数；0 表示失败）
-	Runs    []float64 `json:"runs,omitempty"` // 各轮的每分钟页数
-	SlotMem uint64    `json:"slotMem"`        // 每个名额（OCR 进程 + 解析进程）的内存峰值，字节
-	CPU     float64   `json:"cpu,omitempty"`  // 测速期间子进程实际平均占用几个逻辑处理器（0 表示取不到，只有 Windows 能取到）
-	Err     string    `json:"err,omitempty"`  // 失败的原因
+	PerMin  float64   `json:"perMin"`           // 每分钟页数（各轮的中位数；0 表示失败）
+	Runs    []float64 `json:"runs,omitempty"`   // 各轮的每分钟页数
+	SlotMem uint64    `json:"slotMem"`          // 每个名额（OCR 进程 + 解析进程）的内存峰值，字节
+	CPU     float64   `json:"cpu,omitempty"`    // 测速期间子进程实际平均占用几个逻辑处理器（0 表示取不到，只有 Windows 能取到）
+	Kernel  float64   `json:"kernel,omitempty"` // 子进程的 CPU 时间里系统内核占百分之几（只有 Windows 能取到）
+	Err     string    `json:"err,omitempty"`    // 失败的原因
+	// Probe：只为看进程多了以后变快多少而测的少进程搭配（1、2、3 个进程 × 1 线程）。不用来推算别的搭配的
+	// 速度，但差不多快时会选用（见 choose）。
+	Probe bool `json:"probe,omitempty"`
 }
 
 func (p OCRBenchPlan) plan() ocrPlan { return ocrPlan{p.Procs, p.Threads} }
@@ -117,7 +156,7 @@ func (b *OCRBench) curves() (phys, smt effCurve) {
 	}
 	eff := [2]map[int]float64{{}, {}}
 	for _, p := range b.Plans {
-		if p.Err != "" || p.PerMin <= 0 || p.Procs < 1 || p.Threads < 1 {
+		if p.Err != "" || p.PerMin <= 0 || p.Procs < 1 || p.Threads < 1 || p.Probe {
 			continue
 		}
 		k := 0
@@ -137,12 +176,18 @@ func (b *OCRBench) curves() (phys, smt effCurve) {
 	return curve(eff[0]), curve(eff[1])
 }
 
-// ocrSMTGain：用上超线程的搭配要比只用物理核心的最快搭配快这么多才用（差不多时不用：进程多一倍、占内存、
-// 发热，实际处理真实文件时还可能更慢）。0.2.7 是 5%，某台电脑测速时快 15%，实际反而慢。
-const ocrSMTGain = 1.10
+// ocrSMTGain：用上超线程的搭配要比只用物理核心的最快搭配快这么多（而且每一轮都快这么多）才用（差不多时不用：
+// 进程多一倍、占内存、发热，实际处理真实文件时还可能更慢）。0.2.7 是 5%，某台电脑测速时快 15%，实际反而慢，
+// 0.2.8 起改成 10% 并要求每一轮都快；那时 OCR 组件设的线程数不起作用，测速忽高忽低。0.2.17 修好线程设置后，
+// 某位用户三轮的结果都稳定快 7%～9%，却因为不到 10% 没用上，0.2.18 起改回 5%（仍要求每一轮都快 5%）。
+// 0.2.19 同一台电脑三轮快 4.5%、5.9%、1.2%，又没用上。修好线程设置后测速很稳（同一种搭配各轮只差 1%～3%），
+// 最快的超线程搭配多半是「进程数不变、每个进程 2 线程」（6×2），不多占内存；0.2.20 起中位数快 3% 以上、
+// 每一轮都比只用物理核心快就用。
+const ocrSMTGain = 1.03
 
-// smtGain 返回用上超线程的最快搭配比只用物理核心的最快搭配快多少（倍数）；每一轮都要快 ocrSMTGain 以上才算
-// 稳定地快（steady 为 true）。没有可比的结果（没有超线程，或某一类全部失败）时返回 0。
+// smtGain 返回用上超线程的最快搭配比只用物理核心的最快搭配快多少（倍数，按各轮中位数）；中位数快 ocrSMTGain
+// 以上、每一轮都比只用物理核心快才算稳定地快（steady 为 true）。没有可比的结果（没有超线程，或某一类全部失败）
+// 时返回 0。
 func (b *OCRBench) smtGain() (gain float64, steady bool) {
 	if b == nil {
 		return 0, false
@@ -150,7 +195,7 @@ func (b *OCRBench) smtGain() (gain float64, steady bool) {
 	var phys, smt float64
 	rounds := 0
 	for _, p := range b.Plans {
-		if p.Err != "" {
+		if p.Err != "" || p.Probe {
 			continue
 		}
 		if p.smt(b.Budget) {
@@ -167,7 +212,7 @@ func (b *OCRBench) smtGain() (gain float64, steady bool) {
 	for i := 0; i < rounds && steady; i++ {
 		var ph, sm float64
 		for _, p := range b.Plans {
-			if p.Err != "" || i >= len(p.Runs) {
+			if p.Err != "" || p.Probe || i >= len(p.Runs) {
 				continue
 			}
 			if p.smt(b.Budget) {
@@ -176,12 +221,24 @@ func (b *OCRBench) smtGain() (gain float64, steady bool) {
 				ph = max(ph, p.Runs[i])
 			}
 		}
-		steady = ph > 0 && sm > ph*ocrSMTGain
+		steady = ph > 0 && sm > ph
 	}
 	return gain, steady
 }
 
-// smtFaster：用上超线程每一轮都比只用物理核心快 10% 以上。
+// bestSMT 返回实测最快的用上超线程的搭配（加测的除外）。
+func (b *OCRBench) bestSMT() (OCRBenchPlan, bool) {
+	var best OCRBenchPlan
+	ok := false
+	for _, p := range b.Plans {
+		if p.Err == "" && p.PerMin > 0 && !p.Probe && p.smt(b.Budget) && (!ok || p.PerMin > best.PerMin) {
+			best, ok = p, true
+		}
+	}
+	return best, ok
+}
+
+// smtFaster：用上超线程中位数快 3% 以上、每一轮都比只用物理核心快。
 func (b *OCRBench) smtFaster() bool {
 	_, ok := b.smtGain()
 	return ok
@@ -210,14 +267,36 @@ func (b *OCRBench) Summary() string {
 		if p.CPU > 0 {
 			notes = append(notes, fmt.Sprintf("实际占用约 %.1f 个逻辑处理器", p.CPU))
 		}
+		if p.Kernel > 0 {
+			notes = append(notes, fmt.Sprintf("系统内核占 %.0f%%", p.Kernel))
+		}
 		if len(notes) > 0 {
 			s += "（" + strings.Join(notes, "，") + "）"
 		}
 		parts = append(parts, s)
 	}
 	s := strings.Join(parts, "，")
+	if len(b.Modes) > 0 {
+		var ms []string
+		for _, x := range b.Modes {
+			if x.Err != "" {
+				ms = append(ms, fmt.Sprintf("%s 失败（%s）", ocrModeName(x.Mode), x.Err))
+				continue
+			}
+			m := fmt.Sprintf("%s 每分钟 %.1f 页", ocrModeName(x.Mode), x.PerMin)
+			if x.Kernel > 0 {
+				m += fmt.Sprintf("（系统内核占 %.0f%%）", x.Kernel)
+			}
+			ms = append(ms, m)
+		}
+		pl := ocrPlan{b.Modes[0].Procs, b.Modes[0].Threads}
+		s = fmt.Sprintf("组件（%s）：%s；选用%s。搭配（%s）：%s", pl, strings.Join(ms, "，"), ocrModeName(b.Mode), ocrModeName(b.Mode), s)
+	}
 	if bp, ok := b.best(); ok {
 		s += "；选用：" + bp.plan().String()
+		if b.Fewer {
+			s += fmt.Sprintf("（和最快的差不到 %.0f%%，进程少、占内存少，给普通文件留出 CPU）", (1-ocrSameSpeed)*100)
+		}
 		if b.Logical > b.Budget {
 			s += smtNote(b)
 		}
@@ -254,7 +333,7 @@ func smtNote(b *OCRBench) string {
 	case ok:
 		return fmt.Sprintf("（用上超线程快 %.0f%%，用全部逻辑处理器）", (gain-1)*100)
 	case gain > 1:
-		return fmt.Sprintf("（用上超线程只快 %.0f%%，不到 %.0f%% 或各轮不稳定，只用物理核心：进程多一倍、占内存，实际处理时未必更快）",
+		return fmt.Sprintf("（用上超线程只快 %.0f%%，不到 %.0f%% 或有一轮不比只用物理核心快，只用物理核心：实际处理时未必更快）",
 			(gain-1)*100, (ocrSMTGain-1)*100)
 	}
 	return "（超线程对 OCR 没有帮助，只用物理核心）"
@@ -264,7 +343,9 @@ func smtNote(b *OCRBench) string {
 // 2：0.2.4 起有超线程的电脑还比较用上全部逻辑处理器的搭配。
 // 3：0.2.7 起用新认字模型比较搭配，再比较各个认字模型。
 // 4：0.2.8 起各种搭配交替测两轮以上取中位数，每个进程至少认 2 页。
-const ocrBenchVersion = 4
+// 5：0.2.16 起先比较运行方式（限制辅助线程、固定逻辑处理器），再加测 1、2、3 个进程。
+// 6：0.2.17 起比较原版组件和修好线程设置的组件。
+const ocrBenchVersion = 6
 
 // ocrMachineKey 是电脑连同 OCR 组件的指纹：处理器、核心数、内存（GB）、OCR 程序及其参数、测速方法。
 // 任何一项变了（换了电脑、加了内存、升级了 OCR 组件）都要重新测速。
@@ -272,6 +353,9 @@ func ocrMachineKey(m sysinfo.Machine, c extract.OCRConfig) string {
 	comp := filepath.Base(c.Command)
 	if st, err := os.Stat(c.Command); err == nil {
 		comp += fmt.Sprintf("/%d", st.Size())
+	}
+	if st, err := os.Stat(c.Fixed); c.Fixed != "" && err == nil {
+		comp += fmt.Sprintf("+%d", st.Size())
 	}
 	s := fmt.Sprintf("%s|%d|%d|%d|%s|%s|b%d", m.CPU, m.Cores, m.Logical, (m.MemTotal+(1<<29))>>30, comp, strings.Join(c.Args, " "), ocrBenchVersion)
 	h := sha1.Sum([]byte(s))
@@ -322,18 +406,19 @@ type benchRun struct {
 	perMin  float64
 	slotMem uint64
 	cpu     float64
+	kernel  float64 // 子进程的 CPU 时间里系统内核占百分之几
 	text    string
 }
 
 // ocrBenchRunner 用认字模型 model 实测一种搭配：pages 页平均分给各个进程（每个进程至少 ocrBenchMinEach 页）。
-type ocrBenchRunner func(ctx context.Context, model string, p ocrPlan, pages int) (benchRun, error)
+type ocrBenchRunner func(ctx context.Context, model, mode string, p ocrPlan, pages int) (benchRun, error)
 
 // runRetry 实测一次，失败时再试一次：同时启动很多个 OCR 组件时偶尔有一个启动失败（0.2.6 在某台电脑上
 // 9 个进程同时启动，有一个报文件共享冲突，可能是杀毒软件正在检查），不应因此判这种搭配不行。
-func runRetry(ctx context.Context, run ocrBenchRunner, model string, p ocrPlan, pages int) (benchRun, error) {
-	r, err := run(ctx, model, p, pages)
+func runRetry(ctx context.Context, run ocrBenchRunner, model, mode string, p ocrPlan, pages int) (benchRun, error) {
+	r, err := run(ctx, model, mode, p, pages)
 	if err != nil && ctx.Err() == nil {
-		r, err = run(ctx, model, p, pages)
+		r, err = run(ctx, model, mode, p, pages)
 	}
 	return r, err
 }
@@ -364,7 +449,13 @@ func runOCRBench(ctx context.Context, budget int, cands []ocrPlan, models []stri
 	if len(models) == 0 {
 		models = []string{""}
 	}
-	total := 2*len(cands) + len(models) - 1
+	cands, probe := withProbes(cands, budget)
+	modes := benchModes()
+	modePlan, modeOK := modeBenchPlan(cands, budget)
+	if !modeOK || len(modes) < 2 {
+		modes = nil
+	}
+	total := 2*len(cands) + len(models) - 1 + 2*len(modes)
 	step := 0
 	var failed []OCRBenchModel // 比较搭配时全部失败的模型
 	var baseText string
@@ -373,9 +464,21 @@ func runOCRBench(ctx context.Context, budget int, cands []ocrPlan, models []stri
 			continue
 		}
 		b.Plans, b.Best, b.PlanModel = nil, -1, model
+		if len(modes) > 0 && b.Modes == nil {
+			b.Modes, b.Mode = compareModes(ctx, run, model, modes, modePlan, pages, func(what string) {
+				if progress != nil {
+					progress(step, total, what)
+				}
+				step++
+			})
+			if !slices.ContainsFunc(b.Modes, func(x OCRBenchModeR) bool { return x.Err == "" }) {
+				b.Modes = nil // 这个模型用不了：换下一个模型时再比较
+				total += 2 * len(modes)
+			}
+		}
 		texts := make([]string, len(cands))
-		for _, c := range cands {
-			b.Plans = append(b.Plans, OCRBenchPlan{Procs: c.procs, Threads: c.threads})
+		for i, c := range cands {
+			b.Plans = append(b.Plans, OCRBenchPlan{Procs: c.procs, Threads: c.threads, Probe: probe[i]})
 		}
 		// round 测一轮：only 为 nil 时测全部搭配，否则只测 only 为 true 的
 		round := func(only func(p OCRBenchPlan) bool) {
@@ -388,7 +491,7 @@ func runOCRBench(ctx context.Context, budget int, cands []ocrPlan, models []stri
 					progress(step, total, c.String())
 				}
 				step++
-				r, err := runRetry(ctx, run, model, c, pages)
+				r, err := runRetry(ctx, run, model, b.Mode, c, pages)
 				if err != nil {
 					if ctx.Err() == nil {
 						p.PerMin, p.CPU, p.Runs, p.Err = 0, 0, nil, truncate(err.Error(), 200)
@@ -397,7 +500,7 @@ func runOCRBench(ctx context.Context, budget int, cands []ocrPlan, models []stri
 					continue
 				}
 				p.Runs = append(p.Runs, r.perMin)
-				p.SlotMem, p.CPU = max(p.SlotMem, r.slotMem), max(p.CPU, r.cpu)
+				p.SlotMem, p.CPU, p.Kernel = max(p.SlotMem, r.slotMem), max(p.CPU, r.cpu), max(p.Kernel, r.kernel)
 				if texts[i] == "" {
 					texts[i] = r.text
 				}
@@ -455,7 +558,7 @@ func runOCRBench(ctx context.Context, budget int, cands []ocrPlan, models []stri
 			progress(step, total, "认字模型 "+extract.OCRModelName(model))
 		}
 		step++
-		r, err := runRetry(ctx, run, model, best.plan(), pages)
+		r, err := runRetry(ctx, run, model, b.Mode, best.plan(), pages)
 		x := OCRBenchModel{Name: model, PerMin: r.perMin, Agree: agreement(r.text, baseText)}
 		if err != nil {
 			x = OCRBenchModel{Name: model, Err: truncate(err.Error(), 200)}
@@ -468,20 +571,124 @@ func runOCRBench(ctx context.Context, budget int, cands []ocrPlan, models []stri
 	return b
 }
 
-// choose 返回选用的搭配（Plans 的下标；-1 表示全部失败）：最快的；超线程没有每一轮都快 10% 以上时，只在只用
-// 物理核心的搭配里选（0.2.8 打包测试里 2×2 比 2×1 只快 0.1%，以前标成「最快」，实际却按只用物理核心开进程）。
+// ocrSameSpeed：比最快的搭配慢不到 3% 就算一样快，选用线程少的（进程少、占内存少，给普通文件留出 CPU）。
+// 某位用户的电脑上 OCR 进程从 6 个加到 12 个只快了 13%，6 个比 1 个也只快一半：瓶颈多半在内存带宽，
+// 再多开进程只是多占内存。
+const ocrSameSpeed = 0.97
+
+// choose 返回选用的搭配（Plans 的下标；-1 表示全部失败）：最快的，和它差不到 3% 的选总线程数少的（Fewer）；
+// 超线程没有稳定地快（见 smtGain）时，只在只用物理核心的搭配里选（0.2.8 打包测试里 2×2 比 2×1 只快 0.1%，
+// 以前标成「最快」，实际却按只用物理核心开进程）。
 func (b *OCRBench) choose() int {
 	_, smtOK := b.smtGain()
-	best := -1
+	ok := func(p OCRBenchPlan) bool { return p.Err == "" && p.PerMin > 0 && (smtOK || !p.smt(b.Budget)) }
+	fastest := -1
 	for i, p := range b.Plans {
-		if p.Err != "" || p.PerMin <= 0 || (!smtOK && p.smt(b.Budget)) {
+		if ok(p) && (fastest < 0 || p.PerMin > b.Plans[fastest].PerMin) {
+			fastest = i
+		}
+	}
+	b.Fewer = false
+	if fastest < 0 {
+		return -1
+	}
+	threads := func(i int) int { return b.Plans[i].Procs * b.Plans[i].Threads }
+	best := fastest
+	for i, p := range b.Plans {
+		if !ok(p) || p.PerMin < ocrSameSpeed*b.Plans[fastest].PerMin {
 			continue
 		}
-		if best < 0 || p.PerMin > b.Plans[best].PerMin {
+		if threads(i) < threads(best) || (threads(i) == threads(best) && p.PerMin > b.Plans[best].PerMin) {
 			best = i
 		}
 	}
+	b.Fewer = threads(best) < threads(fastest)
 	return best
+}
+
+// benchModes 返回要比较的组件（原版、修好的；没有修好的版本时测速返回 errModeUnavailable，不比较）。测试里换掉。
+var benchModes = func() []string { return []string{"", ocrModeFixed} }
+
+// benchProbes：测速时加测 1、2、3 个进程 × 1 线程（看进程多了以后变快多少）。测试里关掉。
+var benchProbes = true
+
+// withProbes 在要比较的搭配后面加上 1、2、3 个进程 × 1 线程（预算 4 以上、还没有这种搭配时），返回每种是否是加测的。
+func withProbes(cands []ocrPlan, budget int) ([]ocrPlan, []bool) {
+	probe := make([]bool, len(cands))
+	if !benchProbes || budget < 4 {
+		return cands, probe
+	}
+	out := slices.Clone(cands)
+	for n := 1; n <= 3; n++ {
+		if c := (ocrPlan{n, 1}); !slices.Contains(out, c) {
+			out, probe = append(out, c), append(probe, true)
+		}
+	}
+	return out, probe
+}
+
+// modeBenchPlan 返回比较运行方式用的搭配：只用物理核心、每个进程 1 线程、进程最多的（进程多时才看得出互相抢 CPU）。
+func modeBenchPlan(cands []ocrPlan, budget int) (ocrPlan, bool) {
+	var best ocrPlan
+	for _, c := range cands {
+		if c.threads == 1 && c.procs <= budget && c.procs > best.procs {
+			best = c
+		}
+	}
+	return best, best.procs >= 2
+}
+
+// compareModes 用搭配 p 比较原版组件和修好线程设置的组件：交替测两轮，取中位数。修好的不比原版慢 3% 以上就用它。
+func compareModes(ctx context.Context, run ocrBenchRunner, model string, modes []string, p ocrPlan, pages int, step func(what string)) ([]OCRBenchModeR, string) {
+	res := make([]OCRBenchModeR, len(modes))
+	for i, md := range modes {
+		res[i] = OCRBenchModeR{Mode: md, Procs: p.procs, Threads: p.threads}
+	}
+	for round := 0; round < 2; round++ {
+		for i, md := range modes {
+			x := &res[i]
+			if ctx.Err() != nil || x.Err != "" {
+				continue
+			}
+			step(p.String() + "，" + ocrModeName(md))
+			r, err := runRetry(ctx, run, model, md, p, pages)
+			if errors.Is(err, errModeUnavailable) {
+				x.Err = err.Error()
+				continue
+			}
+			if err != nil {
+				if ctx.Err() == nil {
+					x.Err, x.Runs, x.PerMin = truncate(err.Error(), 200), nil, 0
+				}
+				continue
+			}
+			x.Runs = append(x.Runs, r.perMin)
+			x.Kernel = max(x.Kernel, r.kernel)
+		}
+	}
+	res = slices.DeleteFunc(res, func(x OCRBenchModeR) bool { return x.Err == errModeUnavailable.Error() })
+	for i := range res {
+		if x := &res[i]; x.Err == "" && len(x.Runs) > 0 {
+			x.PerMin = median(x.Runs)
+		} else if x.Err == "" {
+			x.Err = "没有测完"
+		}
+	}
+	if len(res) < 2 {
+		return nil, "" // 只有原版组件：不用比较
+	}
+	// 修好的组件不比原版慢 3% 以上就用它：大幅面页不用另开进程，搭配也真正按测出的线程数开。原版用不了时
+	// （照理不会）用修好的
+	cur := 0
+	for i, x := range res {
+		if x.Mode == ocrModeFixed && x.Err == "" && (res[0].Err != "" || x.PerMin >= res[0].PerMin*ocrSameSpeed) {
+			cur = i
+		}
+	}
+	if res[cur].Err != "" {
+		return res, ""
+	}
+	return res, res[cur].Mode
 }
 
 func countPlans(ps []OCRBenchPlan, f func(OCRBenchPlan) bool) int {
@@ -550,7 +757,7 @@ func truncate(s string, n int) string {
 // 再同时开始（每个进程认 pages÷进程数页，至少 ocrBenchMinEach 页），按全部识别完的时间算每分钟页数（不含电脑睡眠的时间）；同时记下子进程用掉的 CPU 时间，
 // 算出实际平均占用几个逻辑处理器（RapidOCR 设了线程数，实际占用可能更多）。
 func poolBench(pool *worker.Pool, opts extract.Options, sample string) ocrBenchRunner {
-	return func(ctx context.Context, model string, pl ocrPlan, pages int) (benchRun, error) {
+	return func(ctx context.Context, model, mode string, pl ocrPlan, pages int) (benchRun, error) {
 		// 每种搭配都用新启动的进程：内存峰值是进程启动以来的，0.2.8 某次 OCR 引擎对比后马上测速，进程刚认过大 PDF，
 		// 6×1 记成每个 857 MB（实际约 455 MB）
 		pool.CloseIdle()
@@ -558,6 +765,10 @@ func poolBench(pool *worker.Pool, opts extract.Options, sample string) ocrBenchR
 		o := opts
 		o.OCR = o.OCR.WithModel(model)
 		o.OCR.Threads = pl.threads
+		if mode == ocrModeFixed && !o.OCR.HasFixed() {
+			return benchRun{}, errModeUnavailable
+		}
+		o.OCR.UseFixed = mode == ocrModeFixed
 		o.ReportMem = true
 		t := worker.Timeouts{Total: 10 * time.Minute}
 		var text string
@@ -595,14 +806,15 @@ func poolBench(pool *worker.Pool, opts extract.Options, sample string) ocrBenchR
 			return benchRun{}, err
 		}
 		each := max(ocrBenchMinEach, (pages+pl.procs-1)/pl.procs)
-		cpu0, cpuOK := worker.ChildrenCPU()
+		cpu0, k0, cpuOK := worker.ChildrenKernel()
 		d, mem, err := round(each)
 		if err != nil {
 			return benchRun{}, err
 		}
 		r := benchRun{perMin: float64(each*pl.procs) / d.Minutes(), slotMem: mem, text: text}
-		if cpu1, ok := worker.ChildrenCPU(); ok && cpuOK && d > 0 {
+		if cpu1, k1, ok := worker.ChildrenKernel(); ok && cpuOK && d > 0 && cpu1 > cpu0 {
 			r.cpu = float64(cpu1-cpu0) / float64(d)
+			r.kernel = 100 * float64(k1-k0) / float64(cpu1-cpu0)
 		}
 		return r, nil
 	}

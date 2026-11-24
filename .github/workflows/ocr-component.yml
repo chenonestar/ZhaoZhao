@@ -1,0 +1,49 @@
+name: OCR 组件
+
+# 自己编译 RapidOCR-json（线程数真正生效、每张图可以单独指定找文字的图多大），和原版比较。
+# 打包（bundle.yml）用同一个脚本编译；这个工作流只为改组件时快速看结果。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["claude/**"]
+    paths:
+      - ".github/workflows/ocr-component.yml"
+      - "packaging/rapidocr/**"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 编译
+        shell: pwsh
+        run: ./packaging/rapidocr/build.ps1 -Out ocr-zz
+      - name: 取原版组件
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ocr-dl, ocr-ex, comp | Out-Null
+          gh release download --repo hiroi-sora/RapidOCR-json --dir ocr-dl --pattern '*.7z'
+          foreach ($f in Get-ChildItem ocr-dl -Filter *.7z) { 7z x -y "-oocr-ex" $f.FullName | Select-Object -Last 2 }
+          $exe = Get-ChildItem ocr-ex -Recurse -Include 'RapidOCR-json.exe', 'RapidOCR_json.exe' | Select-Object -First 1
+          Copy-Item $exe.FullName comp\
+          Copy-Item (Join-Path $exe.DirectoryName 'models') comp\models -Recurse
+          Copy-Item ocr-zz\RapidOCR-json-zz.exe comp\
+          @('--models=models', '--det=ch_PP-OCRv4_det_infer.onnx', '--cls=ch_ppocr_mobile_v2.0_cls_infer.onnx',
+            '--rec=rec_ch_PP-OCRv4_infer.onnx', '--keys=dict_chinese.txt', '--ensureAscii=1') |
+            Set-Content comp\args.txt -Encoding utf8
+      - name: 和原版比较
+        shell: pwsh
+        run: |
+          python -m pip install --quiet --disable-pip-version-check psutil
+          $env:PYTHONIOENCODING = 'utf-8'
+          python packaging/rapidocr/compare.py comp (Resolve-Path comp\RapidOCR-json-zz.exe).Path (Resolve-Path internal\index\ocrsample.png).Path
+          if ($LASTEXITCODE -ne 0) { throw "修好的组件和原版不一致" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rapidocr-zz
+          path: ocr-zz/RapidOCR-json-zz.exe
+          retention-days: 14

@@ -85,6 +85,20 @@ jobs:
             Set-Content ZhaoZhao\components\ocr\args.txt -Encoding utf8
           Get-ChildItem ZhaoZhao\components\ocr | Format-Table Name, Length
 
+      # 原版组件设的线程数不起作用（每个进程都按物理核心数开线程，多个进程同时识别时互相抢），找找用同一版本的
+      # 源代码打补丁自己编译一个（还支持每张图单独指定找文字的图多大），和原版放在一起；程序测速时比较两者
+      - name: 编译修好线程设置的 OCR 组件（RapidOCR-json-zz.exe）
+        shell: pwsh
+        run: ./packaging/rapidocr/build.ps1 -Out ZhaoZhao\components\ocr
+
+      - name: 修好的 OCR 组件和原版比较（认出的字、线程数、速度）
+        shell: pwsh
+        run: |
+          python -m pip install --quiet --disable-pip-version-check psutil
+          $env:PYTHONIOENCODING = 'utf-8'
+          python packaging/rapidocr/compare.py ZhaoZhao\components\ocr (Resolve-Path ZhaoZhao\components\ocr\RapidOCR-json-zz.exe).Path (Resolve-Path internal\index\ocrsample.png).Path
+          if ($LASTEXITCODE -ne 0) { throw "修好的组件和原版不一致" }
+
       # 找找默认用新认字模型 PP-OCRv6 small（比组件自带的 PP-OCRv4 快、准得多），另带它的 INT8 量化版，
       # 程序测速时按本机实测选用哪个。模型取自 rapidocr 的安装包，量化用模拟文字行校准（见脚本说明）
       - name: 放入新认字模型（PP-OCRv6 small 和它的 INT8 量化版）

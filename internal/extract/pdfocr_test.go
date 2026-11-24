@@ -29,10 +29,14 @@ func TestMain(m *testing.M) {
 		for sc.Scan() {
 			var req struct {
 				ImagePath string `json:"image_path"`
+				Side      int    `json:"max_side_len"` // 修好的组件：这张图单独指定找文字的图多大
 			}
 			json.Unmarshal(sc.Bytes(), &req)
 			name := strings.TrimSuffix(filepath.Base(req.ImagePath), filepath.Ext(req.ImagePath))
-			if big {
+			if req.Side > 0 && req.Side != 2048 {
+				name = fmt.Sprintf("side%d-%s", req.Side, name) // 按比例找字：核对用了多大的图
+			}
+			if big || req.Side == 2048 {
 				name = "big-" + strings.Repeat("小字", 300)
 			}
 			fmt.Printf(`{"code":100,"data":[{"text":"fakepage-%s"}]}`+"\n", name)
@@ -125,6 +129,25 @@ func TestBigPageOCR(t *testing.T) {
 	c.SmallBigPages, c.Engine = false, OCRModelWin
 	if newBigOCR(c) != nil {
 		t.Fatal("Windows 自带 OCR 不用")
+	}
+	// 修好的组件：不另开进程，常驻的进程这张图单独用大图找字
+	c.Engine, c.Fixed, c.UseFixed = "", os.Args[0], true
+	if newBigOCR(c) != nil {
+		t.Fatal("用修好的组件时不另开进程")
+	}
+	if text, isBig, err := recognizePage(c, nil, path, image.Pt(2338, 3307)); err != nil || !isBig || !strings.Contains(text, "big-") {
+		t.Fatalf("大幅面页应单独用大图找字：%q %v %v", text, isBig, err)
+	}
+	if text, isBig, _ := recognizePage(c, nil, path, image.Pt(1654, 2339)); isBig || strings.Contains(text, "big-") {
+		t.Fatal("A4 页照常")
+	}
+	// 按比例找字：A3 页（200 dpi）用约 1448 像素，特别大的图纸最多 2048
+	c.BigScaled = true
+	if text, isBig, err := recognizePage(c, nil, path, image.Pt(2338, 3307)); err != nil || !isBig || !strings.Contains(text, "side1448-") {
+		t.Fatalf("A3 页应按比例用 1448 像素：%q %v %v", text, isBig, err)
+	}
+	if scaledSide(image.Pt(2700, 2000)) != 1182 || scaledSide(image.Pt(9000, 6000)) != 2048 || scaledSide(image.Pt(1000, 900)) != 1024 {
+		t.Fatal(scaledSide(image.Pt(2700, 2000)), scaledSide(image.Pt(9000, 6000)))
 	}
 }
 

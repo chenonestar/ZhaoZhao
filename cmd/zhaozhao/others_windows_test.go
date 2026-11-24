@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -43,7 +44,24 @@ func TestRunningOthersReal(t *testing.T) {
 	if got := runningOthers(data); len(got) != 0 {
 		t.Fatalf("同一个数据目录的不算别的找找：%+v", got)
 	}
-	if !quitInstance(o) {
-		t.Fatal("请它退出后 20 秒内应结束")
+	if !instanceRunning(data) {
+		t.Fatal("按进程号应认出它在用那个数据目录")
+	}
+	if ok, why := quitInstance(o); !ok {
+		t.Fatal("请它退出后 20 秒内应结束：" + why)
+	}
+	if instanceRunning(data) {
+		t.Fatal("退出后不应再算在运行")
+	}
+}
+
+// 程序文件里的版本信息：系统文件一定有。
+func TestExeVersion(t *testing.T) {
+	v := exeVersion(filepath.Join(os.Getenv("SystemRoot"), "System32", "kernel32.dll"))
+	if strings.Count(v, ".") < 2 {
+		t.Fatalf("kernel32.dll 的版本：%q", v)
+	}
+	if v := exeVersion(filepath.Join(t.TempDir(), "没有.exe")); v != "" {
+		t.Fatalf("没有的文件：%q", v)
 	}
 }

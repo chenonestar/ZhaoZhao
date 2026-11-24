@@ -57,7 +57,21 @@ type OCRConfig struct {
 	// SmallBigPages 为真时，大幅面的 PDF 页（比 A4 大）也和平常一样缩小了找文字（0.2.12 及以前的做法，OCR 引擎
 	// 对比用）；默认大幅面页用大图找字，见 bigOCR。
 	SmallBigPages bool `json:"smallBigPages,omitempty"`
+	// Fixed 是找找自己编译的组件（RapidOCR-json-zz.exe，见 packaging/rapidocr）：原版设的线程数不起作用（推理库
+	// 「节点内部」的线程数设置被注释掉了），每个进程都按物理核心数开线程，多个进程同时识别时线程数成倍超过
+	// CPU；修好的版本按设的线程数开，还能每张图单独指定找文字时的图多大。UseFixed 为真时用它（本机测速决定）。
+	Fixed    string `json:"fixed,omitempty"`
+	UseFixed bool   `json:"useFixed,omitempty"`
+	// BigScaled 为真时大幅面页找文字的图按页面大小成比例（scaledSide），不是一律 2048（要用修好的组件；
+	// 0.2.19 起用修好的组件时默认这样认，设置里打开「小字多的扫描件」时每页都用 2048）。
+	BigScaled bool `json:"bigScaled,omitempty"`
 }
+
+// fixedOn 说明这次用不用修好的组件。
+func (c OCRConfig) fixedOn() bool { return c.UseFixed && c.Fixed != "" }
+
+// HasFixed 说明有没有修好的组件。
+func (c OCRConfig) HasFixed() bool { return c.Fixed != "" }
 
 // args 返回启动 OCR 进程的参数。
 func (c OCRConfig) args() []string {
@@ -92,6 +106,9 @@ func FindOCR() OCRConfig {
 			if st, err := os.Stat(p); err == nil && !st.IsDir() {
 				c.Command = p
 				c.Args = readArgsFile(filepath.Join(dir, "args.txt"))
+				if f := filepath.Join(dir, fixedName); fileExists(f) {
+					c.Fixed = f
+				}
 				return c
 			}
 		}
@@ -103,6 +120,14 @@ func FindOCR() OCRConfig {
 		}
 	}
 	return c
+}
+
+// fixedName 是找找自己编译的组件的文件名（和原版放在一起，用同样的模型和参数）。
+const fixedName = "RapidOCR-json-zz.exe"
+
+func fileExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir()
 }
 
 // readArgsFile 读取组件目录里的 args.txt：每行一个启动参数（如 --models=models），# 开头为注释。
@@ -124,7 +149,7 @@ func readArgsFile(p string) []string {
 
 // ocrRequest 生成一行 OCR 请求。非 ASCII 字符一律写成 \uXXXX，反斜杠换成斜杠：
 // 组件按系统代码页读取命令行和管道，中文路径（如 C:\Users\张三\…）会因此出错。
-func ocrRequest(imgPath string) []byte {
+func ocrRequest(imgPath string, side int) []byte {
 	var b strings.Builder
 	b.WriteString(`{"image_path":"`)
 	for _, r := range filepath.ToSlash(imgPath) {
@@ -143,8 +168,11 @@ func ocrRequest(imgPath string) []byte {
 			fmt.Fprintf(&b, `\u%04x`, r)
 		}
 	}
-	b.WriteString(`"}`)
-	b.WriteByte('\n')
+	b.WriteByte('"')
+	if side > 0 {
+		fmt.Fprintf(&b, `,"max_side_len":%d`, side) // 修好的组件才认：这张图找文字时把长边缩到多少
+	}
+	b.WriteString("}\n")
 	return []byte(b.String())
 }
 
@@ -180,11 +208,15 @@ func OCRPeakMem() uint64 {
 }
 
 func (c OCRConfig) key() string {
-	return c.Engine + "\x00" + c.Command + "\x00" + strings.Join(c.args(), "\x00")
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%v", c.Engine, c.Command, strings.Join(c.args(), "\x00"), c.fixedOn())
 }
 
 func startOCR(c OCRConfig) (*ocrProc, error) {
-	cmd := exec.Command(c.Command, c.args()...)
+	exe := c.Command
+	if c.fixedOn() {
+		exe = c.Fixed // 和原版在同一个目录，用同样的模型和参数
+	}
+	cmd := exec.Command(exe, c.args()...)
 	cmd.Dir = filepath.Dir(c.Command)
 	if !filepath.IsAbs(c.Command) {
 		cmd.Dir = ""
@@ -250,6 +282,9 @@ func startOCR(c OCRConfig) (*ocrProc, error) {
 	if c.Threads > 0 {
 		threads = fmt.Sprintf("%d 线程", c.Threads)
 	}
+	if c.fixedOn() {
+		threads += "，修好线程设置的组件"
+	}
 	log.Printf("OCR 组件已启动（进程 %d，认字模型 %s，%s，加载模型用时 %.1fs）", cmd.Process.Pid,
 		OCRModelName(c.Model()), threads, time.Since(t0).Seconds())
 	return p, nil
@@ -314,11 +349,18 @@ type ocrResp struct {
 // （0.2.12 某位用户的 OCR 引擎对比：一个 A3 页平常认出 963 字，大图 1570 字；37 个 A4 页两种认法只差几个字）。
 const bigPageSide = 2600
 
+// scaledSide 返回大幅面页按比例找文字用的图多大：和 A4 页（200 dpi 长边约 2339 像素，找文字时缩到 1024）
+// 缩得一样多，字在找文字的图上和 A4 页一样大。最小 1024，最大 2048。
+func scaledSide(size image.Point) int {
+	return min(ocrBigSide, max(1024, (max(size.X, size.Y)*1024+2338/2)/2339))
+}
+
 // IsBigPage 说明这么大的页（像素）要不要用大图找字。
 func IsBigPage(size image.Point) bool { return max(size.X, size.Y) > bigPageSide }
 
 // bigOCR 是识别大幅面页用的 OCR 进程（找文字用大图）：一份文件里第一次遇到大幅面页时启动，文件识别完就结束，
-// 不多占内存。大幅面页不多，平常的页照样用常驻的进程。
+// 不多占内存。大幅面页不多，平常的页照样用常驻的进程。用修好的组件时不另开进程：常驻的进程每张图可以单独
+// 指定找文字的图多大（0.2.16 某位用户的 F 盘另开了 2126 次，每个名额的内存翻倍，程序以为内存不够少开了进程）。
 type bigOCR struct {
 	c     OCRConfig
 	p     *ocrProc
@@ -328,7 +370,7 @@ type bigOCR struct {
 // newBigOCR 返回识别大幅面页用的进程（还没启动）；不需要时（设置了大幅面页也缩小、Windows 自带 OCR、本来就用
 // 大图）返回 nil。
 func newBigOCR(c OCRConfig) *bigOCR {
-	if c.SmallBigPages || c.Engine == OCRModelWin || c.MaxSide >= ocrBigSide || !c.Enabled() {
+	if c.SmallBigPages || c.Engine == OCRModelWin || c.MaxSide >= ocrBigSide || !c.Enabled() || c.fixedOn() {
 		return nil
 	}
 	c.MaxSide = ocrBigSide
@@ -348,12 +390,32 @@ func (b *bigOCR) recognize(path string) (string, error) {
 		b.p = p
 	}
 	b.pages++
-	text, err := recognizeWith(b.p, b.c, path)
+	text, err := recognizeWith(b.p, b.c, path, 0)
 	if err != nil && (errors.Is(err, errOCRDead) || errors.Is(err, errOCRTimeout)) {
 		killOCR(b.p) // 进程已退出或卡住：下次重新启动
 		b.p = nil
 	}
 	return text, err
+}
+
+// recognizePage 识别 PDF 的一页：大幅面页用大图找字（另开的进程，或者修好的组件直接指定），别的页照常。
+func recognizePage(c OCRConfig, big *bigOCR, path string, size image.Point) (text string, isBig bool, err error) {
+	switch {
+	case !IsBigPage(size):
+		text, err = ocrImage(c, path)
+	case c.fixedOn() && c.BigScaled && !c.SmallBigPages && c.Engine == "" && c.MaxSide < ocrBigSide:
+		text, err = ocrImageSide(c, path, scaledSide(size))
+		isBig = true
+	case big != nil:
+		text, err = big.recognize(path)
+		isBig = true
+	case c.fixedOn() && !c.SmallBigPages && c.Engine == "" && c.MaxSide < ocrBigSide:
+		text, err = ocrImageSide(c, path, ocrBigSide)
+		isBig = true
+	default:
+		text, err = ocrImage(c, path)
+	}
+	return
 }
 
 func (b *bigOCR) close() {
@@ -364,7 +426,10 @@ func (b *bigOCR) close() {
 }
 
 // ocrImage 识别一张图片，返回按阅读顺序拼接的文字。
-func ocrImage(c OCRConfig, imgPath string) (string, error) {
+func ocrImage(c OCRConfig, imgPath string) (string, error) { return ocrImageSide(c, imgPath, 0) }
+
+// ocrImageSide 识别一张图片，side 大于 0 时找文字用长边这么多像素的图（只有修好的组件支持）。
+func ocrImageSide(c OCRConfig, imgPath string, side int) (string, error) {
 	if c.Engine == OCRModelWin {
 		return ocrImageWin(c, imgPath)
 	}
@@ -386,7 +451,7 @@ func ocrImage(c OCRConfig, imgPath string) (string, error) {
 		ocrCur = p
 	}
 	p := ocrCur
-	text, err := recognizeWith(p, c, imgPath)
+	text, err := recognizeWith(p, c, imgPath, side)
 	if err != nil && (errors.Is(err, errOCRDead) || errors.Is(err, errOCRTimeout)) {
 		log.Printf("OCR 组件（进程 %d）%v，结束后重新启动", p.cmd.Process.Pid, err)
 		killOCR(p) // 进程已退出或卡住：下次重新启动
@@ -447,8 +512,8 @@ var (
 )
 
 // recognizeWith 用一个已启动的 OCR 进程识别一张图片。
-func recognizeWith(p *ocrProc, c OCRConfig, imgPath string) (string, error) {
-	if _, err := p.in.Write(ocrRequest(imgPath)); err != nil {
+func recognizeWith(p *ocrProc, c OCRConfig, imgPath string, side int) (string, error) {
+	if _, err := p.in.Write(ocrRequest(imgPath, side)); err != nil {
 		return "", fmt.Errorf("%w: %v", errOCRDead, err)
 	}
 	sec := c.PageSec
@@ -900,44 +965,76 @@ func ocrPDFiumPages(d *pdfDoc, p string, pages []int, opt Options) (pdfOCRResult
 		logx.Debugf("PDF %s 第 %d 页%s，跳过", logx.P(p), pg, why)
 	}
 	logx.Debugf("PDF %s：共 %d 页，其中 %d 页没有文字层，渲染后 OCR", logx.P(p), d.pages(), len(pages))
-	ahead, stop := renderAhead(d, pages, tmp)
-	defer stop()
+	share := pageShare{opt.OCRShare}
+	var want func(int) bool
+	if share.on() {
+		share.writePages(pages)
+		want = func(pg int) bool { return share.claim(pg, true) }
+	}
 	big := newBigOCR(opt.OCR)
 	defer big.close()
-	for i, pg := range pages {
-		opt.Progress("第 %d/%d 页", i+1, len(pages))
-		r := <-ahead
-		if r.err != nil {
-			return res, r.err
+	bigPages := 0
+	own := map[int]bool{} // 自己认了的页
+	progress := func() { opt.Progress("第 %d/%d 页", min(len(own)+share.resultsIf()+1, len(pages)), len(pages)) }
+	// recognize 按顺序认 list 里 want 允许的页（want 为 nil 时全部认）
+	recognize := func(list []int, want func(int) bool) error {
+		ahead, stop := renderAhead(d, list, tmp, want)
+		defer stop()
+		for r := range ahead {
+			progress()
+			own[r.pg] = true
+			if r.err != nil {
+				return r.err
+			}
+			if r.skip != "" {
+				skip(r.pg, r.skip)
+				continue
+			}
+			if r.path == "" {
+				continue // 空白页
+			}
+			t1 := time.Now()
+			text, isBig, err := recognizePage(opt.OCR, big, r.path, r.size)
+			if isBig {
+				bigPages++
+			}
+			os.Remove(r.path)
+			if errors.Is(err, errOCRTimeout) {
+				skip(r.pg, "识别超时")
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			logx.Debugf("OCR %s 第 %d 页（%d/%d）渲染 %.1fs、识别 %.1fs，图片 %dx%d，识别出 %d 字，%s", logx.P(p), r.pg, len(own), len(pages),
+				r.dur.Seconds(), time.Since(t1).Seconds(), r.size.X, r.size.Y, len([]rune(text)), LastBoxes())
+			res.texts[r.pg] = text
 		}
-		if r.skip != "" {
-			skip(pg, r.skip)
-			continue
-		}
-		if r.path == "" {
-			continue // 空白页
-		}
-		t1 := time.Now()
-		var text string
-		if big != nil && IsBigPage(r.size) {
-			text, err = big.recognize(r.path)
-		} else {
-			text, err = ocrImage(opt.OCR, r.path)
-		}
-		os.Remove(r.path)
-		if errors.Is(err, errOCRTimeout) {
-			skip(pg, "识别超时")
-			continue
-		}
-		if err != nil {
-			return res, err
-		}
-		logx.Debugf("OCR %s 第 %d 页（%d/%d）渲染 %.1fs、识别 %.1fs，图片 %dx%d，识别出 %d 字，%s", logx.P(p), pg, i+1, len(pages),
-			r.dur.Seconds(), time.Since(t1).Seconds(), r.size.X, r.size.Y, len([]rune(text)), LastBoxes())
-		res.texts[pg] = text
+		return nil
 	}
-	if big != nil && big.pages > 0 {
-		logx.Debugf("PDF %s：%d 页是大幅面页，用大图找字", logx.P(p), big.pages)
+	if err := recognize(pages, want); err != nil {
+		return res, err
+	}
+	if share.on() {
+		var pending []int
+		for _, pg := range pages {
+			if !own[pg] {
+				pending = append(pending, pg)
+			}
+		}
+		if len(pending) > 0 {
+			left := collectShared(share, pending, res, progress)
+			logx.Debugf("PDF %s：%d 页由别的进程帮忙识别", logx.P(p), len(pending)-len(left))
+			if len(left) > 0 {
+				logx.Debugf("PDF %s：帮手没认完的 %d 页自己认", logx.P(p), len(left))
+				if err := recognize(left, nil); err != nil {
+					return res, err
+				}
+			}
+		}
+	}
+	if bigPages > 0 {
+		logx.Debugf("PDF %s：%d 页是大幅面页，用大图找字", logx.P(p), bigPages)
 	}
 	if n := res.note(); n != "" {
 		log.Printf("PDF %s：%s", logx.P(p), n)
@@ -947,6 +1044,7 @@ func ocrPDFiumPages(d *pdfDoc, p string, pages []int, opt Options) (pdfOCRResult
 
 // renderedPage 是渲染好、写成临时文件等着识别的一页。path 为空、skip 也为空表示空白页。
 type renderedPage struct {
+	pg   int // 页码
 	path string
 	size image.Point
 	dark int           // 深色像素数（大图再认时判断用）
@@ -955,21 +1053,26 @@ type renderedPage struct {
 	err  error         // 写临时文件失败：整份文件失败
 }
 
-// renderAhead 在另一个协程里按顺序渲染 pages，最多比识别提前一页（内存里、磁盘上最多多一页的图）。
+// renderAhead 在另一个协程里按顺序渲染 pages，最多比识别提前一页（内存里、磁盘上最多多一页的图）。want 不为
+// nil 时只渲染它允许的页（渲染前问，多个进程认同一个文件时用来占页）。渲染完全部的页后关闭通道。
 // stop 结束渲染并等协程退出：调用方返回后会释放 pdfiumMu、关闭文档，之后不能再碰 PDFium。
-func renderAhead(d *pdfDoc, pages []int, tmp string) (<-chan renderedPage, func()) {
+func renderAhead(d *pdfDoc, pages []int, tmp string, want func(int) bool) (<-chan renderedPage, func()) {
 	out := make(chan renderedPage, 1)
 	quit := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer close(out)
 		for _, pg := range pages {
 			select {
 			case <-quit:
 				return
 			default:
 			}
-			var r renderedPage
+			if want != nil && !want(pg) {
+				continue
+			}
+			r := renderedPage{pg: pg}
 			t0 := time.Now()
 			img, err := d.render(pg-1, 200, 3500)
 			switch {

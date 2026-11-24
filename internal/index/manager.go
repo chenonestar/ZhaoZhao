@@ -138,7 +138,8 @@ type Manager struct {
 	spaceAt      time.Time
 	components   []extract.ComponentStatus
 	compChecking bool
-	compModel    string // 自检 OCR 时用的认字模型
+	compModel    string       // 自检 OCR 时用的认字模型
+	ocrHelpers   atomic.Int64 // 正在帮忙识别大 PDF 的 OCR 进程数（ocrhelp.go）
 }
 
 // New 创建管理器。pool 为 nil 时在进程内提取（测试用）。
@@ -262,6 +263,8 @@ func (m *Manager) Start() error {
 	go m.keepAwakeLoop()
 	m.wg.Add(1)
 	go m.ocrTuneLoop()
+	m.wg.Add(1)
+	go m.checkpointLoop()
 	// 启动对账：处理未运行期间发生的变化（F-BG-02）
 	m.RescanAll()
 	return nil

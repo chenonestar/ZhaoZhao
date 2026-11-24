@@ -86,6 +86,13 @@ func (m *Manager) ocrModelNow() string {
 	return model
 }
 
+// ocrFixedNow 说明本机测速是否选了修好线程设置的 OCR 组件。
+func (m *Manager) ocrFixedNow() bool {
+	m.ocr.mu.Lock()
+	defer m.ocr.mu.Unlock()
+	return m.ocrBenchLocked().fixed() && m.ocrCfg.HasFixed()
+}
+
 // ocrMachine 返回本机的处理器、核心数、内存。
 func (m *Manager) ocrMachine() sysinfo.Machine {
 	m.ocr.mu.Lock()
@@ -127,6 +134,9 @@ func (m *Manager) ocrBenchLocked() *OCRBench {
 		}
 		m.ocr.key, m.ocr.keyFor = ocrMachineKey(m.ocr.machine, m.ocrCfg), comp
 		m.ocr.bench = m.loadOCRBench(m.ocr.key)
+		if b := m.ocr.bench; b != nil && b.Best >= 0 {
+			b.Best = b.choose() // 按现在的规则重新选（0.2.18 起超线程快 5% 就用，沿用以前的测速结果）
+		}
 	}
 	return m.ocr.bench
 }
@@ -151,8 +161,19 @@ func (m *Manager) autoPlanLocked(cores int, half bool, live int) (ocrPlan, int) 
 	total, avail := sysinfo.Memory()
 	m.ocr.memCap = m.memCapLocked(nextMemCap(m.ocr.memCap, ocrMemSlots(total, avail, slot, live)), awake.Now())
 	budget := ocrBudget(cores, half)
+	// 测速时少开几个进程也差不多快（瓶颈不在 CPU）：按测出的那种搭配开，不按每个线程的速度推算（推算以为进程
+	// 越多越快）
+	// 最快的就是加测的少进程搭配时也一样（0.2.16 某位用户测出 2 个进程最快，却按推算开了 6 个）
+	if bp, ok := b.best(); ok && (b.Fewer || bp.Probe) && bp.Procs <= m.ocr.memCap && bp.Procs*bp.Threads <= budget {
+		return bp.plan(), budget
+	}
 	phys, smt := b.curves()
 	if !half && b.smtFaster() {
+		// 按实测最快的超线程搭配开：推算会高估（0.2.17 某位用户 9×1 实测每分钟 42 页，按每个线程的速度推算 12×1
+		// 要 56 页，实际进程多了不会更快）。内存不够开那么多进程时再推算
+		if sp, ok := b.bestSMT(); ok && sp.Procs <= m.ocr.memCap {
+			return sp.plan(), b.Logical
+		}
 		return smt.bestPlan(b.Logical, m.ocr.memCap), b.Logical
 	}
 	return phys.bestPlan(budget, m.ocr.memCap), budget
@@ -248,8 +269,10 @@ func (m *Manager) ocrTuneStep() {
 	m.fastFirstStep(cfg)
 }
 
-// ocrTail：OCR 队列已经空了、正在识别的文件比进程少时（多半是排在最后的大文件），把空出来的线程平分给
-// 它们，从下一页起生效；队列里又有文件时恢复。连续两次（约 1 分钟）都这样才调整，免得队列偶尔见底时来回切换。
+// ocrTail：OCR 队列已经空了、正在识别的文件比进程少时（多半是排在最后的大文件），先让空着的进程当帮手，
+// 从后往前一起认剩下页数多的 PDF（ocrhelp.go）；还有空着的，再把线程平分给正在识别的文件，从下一页起生效
+// （多开进程比一个进程多开线程快得多，所以先加帮手）。队列里又有文件时恢复。
+// 连续两次（约 1 分钟）都这样才调整，免得队列偶尔见底时来回切换。
 // 不在收尾时，正在识别的文件用的线程比现在的搭配多（预算刚减半：用户开始用电脑、来了普通文件），也从下一页起
 // 减到现在的线程数，不等这个文件识别完。
 func (m *Manager) ocrTail(p ocrPlan, budget int) {
@@ -271,16 +294,23 @@ func (m *Manager) ocrTail(p ocrPlan, budget int) {
 		}
 	}
 	s.mu.Unlock()
+	busy := len(rs) + int(m.ocrHelpers.Load())
 	m.ocr.mu.Lock()
-	if !l.wantWork.Load() && len(rs) > 0 && len(rs) < p.procs {
+	if !l.wantWork.Load() && len(rs) > 0 && busy < p.procs {
 		m.ocr.tailSeen++
-	} else {
+	} else if l.wantWork.Load() || len(rs) == 0 {
 		m.ocr.tailSeen = 0
 	}
-	t := 0
-	if m.ocr.tailSeen >= 2 {
-		t = tailThreads(p, budget, len(rs))
+	tail := m.ocr.tailSeen >= 2
+	m.ocr.mu.Unlock()
+	if tail && busy < p.procs {
+		busy += m.ocrHelp(p.procs - busy)
 	}
+	t := 0
+	if tail {
+		t = tailThreads(p, budget, busy)
+	}
+	m.ocr.mu.Lock()
 	m.ocr.tail = t
 	m.ocr.mu.Unlock()
 	for _, r := range rs {
@@ -302,6 +332,7 @@ func (m *Manager) ocrTail(p ocrPlan, budget int) {
 
 // ocrTailOff：又有 OCR 文件开始处理，收尾时多分的线程立即收回（不等下一次调整）。
 func (m *Manager) ocrTailOff() {
+	m.stopOCRHelpers()
 	m.ocr.mu.Lock()
 	on := m.ocr.tail > 0
 	m.ocr.tail, m.ocr.tailSeen = 0, 0

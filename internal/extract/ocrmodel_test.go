@@ -51,4 +51,17 @@ func TestOCRModels(t *testing.T) {
 	if v := auto.WithModel(OCRModelV6); v.SmallBigPages || v.Model() != OCRModelV6 {
 		t.Fatal("换回 v6 时去掉标记")
 	}
+	// 大幅面页按比例找字：要有修好的组件（每张图单独指定），用它
+	if c.HasModel(OCRModelV6Scaled) || c.WithModel(OCRModelV6Scaled).BigScaled {
+		t.Fatal("没有修好的组件时不能按比例找字")
+	}
+	c.Fixed = exe
+	sc := c.WithModel(OCRModelV6Scaled)
+	// 记下的模型仍是 PP-OCRv6 small（默认就这样认，以前一律用 2048 认的文件不算别的模型）
+	if !c.HasModel(OCRModelV6Scaled) || !sc.BigScaled || !sc.fixedOn() || sc.Model() != OCRModelV6 || slices.Contains(c.Models(), OCRModelV6Scaled) {
+		t.Fatalf("按比例找字：%+v", sc)
+	}
+	if v := sc.WithModel(OCRModelV6); v.BigScaled || v.Model() != OCRModelV6 {
+		t.Fatal("换回 v6 时去掉标记")
+	}
 }

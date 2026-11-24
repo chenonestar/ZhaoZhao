@@ -130,7 +130,7 @@ func TestOCRSMT(t *testing.T) {
 	if b.smtFaster() {
 		t.Fatal("超线程只快 2.5% 时不用")
 	}
-	if !strings.Contains(b.Summary(), "用上超线程只快 2%，不到 10%") {
+	if !strings.Contains(b.Summary(), "用上超线程只快 2%，不到 3%") {
 		t.Fatal(b.Summary())
 	}
 }
@@ -231,7 +231,7 @@ func sprint(ps []ocrPlan) string {
 func TestRunOCRBench(t *testing.T) {
 	speed := map[ocrPlan]float64{{4, 1}: 26, {2, 2}: 20, {1, 4}: 16}
 	var calls []string
-	run := func(ctx context.Context, model string, p ocrPlan, pages int) (benchRun, error) {
+	run := func(ctx context.Context, model, mode string, p ocrPlan, pages int) (benchRun, error) {
 		calls = append(calls, fmt.Sprintf("%v:%d", p, pages))
 		if p == (ocrPlan{2, 2}) {
 			return benchRun{}, errors.New("内存不足")
@@ -252,7 +252,7 @@ func TestRunOCRBench(t *testing.T) {
 	if ocrBenchPages(2) != 4 || ocrBenchPages(8) != 8 {
 		t.Fatal("预算太小时页数加倍")
 	}
-	bad := runOCRBench(context.Background(), 2, ocrCandidates(2, 32), nil, func(context.Context, string, ocrPlan, int) (benchRun, error) {
+	bad := runOCRBench(context.Background(), 2, ocrCandidates(2, 32), nil, func(context.Context, string, string, ocrPlan, int) (benchRun, error) {
 		return benchRun{}, errors.New("OCR 组件启动失败")
 	}, nil)
 	if _, ok := bad.best(); ok || bad.Err != "OCR 组件启动失败" {
@@ -268,7 +268,7 @@ func TestRunOCRBenchModels(t *testing.T) {
 		"win": "通知各部门做好安全检查工作"}
 	speed := map[string]float64{"v6": 20, "v6q": 24, "v4": 18, "win": 60}
 	var calls []string
-	run := func(ctx context.Context, model string, p ocrPlan, pages int) (benchRun, error) {
+	run := func(ctx context.Context, model, mode string, p ocrPlan, pages int) (benchRun, error) {
 		calls = append(calls, model+"@"+p.String())
 		if speed[model] == 0 {
 			return benchRun{}, errors.New("组件异常退出")
@@ -303,11 +303,11 @@ func TestRunOCRBenchModels(t *testing.T) {
 	}
 }
 
-// 测速结果忽高忽低（同一种搭配两轮差 10% 以上）时再测一轮，取中位数。超线程要每一轮都快 10% 以上才用。
+// 测速结果忽高忽低（同一种搭配两轮差 10% 以上）时再测一轮，取中位数。超线程要中位数快 3% 以上、每一轮都更快才用。
 func TestRunOCRBenchRounds(t *testing.T) {
 	seq := map[ocrPlan][]float64{{6, 1}: {30, 40, 31}, {3, 2}: {28, 28, 28}, {1, 6}: {15, 15, 15}, {12, 1}: {36, 33, 34}, {6, 2}: {30, 30, 30}}
 	n := map[ocrPlan]int{}
-	run := func(ctx context.Context, model string, p ocrPlan, pages int) (benchRun, error) {
+	run := func(ctx context.Context, model, mode string, p ocrPlan, pages int) (benchRun, error) {
 		v := seq[p][n[p]]
 		n[p]++
 		return benchRun{perMin: v}, nil
@@ -320,11 +320,11 @@ func TestRunOCRBenchRounds(t *testing.T) {
 	if b.Plans[0].PerMin != 31 || len(b.Plans[0].Runs) != 3 {
 		t.Fatalf("应取中位数：%+v", b.Plans[0])
 	}
-	// 12×1 的中位数 34 比 6×1 的 31 快 9.7%：不到 10%，不用超线程，选用只用物理核心里最快的 6×1
+	// 12×1 的中位数 34 比 6×1 的 31 快 9.7%，但第二轮反而慢（33 对 40）：不稳定，不用超线程，选用只用物理核心里最快的 6×1
 	if bp, _ := b.best(); bp.plan() != (ocrPlan{6, 1}) || b.smtFaster() {
 		t.Fatalf("%+v", b.Plans)
 	}
-	if s := b.Summary(); !strings.Contains(s, "用上超线程只快 10%，不到 10%") {
+	if s := b.Summary(); !strings.Contains(s, "用上超线程只快 10%，不到 3% 或有一轮不比只用物理核心快") {
 		t.Fatal(s)
 	}
 	// 中位数快 16%，但第二轮反而慢 17%（物理核心那轮碰巧快）：不稳定，不用
@@ -334,7 +334,7 @@ func TestRunOCRBenchRounds(t *testing.T) {
 	}
 	b.Plans[0].Runs, b.Plans[3].Runs = []float64{30, 30, 31}, []float64{36, 34, 36}
 	if !b.smtFaster() {
-		t.Fatal("每轮都快 10% 以上时用超线程")
+		t.Fatal("每轮都更快、中位数快 3% 以上时用超线程")
 	}
 }
 
@@ -398,7 +398,7 @@ type fakeBench struct {
 func (f *fakeBench) install(t *testing.T) {
 	old := newOCRBenchRunner
 	newOCRBenchRunner = func(m *Manager, pool *worker.Pool, sample string) ocrBenchRunner {
-		return func(ctx context.Context, model string, p ocrPlan, pages int) (benchRun, error) {
+		return func(ctx context.Context, model, mode string, p ocrPlan, pages int) (benchRun, error) {
 			if st, err := os.Stat(sample); err != nil || st.Size() != int64(len(ocrSample)) {
 				return benchRun{}, fmt.Errorf("样张没写出来：%v", err)
 			}
@@ -616,7 +616,10 @@ func TestPoolBenchReal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cleanup()
-	r, err := poolBench(pool, opts, sample)(context.Background(), "", ocrPlan{2, 1}, 4)
+	if _, err := poolBench(pool, opts, sample)(context.Background(), "", ocrModeFixed, ocrPlan{1, 1}, 1); !errors.Is(err, errModeUnavailable) {
+		t.Fatalf("没有修好的组件时不比较：%v", err)
+	}
+	r, err := poolBench(pool, opts, sample)(context.Background(), "", "", ocrPlan{2, 1}, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -636,7 +639,7 @@ func TestPoolBenchReal(t *testing.T) {
 		t.Fatalf("内存峰值 %d", mem)
 	}
 	opts.OCR.Command = filepath.Join(t.TempDir(), "没有这个程序")
-	if _, err := poolBench(pool, opts, sample)(context.Background(), "", ocrPlan{1, 1}, 1); err == nil {
+	if _, err := poolBench(pool, opts, sample)(context.Background(), "", "", ocrPlan{1, 1}, 1); err == nil {
 		t.Fatal("OCR 组件启动不了时应报错")
 	}
 }
@@ -863,7 +866,7 @@ VALUES(?,?,?,'',?,?,'',100,1,1,'','',0,?,'',?,1)`, r.ID, r.VolumeID, name, name,
 // 0.2.8 打包测试的结果：超线程的 2×2 只比 2×1 快 0.1%，选用 2×1，日志里不再写「最快：2×2」又说只用物理核心。
 func TestOCRBenchChooseNoSMT(t *testing.T) {
 	speed := map[ocrPlan]float64{{2, 1}: 21.8, {1, 2}: 17.4, {4, 1}: 19.7, {2, 2}: 21.9}
-	run := func(ctx context.Context, model string, p ocrPlan, pages int) (benchRun, error) {
+	run := func(ctx context.Context, model, mode string, p ocrPlan, pages int) (benchRun, error) {
 		return benchRun{perMin: speed[p]}, nil
 	}
 	b := runOCRBench(context.Background(), 2, ocrBenchCandidates(2, 4, 32), nil, run, nil)
@@ -873,5 +876,173 @@ func TestOCRBenchChooseNoSMT(t *testing.T) {
 	}
 	if s := b.Summary(); !strings.Contains(s, "选用：2 个进程 × 1 线程（用上超线程只快 0%") {
 		t.Fatal(s)
+	}
+}
+
+// 先比较原版组件和修好线程设置的组件，再用选中的组件比较搭配，加测 1、2、3 个进程；少开进程也差不多快时
+// 选进程少的，自动时按它开。
+func TestRunOCRBenchModesAndProbes(t *testing.T) {
+	oldModes, oldProbes := benchModes, benchProbes
+	benchModes = func() []string { return []string{"", ocrModeFixed} }
+	benchProbes = true
+	t.Cleanup(func() { benchModes, benchProbes = oldModes, oldProbes })
+	// 模拟：原版组件每个进程都开满线程，3 个进程以后不再变快；修好的版本按设的线程数开，快 20%
+	speed := func(mode string, p ocrPlan) float64 {
+		v := float64(min(p.procs*p.threads, 3)) * 10
+		if p.procs == 1 && p.threads > 1 {
+			v *= 0.8 // 一个进程里多线程有损耗
+		}
+		if mode == ocrModeFixed {
+			v *= 1.2
+		}
+		return v
+	}
+	var calls []string
+	run := func(ctx context.Context, model, mode string, p ocrPlan, pages int) (benchRun, error) {
+		calls = append(calls, mode+"@"+fmt.Sprintf("%d×%d", p.procs, p.threads))
+		return benchRun{perMin: speed(mode, p), kernel: 3}, nil
+	}
+	b := runOCRBench(context.Background(), 6, ocrCandidates(6, 32), nil, run, nil)
+	if b.Mode != ocrModeFixed || len(b.Modes) != 2 || !b.fixed() {
+		t.Fatalf("修好的组件快 20%% 应选它：%+v", b.Modes)
+	}
+	if strings.Join(calls[:4], " ") != "@6×1 fixed@6×1 @6×1 fixed@6×1" {
+		t.Fatalf("两种组件交替测两轮，用进程最多的 6×1：%v", calls)
+	}
+	for _, c := range calls[4:] {
+		if !strings.HasPrefix(c, ocrModeFixed+"@") {
+			t.Fatalf("比较搭配时用选中的组件：%v", calls)
+		}
+	}
+	probes := 0
+	for _, p := range b.Plans {
+		if p.Probe {
+			probes++
+		}
+	}
+	bp, ok := b.best()
+	if probes != 3 || !ok || bp.plan() != (ocrPlan{3, 1}) || !b.Fewer {
+		t.Fatalf("应加测 1、2、3 个进程，3 个进程和 6 个一样快，选 3×1：%+v", b.Plans)
+	}
+	if phys, _ := b.curves(); len(phys) == 0 || phys[0].perThread != 6 {
+		t.Fatalf("加测的搭配不用来推算：%+v", phys)
+	}
+	s := b.Summary()
+	for _, w := range []string{"组件（6 个进程 × 1 线程）：原版组件 每分钟 30.0 页（系统内核占 3%），修好线程设置的组件 每分钟 36.0 页",
+		"选用修好线程设置的组件", "选用：3 个进程 × 1 线程（和最快的差不到 3%"} {
+		if !strings.Contains(s, w) {
+			t.Fatalf("缺少「%s」：%s", w, s)
+		}
+	}
+	// 修好的组件只慢一点（不到 3%）也用它；慢得多时用原版；没有修好的组件时不比较
+	slightly := func(ctx context.Context, model, mode string, p ocrPlan, pages int) (benchRun, error) {
+		v := speed("", p)
+		if mode == ocrModeFixed {
+			v *= 0.98
+		}
+		return benchRun{perMin: v}, nil
+	}
+	if b := runOCRBench(context.Background(), 6, ocrCandidates(6, 32), nil, slightly, nil); !b.fixed() {
+		t.Fatalf("%+v", b.Modes)
+	}
+	slower := func(ctx context.Context, model, mode string, p ocrPlan, pages int) (benchRun, error) {
+		v := speed("", p)
+		if mode == ocrModeFixed {
+			v *= 0.9
+		}
+		return benchRun{perMin: v}, nil
+	}
+	if b := runOCRBench(context.Background(), 6, ocrCandidates(6, 32), nil, slower, nil); b.fixed() || len(b.Modes) != 2 {
+		t.Fatalf("%+v", b.Modes)
+	}
+	none := func(ctx context.Context, model, mode string, p ocrPlan, pages int) (benchRun, error) {
+		if mode == ocrModeFixed {
+			return benchRun{}, errModeUnavailable
+		}
+		return benchRun{perMin: speed("", p)}, nil
+	}
+	if b := runOCRBench(context.Background(), 6, ocrCandidates(6, 32), nil, none, nil); b.fixed() || len(b.Modes) != 0 {
+		t.Fatalf("没有修好的组件时不比较：%+v", b.Modes)
+	}
+}
+
+// 测速时少开进程也差不多快（Fewer）：自动时按测出的那种搭配开，不按每个线程的速度推算；预算或内存不够时照常推算。
+func TestOCRAutoPlanFewer(t *testing.T) {
+	e := newEnvWith(t, &fakeProv{}, "", nil)
+	m := e.m
+	m.ocr.mu.Lock()
+	defer m.ocr.mu.Unlock()
+	m.ocrBenchLocked()
+	b := &OCRBench{Budget: 6, Logical: 6, Plans: []OCRBenchPlan{
+		{Procs: 6, Threads: 1, PerMin: 35}, {Procs: 3, Threads: 2, PerMin: 32}, {Procs: 1, Threads: 6, PerMin: 27},
+		{Procs: 1, Threads: 1, PerMin: 20, Probe: true}, {Procs: 2, Threads: 1, PerMin: 30, Probe: true}, {Procs: 3, Threads: 1, PerMin: 34.5, Probe: true}}}
+	b.Best = b.choose()
+	if !b.Fewer || b.Plans[b.Best].plan() != (ocrPlan{3, 1}) {
+		t.Fatalf("3×1 只慢 1.4%%，应选它：%+v", b)
+	}
+	m.ocr.bench = b
+	if p, _ := m.autoPlanLocked(6, false, 0); p != (ocrPlan{3, 1}) {
+		t.Fatalf("应按 3×1 开：%v", p)
+	}
+	if p, _ := m.autoPlanLocked(2, false, 0); p.procs*p.threads > 2 {
+		t.Fatalf("预算只有 2 时照常推算：%v", p)
+	}
+	// 0.2.16 某位用户：加测的 2×1 就是最快的（不是「差不多快选少的」），却按推算开了 6 个进程
+	b = &OCRBench{Budget: 6, Logical: 12, Plans: []OCRBenchPlan{
+		{Procs: 6, Threads: 1, PerMin: 33.6}, {Procs: 3, Threads: 2, PerMin: 31.6}, {Procs: 1, Threads: 6, PerMin: 26.6},
+		{Procs: 9, Threads: 1, PerMin: 36.9}, {Procs: 6, Threads: 2, PerMin: 34.2},
+		{Procs: 1, Threads: 1, PerMin: 26.6, Probe: true}, {Procs: 2, Threads: 1, PerMin: 37.4, Probe: true}, {Procs: 3, Threads: 1, PerMin: 31.6, Probe: true}}}
+	b.Best = b.choose()
+	m.ocr.bench = b
+	if p, _ := m.autoPlanLocked(6, false, 0); b.Fewer || p != (ocrPlan{2, 1}) {
+		t.Fatalf("最快的是加测的 2×1，应按它开：%v（Fewer %v）", p, b.Fewer)
+	}
+}
+
+// 0.2.17 某位用户（6 核 12 线程）的测速：6×2 每一轮都比只用物理核心最快的快 7%～9%，应用上超线程，按实测的
+// 6×2 开，不按每个线程的速度推算成 12×1（9×1 实测每分钟 42 页，推算 12×1 会有 56 页）。
+func TestOCRSMTUserBench(t *testing.T) {
+	b := &OCRBench{Budget: 6, Logical: 12, Plans: []OCRBenchPlan{
+		{Procs: 6, Threads: 1, PerMin: 41.7, Runs: []float64{40.4, 41.7, 43.0}},
+		{Procs: 3, Threads: 2, PerMin: 42.3, Runs: []float64{36.0, 42.6, 42.3}},
+		{Procs: 1, Threads: 6, PerMin: 32.0, Runs: []float64{32.0, 31.8, 32.2}},
+		{Procs: 9, Threads: 1, PerMin: 42.0, Runs: []float64{38.7, 42.4, 42.0}},
+		{Procs: 6, Threads: 2, PerMin: 46.1, Runs: []float64{43.5, 46.2, 46.1}},
+		{Procs: 1, Threads: 1, PerMin: 15.7, Probe: true}, {Procs: 2, Threads: 1, PerMin: 26.5, Probe: true},
+		{Procs: 3, Threads: 1, PerMin: 34.0, Probe: true}}}
+	b.Best = b.choose()
+	if !b.smtFaster() || b.Plans[b.Best].plan() != (ocrPlan{6, 2}) {
+		t.Fatalf("每轮都快 5%% 以上，应选 6×2：%+v", b.Plans[b.Best])
+	}
+	e := newEnvWith(t, &fakeProv{}, "", nil)
+	m := e.m
+	m.ocr.mu.Lock()
+	defer m.ocr.mu.Unlock()
+	m.ocrBenchLocked()
+	m.ocr.bench = b
+	if p, budget := m.autoPlanLocked(6, false, 0); p != (ocrPlan{6, 2}) || budget != 12 {
+		t.Fatalf("应按实测的 6×2 开：%v（预算 %d）", p, budget)
+	}
+	if p, _ := m.autoPlanLocked(6, true, 0); p.procs*p.threads > 3 {
+		t.Fatalf("用电脑时减半照常推算：%v", p)
+	}
+}
+
+// 0.2.19 同一台电脑的测速：6×2 三轮比只用物理核心最快的快 4.5%、5.9%、1.2%（中位数 4.5%），应用上超线程。
+// 有一轮更慢时不用。
+func TestOCRSMTUserBench0219(t *testing.T) {
+	b := &OCRBench{Budget: 6, Logical: 12, Plans: []OCRBenchPlan{
+		{Procs: 6, Threads: 1, PerMin: 42.2, Runs: []float64{42.2, 36.1, 43.3}},
+		{Procs: 3, Threads: 2, PerMin: 42.1, Runs: []float64{42.1, 42.2, 41.0}},
+		{Procs: 1, Threads: 6, PerMin: 32.1, Runs: []float64{32.0, 32.1, 32.4}},
+		{Procs: 9, Threads: 1, PerMin: 41.4, Runs: []float64{40.0, 41.4, 42.4}},
+		{Procs: 6, Threads: 2, PerMin: 44.1, Runs: []float64{44.1, 44.7, 43.8}}}}
+	b.Best = b.choose()
+	if !b.smtFaster() || b.Plans[b.Best].plan() != (ocrPlan{6, 2}) {
+		t.Fatalf("应选 6×2：%+v", b.Plans[b.Best])
+	}
+	b.Plans[4].Runs = []float64{44.1, 44.7, 43.0} // 第三轮比 6×1 的 43.3 慢
+	if b.smtFaster() {
+		t.Fatal("有一轮更慢时不用超线程")
 	}
 }
